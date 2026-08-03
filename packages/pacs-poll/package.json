@@ -14,8 +14,14 @@
     "npm": ">=10.0.0"
   },
   "devDependencies": {
-    "@sentry/esbuild-plugin": "^3.5.0",
+    "aws-cdk-lib": "2.263.0",
+    "@hookform/devtools": "4.2.0",
+    "@sentry/esbuild-plugin": "^5.4.0",
     "esbuild": "^0.25.1",
     "esbuild-plugin-copy": "^2.1.1"
+  },
+  "dependencies": {
+    "@langchain/core": "1.2.4",
+    "axios": "1.19.0"
   }
 }
