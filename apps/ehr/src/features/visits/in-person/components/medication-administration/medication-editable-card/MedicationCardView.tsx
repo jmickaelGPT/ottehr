@@ -1,0 +1,411 @@
+import { otherColors } from '@ehrTheme/colors';
+import ArrowBackIcon from '@mui/icons-material/ArrowBack';
+import CheckCircleOutline from '@mui/icons-material/CheckCircleOutline';
+import ErrorOutlineOutlined from '@mui/icons-material/ErrorOutlineOutlined';
+import { Box, CircularProgress, Grid, Paper, Typography, useTheme } from '@mui/material';
+import { Stack } from '@mui/system';
+import { DateTime } from 'luxon';
+import { useMemo } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import {
+  ExtendedMedicationDataForResponse,
+  IN_HOUSE_CONTAINED_MEDICATION_ID,
+  InHouseMedicationQuickPickData,
+  makeMedicationOrderUpdateRequestInput,
+  MEDICAL_HISTORY_CONFIG,
+  MedicationData,
+  MedicationOrderStatusesType,
+  UpdateMedicationOrderInput,
+} from 'utils';
+import { dataTestIds } from '../../../../../../constants/data-test-ids';
+import { Loader } from '../../../../shared/components/Loader';
+import { QuickPicksButton } from '../../../../shared/components/QuickPicksButton';
+import { OrderFieldsSelectsOptions } from '../../../hooks/useGetFieldOptions';
+import { getInHouseMedicationMARUrl } from '../../../routing/helpers';
+import { ButtonRounded } from '../../RoundedButton';
+import { MedicationStatusChip } from '../statuses/MedicationStatusChip';
+import { getFieldLabel, MedicationFieldType, MedicationOrderType, XsVariants } from './fieldsConfig';
+import { MedicationCardField } from './MedicationCardField';
+import { MedicationCptCodes } from './MedicationCptCodes';
+import { InHouseMedicationFieldType } from './utils';
+
+export interface InteractionsMessage {
+  style: 'loading' | 'warning' | 'success';
+  message: string;
+}
+
+type MedicationCardViewProps = {
+  type: MedicationOrderType;
+  onSave: (medicationSaveOrUpdateRequest: UpdateMedicationOrderInput) => void;
+  medication?: ExtendedMedicationDataForResponse;
+  fieldsConfig: Partial<
+    Record<
+      keyof MedicationData,
+      {
+        xs: XsVariants;
+        isRequired: boolean;
+      }
+    >
+  >;
+  localValues: Partial<MedicationData>;
+  selectedStatus?: MedicationOrderStatusesType;
+  isUpdating: boolean;
+  onFieldValueChange: <Field extends keyof MedicationData>(field: Field, value: MedicationData[Field]) => void;
+  onStatusSelect: (newStatus: MedicationOrderStatusesType) => void;
+  getFieldValue: <Field extends keyof MedicationData>(
+    field: Field,
+    type?: string
+  ) => MedicationData[Field] | '' | undefined;
+  showErrors: boolean;
+  fieldErrors: Record<string, boolean>;
+  getFieldType: (field: keyof MedicationData) => InHouseMedicationFieldType;
+  isEditable: boolean;
+  saveButtonText: string;
+  isSaveButtonDisabled: boolean;
+  selectsOptions: OrderFieldsSelectsOptions;
+  interactionsMessage?: InteractionsMessage;
+  onInteractionsMessageClick: () => void;
+  onDelete?: () => void;
+  isReadOnly?: boolean;
+  onQuickPickSelect?: (quickPick: (typeof MEDICAL_HISTORY_CONFIG.inHouseMedications.quickPicks)[number]) => void;
+  fhirQuickPicks?: InHouseMedicationQuickPickData[];
+  fhirQuickPicksLoading?: boolean;
+  onFhirQuickPickSelect?: (quickPick: InHouseMedicationQuickPickData) => void;
+  showQuickPickAddOption?: boolean;
+  isAdmin?: boolean;
+  onQuickPickAddOrUpdate?: () => void;
+};
+
+export const MedicationCardView: React.FC<MedicationCardViewProps> = ({
+  onSave,
+  medication,
+  fieldsConfig,
+  localValues,
+  selectedStatus,
+  isUpdating,
+  onFieldValueChange,
+  onStatusSelect,
+  getFieldValue,
+  type,
+  showErrors,
+  fieldErrors,
+  getFieldType,
+  isEditable,
+  saveButtonText,
+  isSaveButtonDisabled,
+  selectsOptions,
+  interactionsMessage,
+  onInteractionsMessageClick,
+  onDelete,
+  isReadOnly,
+  onQuickPickSelect,
+  fhirQuickPicks,
+  fhirQuickPicksLoading = false,
+  onFhirQuickPickSelect,
+  showQuickPickAddOption,
+  isAdmin,
+  onQuickPickAddOrUpdate,
+}) => {
+  const navigate = useNavigate();
+  const { id: appointmentId } = useParams();
+  const theme = useTheme();
+
+  const inHouseMedicationsquickPicksList = useMemo(() => {
+    const medispanCodeSet = selectsOptions.medicationId.medispanCodeSet ?? new Set<string>();
+    const ndcCodeSet = selectsOptions.medicationId.ndcCodeSet ?? new Set<string>();
+    type QuickPick = (typeof MEDICAL_HISTORY_CONFIG.inHouseMedications.quickPicks)[number];
+    const hasNdc = (pick: QuickPick): boolean => pick.ndc != null && ndcCodeSet.has(pick.ndc);
+    const hasMedispan = (pick: QuickPick): boolean =>
+      pick.dosespotId != null && medispanCodeSet.has(String(pick.dosespotId));
+    return MEDICAL_HISTORY_CONFIG.inHouseMedications.quickPicks.filter((f) => hasNdc(f) || hasMedispan(f));
+  }, [selectsOptions.medicationId.medispanCodeSet, selectsOptions.medicationId.ndcCodeSet]);
+
+  const showHardcodedQuickPicks =
+    (type === 'order-new' || type === 'order-edit') && onQuickPickSelect && inHouseMedicationsquickPicksList.length > 0;
+  const showFhirQuickPicks =
+    onFhirQuickPickSelect && (showQuickPickAddOption || (fhirQuickPicks && fhirQuickPicks.length > 0));
+
+  const OrderFooter = (): React.ReactElement => {
+    return (
+      <Box sx={{ minHeight: '40px' }} display="flex" justifyContent="space-between" alignItems="center">
+        <Box display="flex" gap={2}>
+          <ButtonRounded
+            data-testid={dataTestIds.orderMedicationPage.backButton}
+            variant="outlined"
+            onClick={() => navigate(getInHouseMedicationMARUrl(appointmentId!))}
+            color="primary"
+            size="large"
+            startIcon={<ArrowBackIcon />}
+          >
+            Back
+          </ButtonRounded>
+          {!isReadOnly && onDelete && type !== 'order-new' && (
+            <ButtonRounded onClick={onDelete} variant="outlined" color="error" size="large">
+              Delete Order
+            </ButtonRounded>
+          )}
+        </Box>
+        {isEditable && (
+          <ButtonRounded
+            data-testid={dataTestIds.orderMedicationPage.fillOrderToSaveButton}
+            disabled={isSaveButtonDisabled}
+            onClick={() =>
+              onSave(
+                makeMedicationOrderUpdateRequestInput({
+                  id: medication?.id,
+                  orderData: { ...localValues },
+                  newStatus: selectedStatus,
+                })
+              )
+            }
+            variant="contained"
+            color="primary"
+            size="large"
+          >
+            {saveButtonText}
+          </ButtonRounded>
+        )}
+      </Box>
+    );
+  };
+
+  const DispenseFooter = (): React.ReactElement => {
+    return (
+      <Box sx={{ minHeight: '40px' }} display="flex" justifyContent="space-between" alignItems="center">
+        <Box display="flex" gap={2}>
+          <MedicationStatusChip
+            isEditable={false}
+            medication={medication}
+            onClick={onStatusSelect}
+            status={selectedStatus}
+          />
+          {!isReadOnly && onDelete && type !== 'completed-edit' && (
+            <ButtonRounded onClick={onDelete} variant="outlined" color="error" size="large">
+              Delete Order
+            </ButtonRounded>
+          )}
+        </Box>
+        {isEditable && (
+          <Box display="flex" flexDirection="row" gap={2}>
+            <ButtonRounded
+              data-testid={dataTestIds.inHouseMedicationsPage.notAdministeredButton}
+              disabled={isSaveButtonDisabled}
+              onClick={() =>
+                onSave(
+                  makeMedicationOrderUpdateRequestInput({
+                    id: medication?.id,
+                    orderData: { ...localValues },
+                    newStatus: 'administered-not',
+                  })
+                )
+              }
+              variant="outlined"
+              color="primary"
+              size="large"
+            >
+              Not Administered
+            </ButtonRounded>
+            <ButtonRounded
+              data-testid={dataTestIds.inHouseMedicationsPage.partlyAdministeredButton}
+              disabled={isSaveButtonDisabled}
+              onClick={() =>
+                onSave(
+                  makeMedicationOrderUpdateRequestInput({
+                    id: medication?.id,
+                    orderData: { ...localValues },
+                    newStatus: 'administered-partly',
+                  })
+                )
+              }
+              variant="outlined"
+              color="primary"
+              size="large"
+            >
+              Partly Administered
+            </ButtonRounded>
+            <ButtonRounded
+              data-testid={dataTestIds.inHouseMedicationsPage.administeredButton}
+              disabled={isSaveButtonDisabled}
+              onClick={() =>
+                onSave(
+                  makeMedicationOrderUpdateRequestInput({
+                    id: medication?.id,
+                    orderData: { ...localValues },
+                    newStatus: 'administered',
+                  })
+                )
+              }
+              variant="contained"
+              color="primary"
+              size="large"
+            >
+              Administered
+            </ButtonRounded>
+          </Box>
+        )}
+      </Box>
+    );
+  };
+
+  return (
+    <Paper elevation={3} sx={{ p: 3, mb: 3 }}>
+      <Grid container spacing={2}>
+        {showFhirQuickPicks && (
+          <Grid item xs={12}>
+            <QuickPicksButton
+              quickPicks={fhirQuickPicks ?? []}
+              loading={fhirQuickPicksLoading}
+              getLabel={(qp) => {
+                const parts = [qp.name] as string[];
+                if (qp.dose != null && qp.units != null) {
+                  parts.push(`${qp.dose} ${qp.units}`);
+                }
+                return parts.join(', ');
+              }}
+              onSelect={onFhirQuickPickSelect!}
+              disabled={isUpdating}
+              showAddOption={showQuickPickAddOption}
+              isAdmin={isAdmin}
+              onAddOrUpdate={onQuickPickAddOrUpdate}
+            />
+          </Grid>
+        )}
+        {!showFhirQuickPicks && showHardcodedQuickPicks && (
+          <Grid item xs={12}>
+            <QuickPicksButton
+              quickPicks={inHouseMedicationsquickPicksList}
+              getLabel={(quickPick) => {
+                const parts = [quickPick.name] as string[];
+                if (quickPick.dose != null && quickPick.units != null) {
+                  parts.push(`${quickPick.dose} ${quickPick.units}`);
+                } else if (quickPick.dose != null) {
+                  parts.push(String(quickPick.dose));
+                }
+                if (quickPick.route != null) {
+                  const routeLabel =
+                    selectsOptions.route.options.find((o) => o.value === quickPick.route)?.label ?? quickPick.route;
+                  parts.push(routeLabel);
+                }
+                return parts.join(', ');
+              }}
+              onSelect={onQuickPickSelect}
+              disabled={isUpdating}
+            />
+          </Grid>
+        )}
+        <Grid
+          item
+          xs={12}
+          sx={{ display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}
+        >
+          {type !== 'order-new' && (
+            <Typography gutterBottom sx={{ height: '26px', display: 'flex', flexDirection: 'row', gap: 3 }}>
+              <span>Order ID: {medication?.id}</span>
+              <span>
+                {medication?.effectiveDateTime
+                  ? DateTime.fromISO(medication.effectiveDateTime).toFormat('MM/dd/yyyy hh:mm a')
+                  : ''}
+              </span>
+            </Typography>
+          )}
+          {isUpdating && (
+            <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center' }}>
+              <Loader size={24} height={'30px'} width={'30px'} />
+              <Box ml={1}>Saving...</Box>
+            </div>
+          )}
+        </Grid>
+        {Object.entries(fieldsConfig).map(([field, config]) => {
+          if (field === 'cptCodes') return null; // Rendered separately below
+          const value = getFieldValue(field as keyof MedicationData) as
+            | string
+            | number
+            | NonNullable<MedicationData['location']>
+            | undefined;
+          let renderValue: string | undefined;
+
+          // renderValue handles edge case when backend created new medication resource without id
+          if (field === 'medicationId' && medication?.medicationName && value === IN_HOUSE_CONTAINED_MEDICATION_ID) {
+            renderValue = medication.medicationName;
+          }
+
+          return (
+            <Grid item xs={config!.xs} key={field}>
+              <MedicationCardField
+                isEditable={isEditable && !(type === 'dispense' && field === 'medicationId')}
+                field={field as MedicationFieldType}
+                label={getFieldLabel(field as MedicationFieldType, type)}
+                type={getFieldType(field as keyof MedicationData)}
+                value={value}
+                renderValue={renderValue}
+                onChange={onFieldValueChange}
+                required={config!.isRequired}
+                showError={showErrors || fieldErrors[field]}
+                selectsOptions={selectsOptions}
+              />
+            </Grid>
+          );
+        })}
+        <Grid item xs={12}>
+          <MedicationCptCodes
+            cptCodes={localValues.cptCodes ?? []}
+            onChange={(codes) => onFieldValueChange('cptCodes', codes)}
+            isEditable={isEditable}
+          />
+        </Grid>
+        {interactionsMessage ? (
+          <Grid item xs={12}>
+            <Stack
+              style={{
+                background:
+                  interactionsMessage.style === 'warning'
+                    ? otherColors.lightErrorBg
+                    : interactionsMessage.style === 'success'
+                    ? otherColors.lightGreen
+                    : 'none',
+                padding: '16px',
+                borderRadius: '4px',
+                width: '100%',
+                cursor: 'pointer',
+              }}
+              alignItems="center"
+              direction="row"
+              onClick={onInteractionsMessageClick}
+            >
+              {interactionsMessage.style === 'warning' ? (
+                <ErrorOutlineOutlined style={{ width: '20px', height: '20px', color: theme.palette.error.main }} />
+              ) : interactionsMessage.style === 'success' ? (
+                <CheckCircleOutline style={{ width: '20px', height: '20px', color: theme.palette.success.main }} />
+              ) : (
+                <CircularProgress size="16px" />
+              )}
+              <Typography
+                variant="body2"
+                style={{
+                  color:
+                    interactionsMessage.style === 'warning'
+                      ? otherColors.lightErrorText
+                      : interactionsMessage.style === 'success'
+                      ? otherColors.darkGreenText
+                      : '#000',
+                  marginLeft: '12px',
+                }}
+                display="inline"
+              >
+                <span style={{ fontWeight: '500' }}>Interaction: </span>
+                {interactionsMessage.message}
+              </Typography>
+            </Stack>
+          </Grid>
+        ) : null}
+        <Grid item xs={12}>
+          {type === 'dispense' || type === 'dispense-not-administered' || type === 'completed-edit' ? (
+            <DispenseFooter />
+          ) : (
+            <OrderFooter />
+          )}
+        </Grid>
+      </Grid>
+    </Paper>
+  );
+};

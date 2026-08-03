@@ -1,0 +1,69 @@
+import { Box, Stack } from '@mui/material';
+import React, { useCallback } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { dataTestIds } from 'src/constants/data-test-ids';
+import { getNursingOrderCreateUrl } from 'src/features/visits/in-person/routing/helpers';
+import { useGetAppointmentAccessibility } from 'src/features/visits/shared/hooks/useGetAppointmentAccessibility';
+import { useAppointmentData } from 'src/features/visits/shared/stores/appointment/appointment.store';
+import { ButtonRounded } from '../../visits/in-person/components/RoundedButton';
+import { PageTitle } from '../../visits/shared/components/PageTitle';
+import { NursingOrdersTable, NursingOrdersTableColumn } from '../components/orders/NursingOrdersTable';
+
+const nursingOrdersColumns: NursingOrdersTableColumn[] = ['order', 'orderAdded', 'status'];
+
+export const NursingOrdersPage: React.FC = () => {
+  const navigate = useNavigate();
+  const { id: appointmentIdFromUrl } = useParams();
+  const { encounter } = useAppointmentData();
+  const appointmentId = appointmentIdFromUrl;
+  const encounterId = encounter?.id;
+  const { isAppointmentReadOnly: isReadOnly } = useGetAppointmentAccessibility();
+
+  const handleCreateOrder = useCallback((): void => {
+    if (!appointmentId) {
+      console.error('No appointment ID found');
+      return;
+    }
+
+    navigate(getNursingOrderCreateUrl(appointmentId));
+  }, [navigate, appointmentId]);
+
+  if (!appointmentId || !encounterId) {
+    return null;
+  }
+
+  return (
+    <Box>
+      <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
+        <PageTitle
+          label="Nursing Orders"
+          showIntakeNotesButton={false}
+          dataTestId={dataTestIds.nursingOrdersPage.title}
+        />
+        <Stack direction="row" spacing={2} alignItems="center">
+          {!isReadOnly && (
+            <ButtonRounded
+              variant="contained"
+              color="primary"
+              size={'medium'}
+              onClick={() => handleCreateOrder()}
+              sx={{
+                py: 1,
+                px: 5,
+              }}
+              data-testid={dataTestIds.nursingOrdersPage.orderButton}
+            >
+              Order
+            </ButtonRounded>
+          )}
+        </Stack>
+      </Box>
+      <NursingOrdersTable
+        columns={nursingOrdersColumns}
+        searchBy={{ field: 'encounterId', value: encounterId }}
+        appointmentId={appointmentId}
+        allowDelete={!isReadOnly}
+      />
+    </Box>
+  );
+};

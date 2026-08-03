@@ -1,0 +1,188 @@
+import { useMemo, useState } from 'react';
+import { FieldValues } from 'react-hook-form';
+import { useTranslation } from 'react-i18next';
+import { useNavigate, useParams } from 'react-router-dom';
+import { useCancelTelemedAppointmentMutation } from 'src/telemed/features/appointments';
+import { useOystehrAPIClient } from 'src/telemed/utils';
+import { FormInputType } from 'src/types';
+import {
+  APIError,
+  APPOINTMENT_NOT_FOUND_ERROR,
+  CANT_CANCEL_CHECKED_IN_APT_ERROR,
+  ServiceMode,
+  VALUE_SETS,
+} from 'utils';
+import { safelyCaptureException } from 'utils/lib/frontend/sentry';
+import ottehrApi from '../api/ottehrApi';
+import { PageContainer } from '../components';
+import { ErrorDialog, ErrorDialogConfig } from '../components/ErrorDialog';
+import PageForm from '../components/PageForm';
+import useAppointmentNotFoundInformation from '../helpers/information';
+import { useNavigateInFlow } from '../hooks/useNavigateInFlow';
+import { useUCZambdaClient } from '../hooks/useUCZambdaClient';
+import { useVisitContext } from './ThankYou';
+
+const CancellationReason = (): JSX.Element => {
+  const navigate = useNavigate();
+  const zambdaClient = useUCZambdaClient({ tokenless: true });
+  const apiClient = useOystehrAPIClient();
+  const [loading, setLoading] = useState(false);
+  const [notFound, setNotFound] = useState(false);
+  const [cancelErrorDialog, setCancelErrorDialog] = useState<ErrorDialogConfig | undefined>(undefined);
+
+  const { id: appointmentID } = useParams();
+  const navigateInFlow = useNavigateInFlow();
+
+  const { appointmentData } = useVisitContext();
+  const { t } = useTranslation();
+
+  const cancelTelemedAppointment = useCancelTelemedAppointmentMutation();
+
+  const isVirtualAppt = useMemo(() => {
+    return appointmentData?.appointment?.serviceMode === ServiceMode.virtual;
+  }, [appointmentData?.appointment?.serviceMode]);
+
+  const onSubmit = async (data: FieldValues): Promise<void> => {
+    try {
+      if (!zambdaClient) {
+        throw new Error('zambdaClient is not defined');
+      }
+      if (!appointmentID) {
+        throw new Error('no appointment ID provided');
+      }
+      const cancellationReasonAdditional =
+        data.cancellationReason === 'Other' ? data.cancellationReasonAdditional : undefined;
+
+      setLoading(true);
+
+      if (isVirtualAppt) {
+        if (!apiClient) {
+          throw new Error('apiClient is not defined');
+        }
+        await cancelTelemedAppointment.mutate(
+          {
+            apiClient,
+            appointmentID: appointmentID,
+            cancellationReason: data.cancellationReason,
+            cancellationReasonAdditional,
+          },
+          {
+            onSuccess: async () => {
+              setLoading(false);
+              navigateInFlow('cancellation-confirmation');
+            },
+            onError: (error) => {
+              setLoading(false);
+              if ((error as APIError)?.code === CANT_CANCEL_CHECKED_IN_APT_ERROR.code) {
+                setCancelErrorDialog({
+                  title: t('cancel.errors.checkedIn.title'),
+                  description: t('cancel.errors.checkedIn.description'),
+                  closeButtonText: t('cancel.errors.checkedIn.button'),
+                });
+              } else if ((error as APIError)?.code === APPOINTMENT_NOT_FOUND_ERROR.code) {
+                setNotFound(true);
+              } else {
+                console.error('error', error);
+                alert(t('cancel.errors.errorCanceling'));
+                safelyCaptureException(error);
+              }
+            },
+          }
+        );
+        return;
+      } else {
+        await ottehrApi.cancelAppointment(zambdaClient, {
+          appointmentID: appointmentID,
+          language: 'en', // replace with i18n.language to enable
+          cancellationReason: data.cancellationReason,
+          cancellationReasonAdditional,
+        });
+
+        setLoading(false);
+        navigateInFlow('cancellation-confirmation');
+      }
+    } catch (error: any) {
+      if ((error as APIError)?.code === CANT_CANCEL_CHECKED_IN_APT_ERROR.code) {
+        setCancelErrorDialog({
+          title: t('cancel.errors.checkedIn.title'),
+          description: t('cancel.errors.checkedIn.description'),
+          closeButtonText: t('cancel.errors.checkedIn.button'),
+        });
+      } else if ((error as APIError)?.code === APPOINTMENT_NOT_FOUND_ERROR.code) {
+        setNotFound(true);
+      } else {
+        console.log('error', error);
+        safelyCaptureException(error);
+        alert(t('cancel.errors.errorCanceling'));
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const appointmentNotFoundInformation = useAppointmentNotFoundInformation();
+
+  const cancelReasonOptions = useMemo(() => {
+    return isVirtualAppt ? VALUE_SETS.cancelReasonOptionsVirtualPatient : VALUE_SETS.cancelReasonOptionsInPersonPatient;
+  }, [isVirtualAppt]);
+
+  const formElements = useMemo<FormInputType[]>(
+    () => [
+      {
+        type: 'Select',
+        name: 'cancellationReason',
+        label: t('cancel.subtitle'),
+        required: true,
+        selectOptions: cancelReasonOptions,
+      },
+      {
+        type: 'Text',
+        name: 'cancellationReasonAdditional',
+        label: t('cancel.additionalReasonSubtitle'),
+        required: false,
+        hidden: true,
+        enableWhen: {
+          question: 'cancellationReason',
+          operator: '=',
+          answer: 'Other',
+        },
+      },
+    ],
+    [cancelReasonOptions, t]
+  );
+
+  if (notFound) {
+    return (
+      <PageContainer title={t('cancel.errors.errorCanceling')} description={appointmentNotFoundInformation}>
+        <></>
+      </PageContainer>
+    );
+  }
+
+  return (
+    <PageContainer title={t('cancel.title')}>
+      <PageForm
+        formElements={formElements}
+        controlButtons={{
+          loading: loading || cancelTelemedAppointment.isPending,
+          submitLabel: t('cancel.cancelButton'),
+          onBack: () => {
+            navigate(-1);
+          },
+        }}
+        onSubmit={onSubmit}
+      />
+      <ErrorDialog
+        open={!!cancelErrorDialog}
+        title={cancelErrorDialog?.title || ''}
+        description={cancelErrorDialog?.description || ''}
+        closeButtonText={cancelErrorDialog?.closeButtonText ?? ''}
+        handleClose={() => {
+          setCancelErrorDialog(undefined);
+        }}
+      />
+    </PageContainer>
+  );
+};
+
+export default CancellationReason;

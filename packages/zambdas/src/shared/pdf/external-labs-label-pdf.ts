@@ -1,0 +1,270 @@
+import Oystehr from '@oystehr/sdk';
+import { randomUUID } from 'crypto';
+import { DocumentReference } from 'fhir/r4b';
+import { DateTime } from 'luxon';
+import { StandardFonts } from 'pdf-lib';
+import {
+  BUCKET_NAMES,
+  createFilesDocumentReferences,
+  EXTERNAL_LAB_LABEL_PDF_BASE_NAME,
+  EXTERNAL_LAB_LABEL_PDF_DOC_REF_DOCTYPE,
+  ExternalLabsLabelConfig,
+  getPresignedURL,
+  LabelConfig,
+  Secrets,
+} from 'utils';
+import { makeZ3Url } from './../presigned-file-urls';
+import { createPresignedUrl, uploadObjectToZ3 } from './../z3Utils';
+import { getLabListResource } from './lab-pdf-utils';
+import { Y_POS_GAP as pdfClientGapSubtraction } from './pdf-consts';
+import { createPdfClient, PdfInfo } from './pdf-utils';
+import { PdfClientStyles, TextStyle } from './types';
+
+export const convertLabeConfigToPdfClientStyles = (labelConfig: LabelConfig): PdfClientStyles => {
+  const inchesToPoints = (sizeInches: number): number => {
+    // conversion factor is 1 point = 1/72 inches.
+    // pdf-lib uses Points not pixels
+    return sizeInches * 72;
+  };
+
+  const pdfClientStyles: PdfClientStyles = {
+    initialPage: {
+      width: inchesToPoints(labelConfig.widthInches),
+      height: inchesToPoints(labelConfig.heightInches),
+      pageMargins: {
+        left: inchesToPoints(labelConfig.marginLeftInches),
+        right: inchesToPoints(labelConfig.marginRightInches),
+        top: inchesToPoints(labelConfig.marginTopInches),
+        bottom: inchesToPoints(labelConfig.marginBottomInches),
+      },
+    },
+  };
+
+  return pdfClientStyles;
+};
+
+const createExternalLabsLabelPdfBytes = async (data: ExternalLabsLabelConfig): Promise<Uint8Array> => {
+  const { labelConfig, content } = data;
+
+  const pdfClientStyles = convertLabeConfigToPdfClientStyles(labelConfig);
+
+  const pdfClient = await createPdfClient(pdfClientStyles);
+  // the pdf client initializes YPos to some non-zero number and it's causing huge gaps
+  pdfClient.setY(pdfClient.getY() + pdfClientGapSubtraction - 15);
+
+  const CourierBold = await pdfClient.embedStandardFont(StandardFonts.CourierBold);
+  const Courier = await pdfClient.embedStandardFont(StandardFonts.Courier);
+
+  const baseFontSize = 7;
+  const baseSpacing = 2;
+
+  const textStyles: Record<string, TextStyle> = {
+    fieldText: {
+      fontSize: baseFontSize,
+      spacing: baseSpacing,
+      font: Courier,
+      newLineAfter: false,
+    },
+    fieldTextBold: {
+      fontSize: baseFontSize,
+      spacing: baseSpacing,
+      font: CourierBold,
+      newLineAfter: false,
+    },
+    fieldHeader: {
+      fontSize: baseFontSize,
+      font: CourierBold,
+      spacing: baseSpacing,
+    },
+  };
+
+  const NEWLINE_Y_DROP =
+    pdfClient.getTextDimensions('Any text used to get height', textStyles.fieldHeader).height + baseSpacing;
+
+  interface Column {
+    header?: string;
+    value: string;
+  }
+
+  // const columnGapPoints = pdfClientStyles.initialPage.width / 30;
+  const columnGapPoints = 0.0125;
+  const rightColumnXStart = pdfClientStyles.initialPage.width / 2 + columnGapPoints / 2;
+
+  const drawHeaderAndInlineText = (header: string, text: string): void => {
+    pdfClient.drawTextSequential(`${header}: `, textStyles.fieldHeader);
+    pdfClient.drawTextSequential(text, textStyles.fieldTextBold);
+  };
+
+  const drawColumnRowAndNewline = (leftColumn: Column, rightColumn: Column): void => {
+    const leftHeader = leftColumn.header ? `${leftColumn.header}: ` : '';
+
+    let startXPos = pdfClient.getLeftBound();
+    startXPos = pdfClient.drawStartXPosSpecifiedText(leftHeader, textStyles.fieldHeader, startXPos).endXPos;
+    pdfClient.drawStartXPosSpecifiedText(leftColumn.value, textStyles.fieldTextBold, startXPos);
+
+    // now start the right column
+    pdfClient.setX(rightColumnXStart);
+
+    const rightHeader = rightColumn.header ? `${rightColumn.header}: ` : '';
+
+    startXPos = pdfClient.drawStartXPosSpecifiedText(rightHeader, textStyles.fieldHeader, pdfClient.getX()).endXPos;
+    pdfClient.drawStartXPosSpecifiedText(rightColumn.value, textStyles.fieldTextBold, startXPos);
+    pdfClient.newLine(NEWLINE_Y_DROP);
+  };
+
+  // now we actually draw the label
+  /* 
+  Patient last name, first name
+  PID
+  DOB (in one column)       Collection date (in the next column)
+  Account number            
+  Requisition number (aka order number)
+  */
+  const {
+    patientLastName,
+    patientFirstName,
+    patientId,
+    patientDateOfBirth,
+    sampleCollectionDateAndTimezone,
+    accountNumber,
+    orderNumber,
+  } = content;
+
+  pdfClient.drawTextSequential(`${patientLastName}, ${patientFirstName}`, {
+    ...textStyles.fieldHeader,
+    fontSize: textStyles.fieldHeader.fontSize + 1,
+  });
+  pdfClient.newLine(NEWLINE_Y_DROP);
+
+  drawHeaderAndInlineText('PID', patientId);
+  pdfClient.newLine(NEWLINE_Y_DROP);
+
+  drawColumnRowAndNewline(
+    { header: 'DOB', value: getPatientDOBForLabelDisplay(patientDateOfBirth) },
+    { header: 'Coll', value: getSampleCollectionTimestampForLabelDisplay(sampleCollectionDateAndTimezone) }
+  );
+
+  drawHeaderAndInlineText('Acct #', accountNumber);
+  pdfClient.newLine(NEWLINE_Y_DROP);
+
+  drawHeaderAndInlineText('Req #', orderNumber);
+  pdfClient.newLine(NEWLINE_Y_DROP);
+
+  return await pdfClient.save();
+};
+
+export const getPatientDOBForLabelDisplay = (dob: DateTime | undefined): string => {
+  return dob ? dob.toFormat('MM/dd/yyyy') : '';
+};
+
+export const getSampleCollectionTimestampForLabelDisplay = (
+  sampleCollectionDateAndTimezone:
+    | {
+        sampleCollectionDate: DateTime;
+        timezone: string | undefined;
+      }
+    | undefined
+): string => {
+  const sampleCollectionDate = sampleCollectionDateAndTimezone?.sampleCollectionDate;
+  const timezone = sampleCollectionDateAndTimezone?.timezone;
+  console.log('for sampleCollectionDate, this is timestamp and timezone', sampleCollectionDate?.toISO(), timezone);
+
+  const zonedSampleCollectionDate =
+    timezone && sampleCollectionDate ? sampleCollectionDate.setZone(timezone) : sampleCollectionDate;
+
+  return zonedSampleCollectionDate ? zonedSampleCollectionDate.toFormat('MM/dd/yyyy') : '';
+};
+
+async function createExternalLabsLabelPDFHelper(
+  input: ExternalLabsLabelConfig,
+  patientUuid: string,
+  secrets: Secrets | null,
+  token: string
+): Promise<PdfInfo> {
+  console.log('Creating external labs label pdf bytes');
+
+  const pdfBytes = await createExternalLabsLabelPdfBytes(input).catch((error) => {
+    throw new Error('failed creating external labs label pdfBytes: ' + error.message);
+  });
+
+  console.log(`Created external labs label pdf bytes`);
+
+  const fileName = `${EXTERNAL_LAB_LABEL_PDF_BASE_NAME}-${input.content.orderNumber}.pdf`;
+
+  console.log(`Creating base file url for file ${fileName}`);
+
+  const baseFileUrl = makeZ3Url({
+    secrets,
+    fileName,
+    bucketName: BUCKET_NAMES.LABS,
+    patientID: patientUuid,
+  });
+
+  console.log('Uploading file to bucket, ', BUCKET_NAMES.LABS);
+
+  try {
+    const presignedUrl = await createPresignedUrl(token, baseFileUrl, 'upload');
+    await uploadObjectToZ3(pdfBytes, presignedUrl);
+  } catch (error: any) {
+    throw new Error(`failed uploading pdf ${fileName} to z3:  ${JSON.stringify(error.message)}`);
+  }
+
+  // for testing
+  // savePdfLocally(pdfBytes);
+
+  return { title: fileName, uploadURL: baseFileUrl };
+}
+
+export async function createExternalLabsLabelPDF(
+  labelConfig: ExternalLabsLabelConfig,
+  patientUuid: string,
+  encounterId: string,
+  serviceRequestID: string,
+  secrets: Secrets | null,
+  token: string,
+  oystehr: Oystehr
+): Promise<{ docRef: DocumentReference; presignedURL: string }> {
+  const pdfInfo = await createExternalLabsLabelPDFHelper(labelConfig, patientUuid, secrets, token);
+
+  console.log(`This is the made pdfInfo`, JSON.stringify(pdfInfo));
+
+  const labListResource = await getLabListResource(oystehr, patientUuid, secrets, pdfInfo.title);
+
+  const { docRefs } = await createFilesDocumentReferences({
+    files: [{ url: pdfInfo.uploadURL, title: pdfInfo.title }],
+    type: { coding: [EXTERNAL_LAB_LABEL_PDF_DOC_REF_DOCTYPE], text: 'External lab sample label' },
+    references: {
+      subject: {
+        reference: `Patient/${patientUuid}`,
+      },
+      context: {
+        related: [
+          {
+            reference: `ServiceRequest/${serviceRequestID}`,
+          },
+        ],
+        encounter: [{ reference: `Encounter/${encounterId}` }],
+      },
+    },
+    docStatus: 'final',
+    dateCreated: DateTime.now().setZone('UTC').toISO() ?? '',
+    oystehr,
+    searchParams: [{ name: 'related', value: `ServiceRequest/${serviceRequestID}` }],
+    generateUUID: randomUUID,
+    listResources: labListResource ? [labListResource] : [], // this for whatever reason needs to get added otherwise the function never adds the new docRef to the returned array
+  });
+
+  console.log(`These are the docRefs returned for the label: `, JSON.stringify(docRefs));
+
+  if (!docRefs.length) {
+    throw new Error('Unable to make docRefs for label');
+  }
+
+  const presignedURL = await getPresignedURL(pdfInfo.uploadURL, token);
+
+  if (!presignedURL) {
+    throw new Error('Failed to get presigned URL for External lab label PDF');
+  }
+
+  return { docRef: docRefs[0], presignedURL };
+}

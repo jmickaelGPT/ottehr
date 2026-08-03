@@ -1,0 +1,293 @@
+// cSpell:ignore tokenful
+import { CircularProgress, Typography } from '@mui/material';
+import { useQuery } from '@tanstack/react-query';
+import { FC, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { generatePath, Navigate, Outlet, useLocation, useOutletContext, useParams } from 'react-router-dom';
+import {
+  BRANDING_CONFIG,
+  getSelectors,
+  PatientInfo,
+  PROJECT_WEBSITE,
+  ServiceMode,
+  Timezone,
+  TIMEZONES,
+  VisitType,
+} from 'utils';
+import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
+import ottehrApi from '../api/ottehrApi';
+import { BOOKING_SLOT_ID_PARAM, bookingBasePath } from '../App';
+import { PageContainer } from '../components';
+import { ErrorDialog, ErrorDialogConfig } from '../components/ErrorDialog';
+import { useUCZambdaClient } from '../hooks/useUCZambdaClient';
+
+type BookingState = {
+  patientInfo: PatientInfo | undefined;
+};
+
+interface BookingStoreActions {
+  setPatientInfo: (info: PatientInfo | undefined) => void;
+  completeBooking: () => void;
+  handleLogout: () => void;
+}
+
+const BOOKING_INITIAL: BookingState = {
+  patientInfo: undefined,
+};
+
+const useBookingStore = create<BookingState & BookingStoreActions>()(
+  persist(
+    (set) => ({
+      ...BOOKING_INITIAL,
+      clear: () => {
+        set({
+          ...BOOKING_INITIAL,
+        });
+      },
+      setPatientInfo: (info: PatientInfo | undefined) => {
+        set((state) => {
+          return {
+            ...state,
+            patientInfo: info,
+          };
+        });
+      },
+      setPatients: (patients: PatientInfo[]) => {
+        set((state) => ({
+          ...state,
+          patients,
+        }));
+      },
+      completeBooking: () => {
+        set((state) => ({
+          ...state,
+          patientInfo: undefined,
+        }));
+        sessionStorage.removeItem(PROGRESS_STORAGE_KEY);
+      },
+      handleLogout: () => {
+        set(() => ({
+          ...BOOKING_INITIAL,
+        }));
+      },
+    }),
+    { name: 'ip-intake-booking-store' }
+  )
+);
+
+interface BookAppointmentContext
+  extends Omit<BookingState, 'redirectToStart'>,
+    Omit<BookingStoreActions, 'setLocationPath' | 'handleLogout'> {
+  slotId: string;
+  scheduleOwnerName: string;
+  scheduleOwnerType: string;
+  scheduleOwnerId: string;
+  /** Resolved booking Location for display — see get-slot-details. */
+  bookingLocationName?: string;
+  bookingLocationId?: string;
+  patients: PatientInfo[];
+  timezone: Timezone;
+  serviceMode: ServiceMode;
+  visitType: VisitType;
+  startISO: string;
+  endISO: string;
+  waitingMinutes: number | undefined;
+  patientsLoading: boolean;
+  originalBookingUrl?: string;
+}
+
+export const useBookingContext = (): BookAppointmentContext => {
+  const outletContext = useOutletContext<BookAppointmentContext>();
+  return {
+    ...outletContext,
+  };
+};
+
+export const PROGRESS_STORAGE_KEY = 'patient-information-progress';
+export const ACTIVE_SLOT_ID_KEY = 'active-slot-id';
+
+// cSpell:ignore prepatient
+const isPostPatientSelectionPath = (basePath: string, pathToCheck: string): boolean => {
+  // review is last step but we detect on submit instead so redirect doesn't jump
+  // the transition to the appointment page
+  const prepatientSelectionPaths = [basePath, `${basePath}/get-ready`, `${basePath}/patients`, `${basePath}/review`];
+  const normalized = pathToCheck.split('?')[0];
+  return !prepatientSelectionPaths.includes(normalized);
+};
+
+const BookingHome: FC = () => {
+  const { patientInfo, setPatientInfo, completeBooking } = getSelectors(useBookingStore, [
+    'patientInfo',
+    'setPatientInfo',
+    'completeBooking',
+    'handleLogout',
+  ]);
+  const { [BOOKING_SLOT_ID_PARAM]: slotIdParam } = useParams();
+
+  const { pathname } = useLocation();
+  // const navigate = useNavigate();
+  const tokenlessZambdaClient = useUCZambdaClient({ tokenless: true });
+  const tokenfulZambdaClient = useUCZambdaClient({ tokenless: false });
+  const [pageNotFound, _setPageNotFound] = useState(false);
+  const [errorConfig, setErrorConfig] = useState<ErrorDialogConfig | undefined>(undefined);
+  // const { isAuthenticated, isLoading: authIsLoading } = useAuth0();
+  const { t } = useTranslation();
+
+  const {
+    data: slotDetailsData,
+    error: getSlotDetailsError,
+    isLoading: slotDetailsLoading,
+    isFetching: slotDetailsFetching,
+    isRefetching: slotDetailsRefetching,
+  } = useQuery({
+    queryKey: ['get-slot-details', slotIdParam],
+    queryFn: () =>
+      tokenlessZambdaClient && slotIdParam
+        ? ottehrApi.getSlotDetails({ slotId: slotIdParam }, tokenlessZambdaClient)
+        : null,
+    enabled: Boolean(slotIdParam) && Boolean(tokenlessZambdaClient),
+  });
+
+  const slotDetailsLoadingInSomeWay = slotDetailsLoading || slotDetailsFetching || slotDetailsRefetching;
+
+  if (slotDetailsData) {
+    // console.log('Slot details data:', slotDetailsData);
+  } else if (getSlotDetailsError) {
+    console.log('Slot details error:', getSlotDetailsError);
+  } else {
+    // console.log('Slot details loading:', slotDetailsLoadingInSomeWay);
+  }
+
+  const {
+    data: patientsData,
+    error: _getPatientsError,
+    isLoading: patientsLoading,
+    isFetching: patientsFetching,
+    isRefetching: patientsRefetching,
+  } = useQuery({
+    queryKey: ['get-patients', slotIdParam],
+    queryFn: () => (tokenfulZambdaClient ? ottehrApi.getPatients(tokenfulZambdaClient) : null),
+    enabled: Boolean(tokenfulZambdaClient),
+  });
+
+  const patientsLoadingInSomeWay = patientsLoading || patientsFetching || patientsRefetching;
+
+  /*
+    console.log('patients data:', patientsData);
+    console.log('patients error:', getPatientsError);
+    console.log('patients loading:', patientsLoadingInSomeWay);
+    console.log('Slot details loading:', slotDetailsLoadingInSomeWay);
+  */
+
+  const outletContext: BookAppointmentContext | null = useMemo(() => {
+    if (!slotDetailsData) {
+      return null;
+    }
+
+    const waitingMinutesTemp: number | undefined = undefined;
+
+    const visitType = slotDetailsData.isWalkin ? VisitType.WalkIn : VisitType.PreBook;
+    const {
+      slotId,
+      serviceMode,
+      timezoneForDisplay: timezone,
+      startISO,
+      endISO,
+      ownerName,
+      ownerType,
+      ownerId,
+      originalBookingUrl,
+      bookingLocationId,
+      bookingLocationName,
+    } = slotDetailsData;
+    let scheduleOwnerType = 'Location';
+    if (ownerType === 'Practitioner') {
+      scheduleOwnerType = 'Provider';
+    }
+    if (ownerType === 'HealthcareService') {
+      scheduleOwnerType = 'Group';
+    }
+
+    return {
+      slotId,
+      startISO,
+      endISO,
+      patients: patientsData?.patients ?? [],
+      patientInfo,
+      waitingMinutes: waitingMinutesTemp,
+      visitType,
+      serviceMode,
+      timezone: timezone ?? TIMEZONES[0],
+      patientsLoading: patientsLoadingInSomeWay,
+      scheduleOwnerName: ownerName,
+      scheduleOwnerType,
+      scheduleOwnerId: ownerId,
+      bookingLocationId,
+      bookingLocationName,
+      originalBookingUrl,
+      setPatientInfo,
+      completeBooking,
+    };
+  }, [patientsData?.patients, slotDetailsData, patientInfo, patientsLoadingInSomeWay, setPatientInfo, completeBooking]);
+
+  // console.log('outlet context in root', outletContext);
+
+  // all this is to say, "if the user wound up somewhere in
+  // the booking flow by finishing the booking and then pounding
+  // the back button, escort them gently to the start of the flow"
+  if (!patientInfo) {
+    if (slotIdParam) {
+      const solvedPath = generatePath(pathname, {
+        slotId: slotIdParam,
+      });
+      const basePath = generatePath(bookingBasePath, {
+        slotId: slotIdParam,
+      });
+      const shouldStartAtBeginning = isPostPatientSelectionPath(basePath, solvedPath) && !patientsLoading;
+      // console.log('basePath, solvedPath, shouldSAB', basePath, solvedPath, shouldStartAtBeginning);
+      if (shouldStartAtBeginning) {
+        return <Navigate to={basePath} replace={true} />;
+      }
+    } else {
+      // console.log('there is NOT patient info');
+    }
+  } else {
+    // console.log('there is patient info');
+  }
+
+  if (pageNotFound) {
+    return (
+      <PageContainer title={t('welcome.errors.notFound.title')}>
+        <Typography variant="body1">
+          {t('welcome.errors.notFound.description', { PROJECT_NAME: BRANDING_CONFIG.projectName })}{' '}
+          <a href={PROJECT_WEBSITE}>{t('welcome.errors.notFound.link')}</a>.
+        </Typography>
+      </PageContainer>
+    );
+  }
+
+  if (slotDetailsLoadingInSomeWay) {
+    return (
+      <PageContainer title={t('welcome.loading')}>
+        <CircularProgress />
+      </PageContainer>
+    );
+  }
+
+  return (
+    <>
+      <Outlet context={{ ...outletContext }} />
+      <ErrorDialog
+        open={errorConfig != undefined}
+        title={errorConfig?.title ?? ''}
+        description={errorConfig?.description ?? ''}
+        closeButtonText={errorConfig?.closeButtonText ?? t('reviewAndSubmit.ok')}
+        handleClose={() => {
+          setErrorConfig(undefined);
+        }}
+      />
+    </>
+  );
+};
+export default BookingHome;

@@ -1,0 +1,383 @@
+import { OystehrSdkError } from '@oystehr/sdk/dist/cjs/errors';
+import { DateTime } from 'luxon';
+import { ReactElement, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { getExternalLabOrdersUrl } from 'src/features/visits/in-person/routing/helpers';
+import {
+  DEFAULT_LABS_ITEMS_PER_PAGE,
+  DeleteLabOrderZambdaInput,
+  EMPTY_PAGINATION,
+  ExternalLabsStatus,
+  GetLabOrdersParameters,
+  LabOrderDTO,
+  LabOrderListPageDTO,
+  LabOrderListPageDTOGrouped,
+  LabOrdersSearchBy,
+  PaginatedResponse,
+  PatientLabItem,
+  ReflexLabDTO,
+  SpecimenDateChangedParameters,
+  TaskReviewedParameters,
+  tryFormatDateToISO,
+} from 'utils';
+import { deleteLabOrder, getExternalLabOrders, updateLabOrderResources } from '../../../../api/api';
+import { useApiClients } from '../../../../hooks/useAppClients';
+import { useDeleteCommonLabOrderDialog } from '../../../common/useDeleteCommonLabOrderDialog';
+
+interface UsePatientLabOrdersResult<SearchBy extends LabOrdersSearchBy> {
+  labOrders: LabOrderDTO<SearchBy>[];
+  drDrivenResults: ReflexLabDTO[];
+  loading: boolean;
+  error: Error | null;
+  totalPages: number;
+  page: number;
+  setSearchParams: (searchParams: {
+    pageNumber?: number;
+    testTypeFilter?: string;
+    visitDateFilter?: DateTime | null;
+  }) => void;
+  orderableItemCodeFilter: string;
+  visitDateFilter: DateTime | null;
+  fetchLabOrders: (params: GetLabOrdersParameters) => Promise<void>;
+  showPagination: boolean;
+  deleteLabOrder: (params: DeleteLabOrderZambdaInput) => Promise<{ success: boolean; errorMsg?: string }>;
+  showDeleteLabOrderDialog: ({
+    serviceRequestId,
+    testItemName,
+    testItemStatus,
+  }: {
+    serviceRequestId: string;
+    testItemName: string;
+    testItemStatus: ExternalLabsStatus;
+  }) => void;
+  DeleteOrderDialog: ReactElement | null;
+  markTaskAsReviewed: (parameters: TaskReviewedParameters & { appointmentId?: string }) => Promise<void>;
+  saveSpecimenDate: (parameters: SpecimenDateChangedParameters) => Promise<void>;
+  patientLabItems: PatientLabItem[];
+  groupedLabOrdersForChartTable: LabOrderListPageDTOGrouped | undefined;
+  handleRejectedAbn: (serviceRequestId: string) => Promise<void>;
+}
+
+export const usePatientLabOrders = <SearchBy extends LabOrdersSearchBy>(
+  _searchBy: SearchBy,
+  refreshKey?: number
+): UsePatientLabOrdersResult<SearchBy> => {
+  const { oystehrZambda } = useApiClients();
+  const navigate = useNavigate();
+  const [labOrders, setLabOrders] = useState<LabOrderDTO<SearchBy>[]>([]);
+  const [groupedLabOrdersForChartTable, setGroupedLabOrdersForChartTable] = useState<
+    LabOrderListPageDTOGrouped | undefined
+  >(undefined);
+  const [drDrivenResults, setDrDrivenResults] = useState<ReflexLabDTO[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  const [totalPages, setTotalPages] = useState(1);
+  const [patientLabItems, setPatientLabItems] = useState<PatientLabItem[]>([]);
+
+  /**
+   * Search state management strategy:
+   *
+   * Page: object in useState to force useEffect re-runs even with same value
+   * Filters: refs to avoid re-renders when setting multiple filters and to get updated values synchronously
+   *
+   * Benefits:
+   * - Single useEffect handles all search logic (page + searchBy dependencies)
+   * - Filters can be set independently without triggering fetches
+   * - Page changes are the only fetch trigger (predictable data flow)
+   * - Simplified API: one setSearchParams method for everything
+   */
+  const [page, setPage] = useState({ pageNumber: 1 });
+  const testTypeFilterRef = useRef('');
+  const visitDateFilterRef = useRef<DateTime | null>(null);
+
+  const [showPagination, setShowPagination] = useState(false);
+
+  // calling without arguments will refetch the data with the current search params
+  const setSearchParams = useCallback(
+    (searchParams: { pageNumber?: number; testTypeFilter?: string; visitDateFilter?: DateTime | null }) => {
+      if (searchParams.testTypeFilter !== undefined) {
+        testTypeFilterRef.current = searchParams.testTypeFilter;
+      }
+      if (searchParams.visitDateFilter !== undefined) {
+        visitDateFilterRef.current = searchParams.visitDateFilter;
+      }
+      setPage((page) => ({ pageNumber: searchParams.pageNumber || page.pageNumber }));
+    },
+    []
+  );
+
+  // Memoize searchBy to prevent unnecessary re-renders
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const memoizedSearchBy = useMemo(() => _searchBy, [JSON.stringify(_searchBy)]);
+
+  const fetchLabOrders = useCallback(
+    async (searchParams: GetLabOrdersParameters): Promise<void> => {
+      if (!oystehrZambda) {
+        console.error('oystehrZambda is not defined');
+        return;
+      }
+
+      if (
+        !searchParams.searchBy.value ||
+        (Array.isArray(searchParams.searchBy.value) && searchParams.searchBy.value.length === 0)
+      ) {
+        // search params are not ready yet, that's ok probably
+        return;
+      }
+
+      setLoading(true);
+      setError(null);
+
+      try {
+        let response: PaginatedResponse<SearchBy>;
+        try {
+          response = await getExternalLabOrders(oystehrZambda, searchParams);
+        } catch (err) {
+          response = {
+            data: [],
+            pagination: EMPTY_PAGINATION,
+            patientLabItems: [],
+            drDrivenResults: [],
+          };
+          console.error('Error fetching external lab orders:', err);
+          setError(err instanceof Error ? err : new Error('Unknown error occurred'));
+        }
+
+        if (response?.data) {
+          setLabOrders(response.data as LabOrderDTO<SearchBy>[]);
+          setPatientLabItems(response.patientLabItems || []);
+          setDrDrivenResults(response.drDrivenResults as ReflexLabDTO[]);
+
+          if (searchParams.searchBy.field === 'encounterId') {
+            setGroupedLabOrdersForChartTable(groupLabOrderListPageDTOs(response.data, response.drDrivenResults));
+          }
+
+          if (response.pagination) {
+            setTotalPages(response.pagination.totalPages || 1);
+            setShowPagination(response.pagination.totalPages > 1);
+          } else {
+            setTotalPages(1);
+            setShowPagination(false);
+          }
+        } else {
+          setLabOrders([]);
+          setDrDrivenResults([]);
+          setPatientLabItems([]);
+          setTotalPages(1);
+          setShowPagination(false);
+        }
+      } catch (error) {
+        console.error('error with setting external lab orders:', error);
+        setError(error instanceof Error ? error : new Error('Unknown error occurred'));
+        setLabOrders([]);
+        setPatientLabItems([]);
+        setTotalPages(1);
+        setShowPagination(false);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [oystehrZambda]
+  );
+
+  useEffect(() => {
+    if (page.pageNumber < 1) {
+      throw Error('Page number must be greater than 0');
+    }
+
+    const params: GetLabOrdersParameters = {
+      itemsPerPage: DEFAULT_LABS_ITEMS_PER_PAGE,
+      ...memoizedSearchBy,
+      ...(testTypeFilterRef.current && { orderableItemCode: testTypeFilterRef.current }),
+      ...(visitDateFilterRef.current &&
+        visitDateFilterRef.current.isValid && { visitDate: tryFormatDateToISO(visitDateFilterRef.current) }),
+    };
+
+    const searchParams = { ...params, pageIndex: page.pageNumber - 1 };
+
+    if (searchParams.searchBy.field && searchParams.searchBy.value) {
+      void fetchLabOrders(searchParams);
+    } else {
+      console.error('searchParams are not valid', searchParams);
+    }
+  }, [fetchLabOrders, page, memoizedSearchBy, refreshKey]);
+
+  const handleDeleteLabOrder = useCallback(
+    async ({ serviceRequestId }: DeleteLabOrderZambdaInput): Promise<{ success: boolean; errorMsg?: string }> => {
+      if (!serviceRequestId) {
+        console.error('Cannot delete lab order: Missing service request ID');
+        setError(new Error('Missing service request ID'));
+        return { success: false };
+      }
+
+      if (!oystehrZambda) {
+        console.error('Cannot delete lab order: API client is not available');
+        setError(new Error('API client is not available'));
+        return { success: false };
+      }
+
+      setError(null);
+
+      try {
+        const deleteParams: DeleteLabOrderZambdaInput = {
+          serviceRequestId,
+        };
+
+        await deleteLabOrder(oystehrZambda, deleteParams);
+
+        setSearchParams({ pageNumber: 1 });
+
+        return { success: true };
+      } catch (err) {
+        console.log('error deleting inhouse lab: ', err);
+        const oystehrError = err as OystehrSdkError;
+        let errorMsg: string | undefined;
+
+        if (oystehrError.code !== 500 && oystehrError.message) errorMsg = oystehrError.message;
+
+        return { success: false, errorMsg };
+      }
+    },
+    [oystehrZambda, setSearchParams]
+  );
+
+  // handle delete dialog
+  const { showDeleteLabOrderDialog, DeleteOrderDialog } = useDeleteCommonLabOrderDialog({
+    deleteOrder: handleDeleteLabOrder,
+  });
+
+  const handleRejectedAbn = useCallback(
+    async (serviceRequestId: string): Promise<void> => {
+      if (!oystehrZambda) throw Error('oystehrZambda missing');
+      await updateLabOrderResources(oystehrZambda, {
+        event: 'rejectedAbn',
+        serviceRequestId: serviceRequestId,
+      });
+      setSearchParams({ pageNumber: 1 });
+    },
+    [oystehrZambda, setSearchParams]
+  );
+
+  const markTaskAsReviewed = useCallback(
+    async ({
+      taskId,
+      serviceRequestId,
+      diagnosticReportId,
+      appointmentId,
+    }: TaskReviewedParameters & { appointmentId?: string }): Promise<void> => {
+      if (!oystehrZambda) {
+        console.error('oystehrZambda is not defined');
+        return;
+      }
+
+      setLoading(true);
+
+      await updateLabOrderResources(oystehrZambda, { taskId, serviceRequestId, diagnosticReportId, event: 'reviewed' });
+      setSearchParams({ pageNumber: 1 });
+      if (appointmentId) navigate(getExternalLabOrdersUrl(appointmentId));
+    },
+    [oystehrZambda, setSearchParams, navigate]
+  );
+
+  const saveSpecimenDate = useCallback(
+    async ({
+      specimenId,
+      date,
+      serviceRequestId,
+    }: {
+      specimenId: string;
+      date: string;
+      serviceRequestId: string;
+    }): Promise<void> => {
+      if (!oystehrZambda) {
+        console.error('oystehrZambda is not defined');
+        return;
+      }
+
+      await updateLabOrderResources(oystehrZambda, {
+        specimenId,
+        date,
+        event: 'specimenDateChanged',
+        serviceRequestId,
+      });
+    },
+    [oystehrZambda]
+  );
+
+  return {
+    labOrders,
+    drDrivenResults,
+    loading,
+    error,
+    totalPages,
+    page: page.pageNumber,
+    setSearchParams,
+    orderableItemCodeFilter: testTypeFilterRef.current,
+    visitDateFilter: visitDateFilterRef.current,
+    fetchLabOrders,
+    showPagination,
+    deleteLabOrder: handleDeleteLabOrder,
+    showDeleteLabOrderDialog,
+    DeleteOrderDialog,
+    markTaskAsReviewed,
+    saveSpecimenDate,
+    patientLabItems,
+    groupedLabOrdersForChartTable,
+    handleRejectedAbn,
+  };
+};
+
+const groupLabOrderListPageDTOs = (
+  labOrders: LabOrderListPageDTO[],
+  drDrivenResults: ReflexLabDTO[]
+): LabOrderListPageDTOGrouped | undefined => {
+  if (!labOrders.length) return;
+
+  const orders: LabOrderListPageDTOGrouped = { pendingActionOrResults: {}, hasResults: {} };
+  const resultsStatusOptions = new Set([
+    ExternalLabsStatus.received,
+    ExternalLabsStatus.prelim,
+    ExternalLabsStatus.reviewed,
+    ExternalLabsStatus.corrected,
+    ExternalLabsStatus['cancelled by lab'], // we want to treat these as though they already have results from a display perspective
+  ]);
+
+  const addToGroup = (item: LabOrderListPageDTO | ReflexLabDTO, orders: LabOrderListPageDTOGrouped): void => {
+    const requisitionNumber = item.orderNumber;
+
+    if (!requisitionNumber) {
+      console.log("something went awry and this order doesn't have a requisition number");
+      return;
+    }
+
+    const hasResults = resultsStatusOptions.has(item.orderStatus);
+    const orderKey = hasResults ? 'hasResults' : 'pendingActionOrResults';
+    const orderBundles = orders[orderKey];
+
+    if (orderBundles[requisitionNumber]) {
+      orderBundles[requisitionNumber].orders.push(item);
+    } else {
+      const bundleName = `${item.fillerLab}${item.isPSC ? ' PSC' : ''}`;
+      orderBundles[requisitionNumber] = {
+        bundleName,
+        bundleNote: undefined,
+        abnPdfUrl: undefined,
+        orderPdfUrl: undefined,
+        orders: [item],
+      };
+      if ('abnPdfUrl' in item) {
+        orderBundles[requisitionNumber].abnPdfUrl = item.abnPdfUrl;
+      }
+      if ('orderPdfUrl' in item) {
+        orderBundles[requisitionNumber].orderPdfUrl = item.orderPdfUrl;
+      }
+      if ('orderLevelNoteByUser' in item) {
+        orderBundles[requisitionNumber].bundleNote = item.orderLevelNoteByUser;
+      }
+    }
+  };
+
+  [...labOrders, ...drDrivenResults].forEach((item) => addToGroup(item, orders));
+
+  return orders;
+};

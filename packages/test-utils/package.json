@@ -1,0 +1,32 @@
+{
+  "name": "test-utils",
+  "type": "module",
+  "private": true,
+  "version": "1.36.35",
+  "main": "lib/main.ts",
+  "types": "lib/main.ts",
+  "exports": {
+    ".": "./lib/index.ts",
+    "./*": "./lib/*"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  },
+  "scripts": {
+    "start": "vite",
+    "build": "tsc && vite build",
+    "lint": "cross-env NODE_OPTIONS=--max-old-space-size=8192 eslint --ext .ts,.tsx,.js,.jsx --report-unused-disable-directives --max-warnings 0 .",
+    "lint:fix": "cross-env NODE_OPTIONS=--max-old-space-size=8192 eslint --ext .ts,.tsx,.js,.jsx --report-unused-disable-directives --max-warnings 0 --fix .",
+    "preview": "vite preview",
+    "test": "vitest --silent",
+    "coverage": "vitest run --coverage",
+    "clean-e2e": "tsc scripts/clean-up-e2e.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.57.0"
+  },
+  "dependencies": {
+    "axios": "v1.12.0"
+  }
+}

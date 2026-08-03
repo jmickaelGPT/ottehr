@@ -1,0 +1,107 @@
+import { APIGatewayProxyResult } from 'aws-lambda';
+import { ServiceRequest } from 'fhir/r4b';
+import {
+  ACCESSION_NUMBER_CODE_SYSTEM,
+  ADVAPACS_VIEWER_LAUNCH_URL,
+  getSecret,
+  RadiologyLaunchViewerZambdaOutput,
+  Secrets,
+  SecretsKeys,
+} from 'utils';
+import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../shared';
+import { validateInput, validateSecrets } from './validation';
+
+// Types
+export interface ValidatedInput {
+  serviceRequest: ServiceRequest;
+  callerAccessToken: string;
+}
+
+// Lifting up value to outside of the handler allows it to stay in memory across warm lambda invocations
+let m2mToken: string;
+
+const ZAMBDA_NAME = 'radiology-launch-viewer';
+
+export const index = wrapHandler(ZAMBDA_NAME, async (unsafeInput: ZambdaInput): Promise<APIGatewayProxyResult> => {
+  const secrets = validateSecrets(unsafeInput.secrets);
+
+  m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
+  const oystehr = createOystehrClient(m2mToken, secrets);
+
+  const validatedInput = await validateInput(unsafeInput, oystehr);
+
+  const result: RadiologyLaunchViewerZambdaOutput = await performEffect(validatedInput, secrets);
+
+  return {
+    statusCode: 200,
+    body: JSON.stringify(result),
+  };
+});
+
+const performEffect = async (
+  validatedInput: ValidatedInput,
+  secrets: Secrets
+): Promise<RadiologyLaunchViewerZambdaOutput> => {
+  const { serviceRequest } = validatedInput;
+
+  try {
+    const advapacsClientId = getSecret(SecretsKeys.ADVAPACS_CLIENT_ID, secrets);
+    const advapacsClientSecret = getSecret(SecretsKeys.ADVAPACS_CLIENT_SECRET, secrets);
+    const advapacsViewerUsername = getSecret(SecretsKeys.ADVAPACS_VIEWER_USERNAME, secrets);
+    const advapacsAuthString = `ID=${advapacsClientId},Secret=${advapacsClientSecret}`;
+
+    const accessionNumber = serviceRequest.identifier?.find(
+      (identifier) => identifier.system === ACCESSION_NUMBER_CODE_SYSTEM
+    )?.value;
+
+    if (!accessionNumber) {
+      throw new Error('No accession number found in oystehr service request.');
+    }
+
+    const patientId = serviceRequest.subject.reference?.split('/')[1];
+
+    if (!patientId) {
+      throw new Error('No patient ID found in oystehr service request.');
+    }
+
+    const advapacsLaunchBody = {
+      // cSpell:disable-next meddream
+      viewer: 'meddream',
+      patientId,
+      accessionNumber: [accessionNumber],
+      username: advapacsViewerUsername,
+    };
+
+    console.log(`Launching AdvaPacs viewer with body: ${JSON.stringify(advapacsLaunchBody)}`);
+
+    const response = await fetch(ADVAPACS_VIEWER_LAUNCH_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: advapacsAuthString,
+      },
+      body: JSON.stringify(advapacsLaunchBody),
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `advapacs request errored out with statusCode ${response.status}, status text ${
+          response.statusText
+        }, and body ${JSON.stringify(await response.json(), null, 2)}`
+      );
+    }
+
+    const responseJSON = await response.json();
+
+    if (responseJSON == null || responseJSON.url == null) {
+      throw new Error(`Expected response to include url to return to launch viewer.`);
+    }
+
+    return {
+      url: responseJSON.url,
+    };
+  } catch (error) {
+    console.error('Error launching viewer:', error);
+    throw new Error('Failed to launch viewer');
+  }
+};

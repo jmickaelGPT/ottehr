@@ -1,0 +1,151 @@
+import { Appointment, Encounter, Period, Slot } from 'fhir/r4b';
+import { z } from 'zod';
+import { AvailableLocationInformation, ServiceMode } from '../../types';
+import { SlotListItem } from '../../utils';
+
+export const AppointmentTypeOptions = ['walk-in', 'pre-booked', 'post-telemed'] as const;
+export type AppointmentType = (typeof AppointmentTypeOptions)[number];
+export const AppointmentTypeSchema = z.array(z.enum(AppointmentTypeOptions));
+export type AppointmentAttendanceType = 'in-person' | 'virtual';
+
+export type FhirEncounterStatus = Encounter['status'];
+export type FhirAppointmentStatus = Appointment['status'];
+
+export const visitStatusArray = [
+  'pending',
+  'arrived',
+  'ready',
+  'intake',
+  'ready for provider',
+  'provider',
+  'discharged',
+  'cancelled',
+  'no show',
+  'awaiting supervisor approval',
+  'completed',
+  'unknown',
+] as const;
+
+export type VISIT_STATUS_TYPE = typeof visitStatusArray;
+export type VisitStatusLabel = VISIT_STATUS_TYPE[number];
+export type VisitStatusWithoutUnknown = Exclude<VisitStatusLabel, 'unknown'>;
+
+// todo: ready status should be included in history. if there is no mistakes we can remove this type and use VisitStatusWithoutUnknown instead
+export type VisitStatusHistoryLabel = VisitStatusWithoutUnknown;
+
+export type SupervisorApprovalStatus = 'loading' | 'waiting-for-approval' | 'approved' | 'unknown';
+
+export const visitStatusToFhirAppointmentStatusMap: Record<VisitStatusWithoutUnknown, FhirAppointmentStatus> = {
+  pending: 'booked',
+  arrived: 'arrived',
+  'awaiting supervisor approval': 'fulfilled',
+  ready: 'checked-in',
+  intake: 'checked-in',
+  'ready for provider': 'fulfilled',
+  provider: 'fulfilled',
+  discharged: 'fulfilled',
+  cancelled: 'cancelled',
+  'no show': 'noshow',
+  completed: 'fulfilled',
+};
+
+export const visitStatusToFhirEncounterStatusMap: Record<VisitStatusWithoutUnknown, FhirEncounterStatus> = {
+  pending: 'planned',
+  arrived: 'arrived',
+  ready: 'arrived',
+  intake: 'in-progress',
+  'ready for provider': 'in-progress',
+  provider: 'in-progress',
+  discharged: 'in-progress',
+  cancelled: 'cancelled',
+  'no show': 'cancelled',
+  'awaiting supervisor approval': 'finished',
+  completed: 'finished',
+};
+
+export interface VisitStatusHistoryEntry {
+  status: VisitStatusHistoryLabel;
+  period: Period;
+}
+
+export interface GetAppointmentResponseAppointmentDetails {
+  start: string;
+  slot: Slot;
+  location: AvailableLocationInformation;
+  visitType: string;
+  status?: string;
+}
+
+export interface GetAppointmentDetailsResponse {
+  appointment: GetAppointmentResponseAppointmentDetails;
+  availableSlots: SlotListItem[];
+  displayTomorrowSlotsAtHour: number;
+}
+
+export interface UpdateAppointmentParameters {
+  appointmentID: string;
+  language: string;
+  slot: Slot;
+}
+
+export const VISIT_CONSULT_NOTE_DOC_REF_CODING_CODE = {
+  system: 'http://loinc.org',
+  code: '11488-4',
+  display: 'Consult note',
+};
+
+export interface CreateUploadAudioRecordingInput {
+  visitID: string;
+}
+
+export interface CreateUploadAudioRecordingOutput {
+  z3URL: string;
+  presignedUploadUrl: string;
+}
+
+export interface CreateResourcesFromAudioRecordingInput {
+  z3URL: string;
+  duration?: number;
+  visitID: string;
+}
+
+export interface CreateResourcesFromAudioRecordingOutput {
+  presignedUploadUrl: string;
+}
+
+export interface UpdateAppointmentZambdaOutput {
+  message: string;
+  appointmentID?: string;
+  availableSlots?: SlotListItem[];
+}
+
+export interface WalkinAvailabilityCheckParams {
+  scheduleId?: string;
+  locationName?: string;
+}
+
+export interface WalkinAvailabilityCheckResult {
+  officeOpen: boolean;
+  walkinOpen: boolean;
+  officeHasClosureOverrideToday: boolean;
+  officeHasClosureOverrideTomorrow: boolean;
+  prebookStillOpenForToday: boolean;
+  scheduleOwnerName: string;
+  scheduleId: string;
+  serviceMode?: ServiceMode;
+}
+export interface PatientAppointmentDTO {
+  id: string;
+  patientID: string;
+  firstName: string;
+  middleName: string;
+  lastName: string;
+  start: string;
+  status: string;
+  location?: { name: string; id: string; slug: string; state: string; timezone: string };
+  paperworkComplete: boolean;
+  checkedIn: boolean;
+  visitType: string;
+  visitStatus: VisitStatusLabel;
+  slotId?: string;
+}

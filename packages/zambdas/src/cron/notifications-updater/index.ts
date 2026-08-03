@@ -1,0 +1,676 @@
+import Oystehr, { BatchInputPostRequest, BatchInputRequest } from '@oystehr/sdk';
+import { captureException } from '@sentry/aws-serverless';
+import { APIGatewayProxyResult } from 'aws-lambda';
+import { Appointment, Communication, Encounter, Location, Patient, Practitioner, Resource, Task } from 'fhir/r4b';
+import { DateTime, Duration } from 'luxon';
+import {
+  AppointmentProviderNotificationTags,
+  AppointmentProviderNotificationTypes,
+  ERX_TASK,
+  getFullestAvailableName,
+  getInPersonVisitStatus,
+  getPatchBinary,
+  getPatchOperationForNewMetaTag,
+  getProviderNotificationSettingsForPractitioner,
+  getVideoRoomResourceExtension,
+  OTTEHR_MODULE,
+  OttehrTaskSystem,
+  PROVIDER_NOTIFICATION_TAG_SYSTEM,
+  PROVIDER_NOTIFICATION_TYPE_SYSTEM,
+  ProviderNotificationMethod,
+  ProviderNotificationSettings,
+  removePrefix,
+  RoleType,
+  Secrets,
+  TASK_ASSIGNED_DATE_TIME_EXTENSION_URL,
+  USER_TIMEZONE_EXTENSION_URL,
+  VIDEO_CHAT_WAITING_ROOM_NOTIFICATION_TASK_CODE,
+  VisitStatusLabel,
+} from 'utils';
+import {
+  checkOrCreateM2MClientToken,
+  createOystehrClient,
+  getEmployees,
+  getRoleMembers,
+  getRoles,
+  wrapHandler,
+  ZambdaInput,
+} from '../../shared';
+
+export function validateRequestParameters(input: ZambdaInput): { secrets: Secrets | null } {
+  return {
+    secrets: input.secrets,
+  };
+}
+
+// 'arrived' for OTR-2552
+export const READY_OR_UNSIGNED_ENCOUNTER_STATUSES: Encounter['status'][] = ['planned', 'arrived', 'finished'];
+
+export function resolveTaskRecipients(
+  task: Task,
+  owner: Practitioner | undefined,
+  activeProviders: Practitioner[]
+): Practitioner[] {
+  if (owner) return [owner];
+  const taskCode = task.code?.coding?.find((c) => c.system === OttehrTaskSystem)?.code;
+  if (taskCode === VIDEO_CHAT_WAITING_ROOM_NOTIFICATION_TASK_CODE) return activeProviders;
+  return [];
+}
+
+// Lifting up value to outside of the handler allows it to stay in memory across warm lambda invocations
+let m2mToken: string;
+
+export const index = wrapHandler('notification-Updater', async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
+  const sendSMSPractitionerCommunications: {
+    [key: string]: { practitioner: Practitioner; communications: Communication[] };
+  } = {};
+
+  const createCommunicationRequests: BatchInputPostRequest<Communication>[] = [];
+  const updateCommunicationRequests: BatchInputRequest<Communication>[] = [];
+  const updateAppointmentRequests: BatchInputRequest<Appointment>[] = [];
+
+  function addNewSMSCommunicationForPractitioner(
+    practitioner: Practitioner,
+    communication: Communication,
+    status: Communication['status']
+  ): void {
+    const notificationSettings = getProviderNotificationSettingsForPractitioner(practitioner);
+    if (
+      notificationSettings &&
+      (status === 'completed' ||
+        (status === 'in-progress' && notificationSettings?.method === ProviderNotificationMethod['phone and computer']))
+    ) {
+      addOrUpdateSMSPractitionerCommunications(communication, practitioner);
+    }
+  }
+
+  function addOrUpdateSMSPractitionerCommunications(newCommunication: Communication, practitioner: Practitioner): void {
+    sendSMSPractitionerCommunications[practitioner.id!] = {
+      practitioner: practitioner,
+      communications: sendSMSPractitionerCommunications[practitioner.id!]?.communications
+        ? [...sendSMSPractitionerCommunications[practitioner.id!].communications, newCommunication]
+        : [newCommunication],
+    };
+  }
+
+  console.group('validateRequestParameters');
+  const { secrets } = validateRequestParameters(input);
+  console.groupEnd();
+  console.debug('validateRequestParameters success');
+
+  m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
+  const oystehr = createOystehrClient(m2mToken, secrets);
+  console.log('Created zapToken and fhir client');
+
+  const [readyOrUnsignedVisitPackages, activeProvidersMap, recentlyAssignedTasksMap] = await Promise.all([
+    getResourcePackagesAppointmentsMap(
+      oystehr,
+      READY_OR_UNSIGNED_ENCOUNTER_STATUSES,
+      // getting ready and unsigned appointments for the last 49 hours just to send appropriate notifications
+      // on unsigned appointments that are in the unsigned state for too long
+      DateTime.utc().minus(Duration.fromISO('PT49H')),
+      // 'booked' for telemed appointment notifications, 'arrived' for waiting room notifications
+      ['booked', 'arrived']
+    ),
+    getAllActiveProviders(oystehr),
+    getRecentlyAssignedTasksMap(oystehr, DateTime.utc().minus({ hours: 1 })),
+  ]);
+  // these logs produce far too much detail so reducing them to counts
+  console.log('--- Ready or unsigned visits count: ' + Object.keys(readyOrUnsignedVisitPackages).length);
+  console.log('--- Active providers count: ' + Object.keys(activeProvidersMap).length);
+  console.log('--- Recently assigned task ids: ' + Object.keys(recentlyAssignedTasksMap).join(', '));
+
+  // Going through ready or unsigned visits to create notifications and other update logic
+  Object.keys(readyOrUnsignedVisitPackages).forEach((appointmentId) => {
+    try {
+      const { appointment, encounter, location, communications, patient } = readyOrUnsignedVisitPackages[appointmentId];
+      if (encounter && appointment) {
+        const status: VisitStatusLabel | undefined = getInPersonVisitStatus(appointment, encounter);
+        if (!status) return;
+
+        // Backwards-compat during deploy: upgrade any 'preparation' Communications created by the
+        // prior busy-suppression logic. Safe to remove after one full cron window.
+        if (communications?.length) {
+          const postponedCommunications = communications.filter(
+            (comm) => comm.status === 'preparation' && comm.recipient?.[0].reference
+          );
+          postponedCommunications.forEach((communication) => {
+            const communicationPractitionerId = communication.recipient![0].reference!.split('/')[1];
+            const practitioner = activeProvidersMap[communicationPractitionerId];
+            const notificationSettings = getProviderNotificationSettingsForPractitioner(practitioner);
+            if (notificationSettings && notificationSettings.telemedNotificationsEnabled) {
+              const newStatus = getCommunicationStatus(notificationSettings);
+              updateCommunicationRequests.push(
+                getPatchBinary({
+                  resourceId: communication.id!,
+                  resourceType: 'Communication',
+                  patchOperations: [
+                    {
+                      op: 'replace',
+                      path: '/status',
+                      value: newStatus,
+                    },
+                  ],
+                })
+              );
+              addNewSMSCommunicationForPractitioner(practitioner, communication, newStatus);
+            }
+          });
+        }
+        if (status === 'pending') {
+          // check the tag presence that indicates that communications for "Patient is waiting" notification already exist
+          const isProcessed = appointment.meta?.tag?.find(
+            (tag) =>
+              tag.system === PROVIDER_NOTIFICATION_TAG_SYSTEM &&
+              tag.code === AppointmentProviderNotificationTags.patient_waiting
+          );
+          if (!isProcessed && location?.address?.state) {
+            // add tag into appointment and add to batch request
+            updateAppointmentRequests.push(
+              getPatchBinary({
+                resourceId: appointment.id!,
+                resourceType: 'Appointment',
+                patchOperations: [
+                  getPatchOperationForNewMetaTag(appointment, {
+                    system: PROVIDER_NOTIFICATION_TAG_SYSTEM,
+                    code: AppointmentProviderNotificationTags.patient_waiting,
+                  }),
+                ],
+              })
+            );
+            for (const provider of Object.values(activeProvidersMap)) {
+              const notificationSettings = getProviderNotificationSettingsForPractitioner(provider);
+
+              // - if practitioner has notifications disabled - we don't create notification at all
+              if (notificationSettings?.telemedNotificationsEnabled) {
+                const status = getCommunicationStatus(notificationSettings);
+
+                let patientName: string | undefined = 'patient';
+                if (patient) {
+                  patientName = getFullestAvailableName(patient);
+                }
+                let appointmentTime: string | undefined;
+                if (appointment.start) {
+                  const providerTimezone = provider.extension?.find((ext) => ext.url === USER_TIMEZONE_EXTENSION_URL)
+                    ?.valueString;
+                  appointmentTime = DateTime.fromISO(appointment.start)
+                    .setZone(
+                      Intl.supportedValuesOf('timeZone').includes(providerTimezone || '')
+                        ? providerTimezone
+                        : 'America/New_York'
+                    )
+                    .toFormat('h:mm a');
+                }
+                const message =
+                  patientName && appointmentTime
+                    ? `Virtual visit with ${patientName} at ${appointmentTime}`
+                    : 'Virtual visit with patient soon'; // this should never happen
+
+                const request: BatchInputPostRequest<Communication> = {
+                  method: 'POST',
+                  url: '/Communication',
+                  resource: {
+                    resourceType: 'Communication',
+                    category: [
+                      {
+                        coding: [
+                          {
+                            system: PROVIDER_NOTIFICATION_TYPE_SYSTEM,
+                            code: AppointmentProviderNotificationTypes.patient_waiting,
+                          },
+                        ],
+                      },
+                    ],
+                    sent: DateTime.utc().toISO()!,
+                    status: status,
+                    encounter: { reference: `Encounter/${encounter.id}` },
+                    recipient: [{ reference: `Practitioner/${provider.id}` }],
+                    payload: [{ contentString: message }],
+                  },
+                };
+                createCommunicationRequests.push(request);
+                addNewSMSCommunicationForPractitioner(provider, request.resource as Communication, status);
+              }
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`Error trying to process notifications for appointment ${appointmentId}`, error);
+      captureException(error);
+    }
+  });
+
+  // Process recently assigned tasks to create task assignment notifications
+  const updateTaskRequests: BatchInputRequest<Task>[] = [];
+  const telemedRelatedTaskCodes = [VIDEO_CHAT_WAITING_ROOM_NOTIFICATION_TASK_CODE];
+  Object.keys(recentlyAssignedTasksMap).forEach((taskId) => {
+    try {
+      const { task, practitioner } = recentlyAssignedTasksMap[taskId];
+
+      const isProcessed = task.meta?.tag?.find(
+        (tag) =>
+          tag.system === PROVIDER_NOTIFICATION_TAG_SYSTEM &&
+          tag.code === AppointmentProviderNotificationTypes.task_assigned
+      );
+      if (isProcessed) return;
+
+      const recipients = resolveTaskRecipients(task, practitioner, Object.values(activeProvidersMap));
+      if (recipients.length === 0) return;
+
+      updateTaskRequests.push(
+        getPatchBinary({
+          resourceId: task.id!,
+          resourceType: 'Task',
+          patchOperations: [
+            getPatchOperationForNewMetaTag(task, {
+              system: PROVIDER_NOTIFICATION_TAG_SYSTEM,
+              code: AppointmentProviderNotificationTypes.task_assigned,
+            }),
+          ],
+        })
+      );
+
+      const taskCodes = task.code?.coding;
+      const ottehrTaskCode = taskCodes?.find((coding) => coding.system === OttehrTaskSystem)?.code;
+      const erxTaskCode = taskCodes?.find((coding) => coding.system === ERX_TASK.system)?.code;
+      const taskCode = ottehrTaskCode || erxTaskCode || '';
+
+      for (const recipient of recipients) {
+        const notificationSettings = getProviderNotificationSettingsForPractitioner(recipient);
+
+        const areNotificationsEnabledForThisTask = telemedRelatedTaskCodes.includes(taskCode)
+          ? notificationSettings?.telemedNotificationsEnabled
+          : notificationSettings?.taskNotificationsEnabled;
+        if (!areNotificationsEnabledForThisTask) continue;
+
+        const status = getCommunicationStatus(notificationSettings!);
+        let title = 'A new task has been assigned to you: ' + (task.description ?? `task ID ${task.id}`);
+        if (taskCode === VIDEO_CHAT_WAITING_ROOM_NOTIFICATION_TASK_CODE) {
+          title = task.description ?? `task ID ${task.id}`;
+        }
+
+        const request: BatchInputPostRequest<Communication> = {
+          method: 'POST',
+          url: '/Communication',
+          resource: {
+            resourceType: 'Communication',
+            category: [
+              {
+                coding: [
+                  {
+                    system: PROVIDER_NOTIFICATION_TYPE_SYSTEM,
+                    code: AppointmentProviderNotificationTypes.task_assigned,
+                  },
+                ],
+              },
+            ],
+            sent: DateTime.utc().toISO()!,
+            status: status,
+            basedOn: [{ reference: `Task/${task.id}` }],
+            recipient: [{ reference: `Practitioner/${recipient.id}` }],
+            payload: [{ contentString: title }],
+          },
+        };
+
+        createCommunicationRequests.push(request);
+        addNewSMSCommunicationForPractitioner(recipient, request.resource as Communication, status);
+      }
+    } catch (error) {
+      console.error(`Error trying to process task assignment notification for task ${taskId}`, error);
+      captureException(error);
+    }
+  });
+
+  // here we need to send SMS to practitioners that have some unprocessed communications
+  const sendSMSRequests: Promise<unknown>[] = [];
+  Object.keys(sendSMSPractitionerCommunications).forEach((id) => {
+    try {
+      const { practitioner, communications } = sendSMSPractitionerCommunications[id];
+      const notificationSettings = getProviderNotificationSettingsForPractitioner(practitioner);
+      if (
+        practitioner.telecom?.find((tel) => tel.system === 'sms' && Boolean(tel.value)) &&
+        (notificationSettings?.method === ProviderNotificationMethod.phone ||
+          notificationSettings?.method === ProviderNotificationMethod['phone and computer'])
+      ) {
+        communications.forEach((comm) => {
+          if (comm.payload?.[0].contentString) {
+            sendSMSRequests.push(
+              oystehr.transactionalSMS.send({
+                resource: `Practitioner/${practitioner.id!}`,
+                message: comm.payload?.[0].contentString,
+              })
+            );
+          }
+        });
+      }
+    } catch (error) {
+      console.error(
+        `Error trying to send SMS notifications for practitioner ${sendSMSPractitionerCommunications[id].practitioner.id}`,
+        error
+      );
+      captureException(error);
+    }
+  });
+
+  console.log(`Update appointment requests: ${JSON.stringify(updateAppointmentRequests)}`);
+  console.log(`Create communications requests: ${JSON.stringify(createCommunicationRequests)}`);
+
+  const requests: Promise<unknown>[] = [];
+  if (
+    updateAppointmentRequests.length > 0 ||
+    createCommunicationRequests.length > 0 ||
+    updateCommunicationRequests.length > 0 ||
+    updateTaskRequests.length > 0
+  ) {
+    requests.push(
+      oystehr.fhir.transaction<Appointment | Communication | Task>({
+        requests: [
+          ...updateAppointmentRequests,
+          ...createCommunicationRequests,
+          ...updateCommunicationRequests,
+          ...updateTaskRequests,
+        ],
+      })
+    );
+  }
+  if (sendSMSRequests.length > 0) {
+    requests.push(...sendSMSRequests);
+  }
+  await Promise.all([...requests]);
+
+  return {
+    statusCode: 200,
+    body: 'Successfully processed provider notifications',
+  };
+});
+
+interface ResourcePackage {
+  appointment?: Appointment;
+  encounter?: Encounter;
+  communications: Communication[];
+  location?: Location;
+  patient?: Patient;
+}
+
+type ResourcePackagesMap = { [key: NonNullable<Appointment['id']>]: ResourcePackage };
+
+/** Getting appointments with chosen status (default "arrived") and encounter with statuses that
+ * correspond to Telemed statuses "ready", "pre-video", "on-video", "unsigned". Include related
+ * encounter, patient, provider and communication
+ */
+async function getResourcePackagesAppointmentsMap(
+  oystehr: Oystehr,
+  statuses: Encounter['status'][],
+  fromDate: DateTime,
+  appointmentStatuses: Appointment['status'][] = ['arrived']
+): Promise<ResourcePackagesMap> {
+  const results = (
+    await oystehr.fhir.search<Appointment | Communication | Encounter | Location | Patient>({
+      resourceType: 'Appointment',
+      params: [
+        { name: '_tag', value: OTTEHR_MODULE.TM },
+        {
+          name: 'date',
+          value: `ge${fromDate}`,
+        },
+        {
+          name: 'status',
+          value: appointmentStatuses.join(','),
+        },
+        {
+          name: '_revinclude',
+          value: 'Encounter:appointment',
+        },
+        {
+          name: '_include',
+          value: 'Appointment:location',
+        },
+        {
+          name: '_include',
+          value: 'Appointment:patient',
+        },
+        {
+          name: '_revinclude:iterate',
+          value: 'Communication:encounter',
+        },
+        {
+          name: '_has:Encounter:appointment:status',
+          value: statuses.join(','),
+        },
+      ],
+    })
+  ).unbundle();
+
+  const getOrCreateAppointmentResourcePackage = (appointmentId: string): (typeof resourcePackagesMap)[string] => {
+    if (!resourcePackagesMap[appointmentId]) {
+      resourcePackagesMap[appointmentId] = {
+        communications: [],
+      };
+    }
+    return { ...resourcePackagesMap[appointmentId] };
+  };
+
+  const encounterIdAppointmentIdMap: { [key: NonNullable<Encounter['id']>]: NonNullable<Appointment['id']> } = {};
+  const resourcePackagesMap: ResourcePackagesMap = {};
+  const locationIdMap: { [key: NonNullable<Location['id']>]: Location } = {};
+  const patientIdMap: { [key: NonNullable<Patient['id']>]: Patient } = {};
+  // first fill maps with Appointments and Encounters
+  results.forEach((res) => {
+    if (res.resourceType === 'Encounter') {
+      const encounter = res as Encounter;
+      const appointmentId = getTelemedEncounterAppointmentId(encounter);
+      if (appointmentId) {
+        const pack = getOrCreateAppointmentResourcePackage(appointmentId);
+        pack.encounter = encounter;
+        resourcePackagesMap[appointmentId] = pack;
+        encounterIdAppointmentIdMap[encounter.id!] = appointmentId;
+      }
+    } else if (res.resourceType === 'Appointment') {
+      const appointment = res as Appointment;
+      const pack = getOrCreateAppointmentResourcePackage(appointment.id!);
+      pack.appointment = appointment;
+      resourcePackagesMap[appointment.id!] = pack;
+    } else if (res.resourceType === 'Location') {
+      // create locations id map for later optimized mapping
+      const location = res as Location;
+      locationIdMap[location.id!] = location;
+    } else if (res.resourceType === 'Patient') {
+      // create patients id map for later optimized mapping
+      const patient = res as Patient;
+      patientIdMap[patient.id!] = patient;
+    }
+  });
+
+  results.forEach((res) => {
+    // fill in communications (it needs already some filled in maps)
+    if (res.resourceType === 'Communication') {
+      const communication = res as Communication;
+      const encounterReference = communication.encounter!.reference!;
+      const encounterId = removePrefix('Encounter/', encounterReference)!;
+      const appointmentId = encounterIdAppointmentIdMap[encounterId];
+      const pack = getOrCreateAppointmentResourcePackage(appointmentId);
+      pack.communications.push(communication);
+      resourcePackagesMap[appointmentId] = pack;
+    }
+  });
+
+  // fill in locations and patients
+  Object.keys(resourcePackagesMap).forEach((appointmentId) => {
+    const encounter = resourcePackagesMap[appointmentId].encounter;
+    const appointment = resourcePackagesMap[appointmentId].appointment;
+    const locationReference = encounter?.location?.find((loc) => loc.location.reference)?.location.reference;
+    if (locationReference) {
+      const locationId = removePrefix('Location/', locationReference);
+      if (locationId) {
+        const pack = getOrCreateAppointmentResourcePackage(appointmentId);
+        pack.location = locationIdMap[locationId];
+        resourcePackagesMap[appointmentId] = pack;
+      }
+    }
+    const patientReference = appointment?.participant?.find(
+      (participant) => participant.actor?.reference?.startsWith('Patient')
+    )?.actor?.reference;
+    if (patientReference) {
+      const patientId = removePrefix('Patient/', patientReference);
+      if (patientId) {
+        const pack = getOrCreateAppointmentResourcePackage(appointmentId);
+        pack.patient = patientIdMap[patientId];
+        resourcePackagesMap[appointmentId] = pack;
+      }
+    }
+  });
+
+  return resourcePackagesMap;
+}
+
+const getAllActiveProviders = async (oystehr: Oystehr): Promise<ProvidersMap> => {
+  const [employees, roles] = await Promise.all([await getEmployees(oystehr), await getRoles(oystehr)]);
+
+  const inactiveRoleId = roles.find((role: any) => role.name === RoleType.Inactive)?.id;
+  const providerRoleId = roles.find((role: any) => role.name === RoleType.Provider)?.id;
+  if (!inactiveRoleId || !providerRoleId) {
+    throw new Error('Error searching for Inactive or Provider role.');
+  }
+
+  console.log('Preparing the FHIR batch request.');
+
+  const practitionerIds = employees.map((employee) => employee.profile.split('/')[1]);
+
+  const [inactiveRoleMembers, providerRoleMembers, practitionerResources] = await Promise.all([
+    getRoleMembers(inactiveRoleId, oystehr),
+    getRoleMembers(providerRoleId, oystehr),
+    oystehr.fhir.search<Practitioner>({
+      resourceType: 'Practitioner',
+      params: [
+        {
+          name: '_id',
+          value: practitionerIds.join(','),
+        },
+      ],
+    }),
+  ]);
+
+  console.log(
+    `Fetched ${inactiveRoleMembers.length} Inactive and ${providerRoleMembers.length} Provider role members.`
+  );
+
+  // map for getting inactive users by user id
+  const inactiveUsersMap = new Map(inactiveRoleMembers.map((user) => [user.id, user]));
+  // map for getting users that have Provider role by user id
+  const providerUsersMap = new Map(providerRoleMembers.map((user) => [user.id, user]));
+
+  // map for getting Practitioner resource associated with a user by user id
+  const userIdPractitionerMap: { [key: string]: Practitioner } = {};
+  for (const entry of providerUsersMap.entries()) {
+    const [userId, user] = entry;
+    const practitionerId = removePrefix('Practitioner/', user.profile || '');
+    if (!practitionerId) continue;
+    const practitioner = practitionerResources.unbundle().find((res) => res.id === practitionerId);
+    if (practitioner) {
+      userIdPractitionerMap[userId] = practitioner;
+    }
+  }
+  // map for getting active practitioners that can operate in each state
+  const activeProvidersMap: ProvidersMap = {};
+
+  employees.forEach((employee) => {
+    const isActive = !inactiveUsersMap.has(employee.id);
+    const isProvider = providerUsersMap.has(employee.id);
+    if (!isActive || !isProvider) {
+      return;
+    }
+    const practitioner = userIdPractitionerMap[employee.id];
+    if (practitioner) {
+      activeProvidersMap[practitioner.id!] = practitioner;
+    }
+  });
+  return activeProvidersMap;
+};
+
+type ProvidersMap = { [key: string]: Practitioner };
+
+interface TaskWithPractitioner {
+  task: Task;
+  // unassigned telemed visits have no owner but need waiting room notifications
+  practitioner?: Practitioner;
+}
+
+type RecentlyAssignedTasksMap = { [key: NonNullable<Task['id']>]: TaskWithPractitioner };
+
+export async function getRecentlyAssignedTasksMap(
+  oystehr: Oystehr,
+  fromDate: DateTime
+): Promise<RecentlyAssignedTasksMap> {
+  const bundle = (
+    await oystehr.fhir.search<Task | Practitioner>({
+      resourceType: 'Task',
+      params: [
+        {
+          name: 'status',
+          value: 'requested,received,accepted,ready,in-progress',
+        },
+        {
+          name: '_lastUpdated',
+          value: `ge${fromDate.toISO()}`,
+        },
+        {
+          name: '_include',
+          value: 'Task:owner',
+        },
+      ],
+    })
+  ).unbundle();
+  const resultMap: RecentlyAssignedTasksMap = {};
+  const practitionerIdMap: { [key: string]: Practitioner } = {};
+  const tasks: Task[] = [];
+  bundle.forEach((res) => {
+    if (res.resourceType === 'Practitioner') {
+      const practitioner = res as Practitioner;
+      practitionerIdMap[practitioner.id!] = practitioner;
+    } else if (res.resourceType === 'Task') {
+      tasks.push(res as Task);
+    }
+  });
+  tasks.forEach((task) => {
+    if (task.owner?.reference) {
+      const assignedDateTimeExt = task.owner.extension?.find(
+        (ext) => ext.url === TASK_ASSIGNED_DATE_TIME_EXTENSION_URL
+      );
+      const assignedDateTime = assignedDateTimeExt?.valueDateTime
+        ? DateTime.fromISO(assignedDateTimeExt.valueDateTime)
+        : null;
+
+      if (assignedDateTime && assignedDateTime >= fromDate) {
+        const practitionerId = removePrefix('Practitioner/', task.owner.reference);
+        if (practitionerId && practitionerIdMap[practitionerId]) {
+          resultMap[task.id!] = {
+            task,
+            practitioner: practitionerIdMap[practitionerId],
+          };
+        }
+      }
+    } else {
+      const taskCode = task.code?.coding?.find((c) => c.system === OttehrTaskSystem)?.code;
+      if (taskCode !== VIDEO_CHAT_WAITING_ROOM_NOTIFICATION_TASK_CODE) return;
+      const authoredOn = task.authoredOn ? DateTime.fromISO(task.authoredOn) : null;
+      if (authoredOn && authoredOn >= fromDate) {
+        resultMap[task.id!] = { task };
+      }
+    }
+  });
+  return resultMap;
+}
+
+export function getCommunicationStatus(notificationSettings: ProviderNotificationSettings): Communication['status'] {
+  return notificationSettings.method === ProviderNotificationMethod.phone ? 'completed' : 'in-progress';
+}
+
+const getTelemedEncounterAppointmentId = (encounterResource: Resource): string | undefined => {
+  if (!(encounterResource.resourceType === 'Encounter' && getVideoRoomResourceExtension(encounterResource)))
+    return undefined;
+  const appointmentReference = (encounterResource as Encounter)?.appointment?.[0].reference || '';
+  const appointmentId = removePrefix('Appointment/', appointmentReference);
+
+  return appointmentId;
+};

@@ -1,0 +1,20 @@
+import { Communication } from 'fhir/r4b';
+import { ZambdaInput } from '../../../shared/types';
+import { CommunicationSubscriptionInput } from '.';
+
+export function validateRequestParameters(input: ZambdaInput): CommunicationSubscriptionInput {
+  if (!input.body) {
+    throw new Error('No request body provided');
+  }
+
+  const communication = JSON.parse(input.body);
+
+  if (communication.resourceType !== 'Communication') {
+    throw new Error(`resource parsed should be a communication but was a ${communication.resourceType}`);
+  }
+
+  return {
+    communication: communication as Communication,
+    secrets: input.secrets,
+  };
+}

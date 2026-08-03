@@ -1,0 +1,266 @@
+import { expect, Page } from '@playwright/test';
+import { dataTestIds } from '../../../../src/constants/data-test-ids';
+
+export abstract class BaseProgressNotePage {
+  #page: Page;
+
+  constructor(page: Page) {
+    this.#page = page;
+  }
+
+  async clickDischargeButton(): Promise<void> {
+    const dischargeButton = this.#page.getByTestId(dataTestIds.progressNotePage.dischargeButton);
+    await expect(dischargeButton).toBeVisible();
+    await expect(dischargeButton).toBeEnabled();
+    await dischargeButton.click();
+    await expect(dischargeButton).toHaveText('Discharged');
+    await expect(dischargeButton).toBeDisabled();
+  }
+
+  async clickReviewAndSignButton(): Promise<void> {
+    const reviewAndSignButton = this.#page.getByTestId(dataTestIds.progressNotePage.reviewAndSignButton);
+    await reviewAndSignButton.waitFor({ state: 'visible' });
+    await expect(reviewAndSignButton).toBeEnabled();
+    await reviewAndSignButton.click();
+  }
+
+  async verifyReviewAndSignButtonDisabled(): Promise<void> {
+    await expect(this.#page.getByTestId(dataTestIds.progressNotePage.reviewAndSignButton)).toBeDisabled();
+  }
+
+  async clickSignButton(): Promise<void> {
+    await this.#page.getByTestId(dataTestIds.dialog.proceedButton).click();
+  }
+
+  async verifyProcedure(procedureType: string, procedureDetails: string[]): Promise<void> {
+    const matcher = expect(
+      this.#page.getByTestId(dataTestIds.progressNotePage.procedureItem).filter({ hasText: procedureType })
+    );
+    const cptPrefix = 'CPT:';
+    for (const procedureDetail of procedureDetails) {
+      if (procedureDetail.startsWith(cptPrefix)) {
+        // CPT codes render in a '; '-joined list whose order depends on how the procedure was built
+        // (procedure-type CPT may be auto-added before or after user-selected codes, and may vary by config).
+        // Verify the CPT heading and each expected code independently to stay order-agnostic.
+        const cptCodes = procedureDetail
+          .slice(cptPrefix.length)
+          .split('; ')
+          .filter((code) => code.length > 0);
+        await matcher.toContainText(cptPrefix);
+        for (const cptCode of cptCodes) {
+          await matcher.toContainText(cptCode);
+        }
+      } else {
+        await matcher.toContainText(procedureDetail);
+      }
+    }
+  }
+
+  async verifyVaccine(vaccine: {
+    vaccine: string;
+    dose: string;
+    units: string;
+    route: string;
+    location: string;
+  }): Promise<void> {
+    await expect(
+      this.#page.getByTestId(dataTestIds.progressNotePage.vaccineItem).filter({
+        hasText:
+          vaccine.vaccine +
+          ' - ' +
+          vaccine.dose +
+          ' ' +
+          vaccine.units +
+          ' / ' +
+          vaccine.route +
+          ' - ' +
+          vaccine.location,
+      })
+    ).toBeVisible();
+  }
+
+  async verifyInHouseLabs(sectionTitle: string, testName: string): Promise<void> {
+    await expect(this.#page.getByTestId(dataTestIds.progressNotePage.labsTitle(sectionTitle))).toBeVisible();
+    await expect(
+      this.#page.getByTestId(dataTestIds.progressNotePage.labsTitle(sectionTitle)),
+      `${testName} is listed`
+    ).toContainText(testName);
+  }
+
+  async verifyAddedAllergyIsShown(allergy: string): Promise<void> {
+    await expect(this.#page.getByTestId(dataTestIds.progressNotePage.knownAllergiesContainer)).toBeVisible();
+    await expect(this.#page.getByTestId(dataTestIds.progressNotePage.knownAllergiesContainer)).toContainText(allergy);
+  }
+  async verifyRemovedAllergyIsNotShown(allergy: string): Promise<void> {
+    await expect(this.#page.getByTestId(dataTestIds.progressNotePage.knownAllergiesContainer)).toBeVisible();
+    await expect(this.#page.getByTestId(dataTestIds.progressNotePage.knownAllergiesContainer)).not.toContainText(
+      allergy
+    );
+  }
+  async verifyAddedMedicalConditionIsShown(medicalCondition: string): Promise<void> {
+    await expect(this.#page.getByTestId(dataTestIds.progressNotePage.medicalConditionsContainer)).toBeVisible();
+    await expect(this.#page.getByTestId(dataTestIds.progressNotePage.medicalConditionsContainer)).toContainText(
+      medicalCondition
+    );
+  }
+  async verifyRemovedMedicalConditionIsNotShown(medicalCondition: string): Promise<void> {
+    await expect(this.#page.getByTestId(dataTestIds.progressNotePage.medicalConditionsContainer)).toBeVisible();
+    await expect(this.#page.getByTestId(dataTestIds.progressNotePage.medicalConditionsContainer)).not.toContainText(
+      medicalCondition
+    );
+  }
+  async verifyAddedSurgeryIsShown(surgery: string): Promise<void> {
+    await expect(this.#page.getByTestId(dataTestIds.progressNotePage.surgicalHistoryContainer)).toBeVisible();
+    await expect(this.#page.getByTestId(dataTestIds.progressNotePage.surgicalHistoryContainer)).toContainText(surgery);
+  }
+  async verifyRemovedSurgeryIsNotShown(surgery: string): Promise<void> {
+    await expect(this.#page.getByTestId(dataTestIds.progressNotePage.surgicalHistoryContainer)).toBeVisible();
+    await expect(this.#page.getByTestId(dataTestIds.progressNotePage.surgicalHistoryContainer)).not.toContainText(
+      surgery
+    );
+  }
+
+  async verifyInHouseMedication(medication: {
+    medication: string;
+    dose: string;
+    units: string;
+    route: string;
+    givenBy?: string;
+    instructions: string;
+    status: string;
+  }): Promise<void> {
+    await expect(
+      this.#page.getByTestId(dataTestIds.progressNotePage.inHouseMedicationItem).filter({
+        hasText:
+          medication.medication +
+          ', ' +
+          medication.dose +
+          ' ' +
+          medication.units +
+          ', ' +
+          medication.route +
+          ', ' +
+          (medication.givenBy ? 'given by ' + medication.givenBy + ', ' : '') +
+          'instructions: ' +
+          medication.instructions +
+          ', ' +
+          medication.status,
+      })
+    ).toBeVisible();
+  }
+
+  async verifyScreening(lines: string[]): Promise<void> {
+    for (const line of lines) {
+      await expect(
+        this.#page.getByTestId(dataTestIds.progressNotePage.additionalQuestions).filter({
+          hasText: line,
+        })
+      ).toBeVisible();
+    }
+  }
+
+  async verifyMedication(medication: string): Promise<void> {
+    await expect(
+      this.#page.getByTestId(dataTestIds.telemedEhrFlow.reviewTabMedicationsContainer).filter({
+        hasText: medication,
+      })
+    ).toBeVisible();
+  }
+
+  async verifyMedicationNote(note: string): Promise<void> {
+    await expect(
+      this.#page.getByTestId(dataTestIds.telemedEhrFlow.reviewTabMedicationsContainer).filter({
+        hasText: note,
+      })
+    ).toBeVisible();
+  }
+
+  async verifyMedicationNoteNotShown(note: string): Promise<void> {
+    await expect(
+      this.#page.getByTestId(dataTestIds.telemedEhrFlow.reviewTabMedicationsContainer).filter({
+        hasText: note,
+      })
+    ).not.toBeVisible();
+  }
+
+  async verifyMedicationNotShown(medication: string): Promise<void> {
+    await expect(
+      this.#page.getByTestId(dataTestIds.telemedEhrFlow.reviewTabMedicationsContainer).filter({
+        hasText: medication,
+      })
+    ).not.toBeVisible();
+  }
+
+  async verifyHospitalization(hospitalization: string): Promise<void> {
+    await expect(
+      this.#page.getByTestId(dataTestIds.progressNotePage.hospitalizationContainer).filter({
+        hasText: hospitalization,
+      })
+    ).toBeVisible();
+  }
+
+  async verifyHospitalizationNotShown(hospitalization: string): Promise<void> {
+    await expect(
+      this.#page.getByTestId(dataTestIds.progressNotePage.hospitalizationContainer).filter({
+        hasText: hospitalization,
+      })
+    ).not.toBeVisible();
+  }
+
+  async verifyHospitalizationNote(note: string): Promise<void> {
+    await expect(
+      this.#page.getByTestId(dataTestIds.progressNotePage.hospitalizationContainer).filter({
+        hasText: note,
+      })
+    ).toBeVisible();
+  }
+
+  async verifyHospitalizationNoteNotShown(note: string): Promise<void> {
+    await expect(
+      this.#page.getByTestId(dataTestIds.progressNotePage.hospitalizationContainer).filter({
+        hasText: note,
+      })
+    ).not.toBeVisible();
+  }
+
+  async verifyVitalIsShown(vitals: string, abnormal = false): Promise<void> {
+    await expect(this.#page.getByTestId(dataTestIds.progressNotePage.vitalsContainer)).toBeVisible();
+    const itemLocator = this.#page.getByTestId(dataTestIds.progressNotePage.vitalsItem).filter({ hasText: vitals });
+    await expect(itemLocator).toBeVisible();
+    await expect(itemLocator.getByTestId(dataTestIds.progressNotePage.alertIcon)).toBeVisible({ visible: abnormal });
+  }
+
+  async verifyVitalNotShown(vitals: string): Promise<void> {
+    await expect(
+      this.#page.getByTestId(dataTestIds.progressNotePage.vitalsContainer).filter({
+        hasText: new RegExp(vitals, 'i'),
+      })
+    ).not.toBeVisible();
+  }
+
+  async verifyVitalsNote(note: string): Promise<void> {
+    await expect(
+      this.#page.getByTestId(dataTestIds.progressNotePage.vitalsContainer).filter({
+        hasText: note,
+      })
+    ).toBeVisible();
+  }
+
+  async verifyVitalsNoteNotShown(note: string): Promise<void> {
+    await expect(
+      this.#page.getByTestId(dataTestIds.progressNotePage.vitalsContainer).filter({
+        hasText: note,
+      })
+    ).not.toBeVisible();
+  }
+
+  async verifyGivenCptCodeIsShown(cptCodeDisplay: string): Promise<void> {
+    const container = this.#page.getByTestId(dataTestIds.progressNotePage.cptCodes);
+    await expect(
+      container.getByText(cptCodeDisplay, { exact: true }),
+      `checking ${cptCodeDisplay} is visible`
+    ).toBeVisible();
+  }
+
+  abstract expectLoaded(): Promise<void>;
+}

@@ -1,0 +1,944 @@
+// cSpell:ignore annot, annots
+import fs from 'node:fs';
+import fontkit from '@pdf-lib/fontkit';
+import { captureException } from '@sentry/aws-serverless';
+import { DocumentReference } from 'fhir/r4b';
+import {
+  Color,
+  PDFDocument,
+  PDFFont,
+  PDFImage,
+  PDFName,
+  PDFNumber,
+  PDFPage,
+  PDFString,
+  rgb,
+  StandardFonts,
+} from 'pdf-lib';
+import { getLogoFor, SupportedObsImgAttachmentTypes } from 'utils';
+import { Y_POS_GAP } from './pdf-consts';
+import { ImageStyle, LineStyle, PageStyles, PdfClient, PdfClientStyles, TextStyle } from './types';
+
+export type PdfInfo = { uploadURL: string; title: string };
+
+export interface Column {
+  startXPos: number;
+  width: number;
+  content: string;
+  textStyle: TextStyle;
+}
+
+// For testing needs
+export function savePdfLocally(pdfBytes: Uint8Array): void {
+  // Write the Uint8Array to a file
+  fs.writeFile('myTestFile.pdf', pdfBytes, (err: any) => {
+    if (err) {
+      console.error('Error saving PDF:', err);
+    } else {
+      console.log('PDF saved successfully!');
+    }
+  });
+}
+
+type PdfDocumentPublishedStatusesKeys = 'published' | 'unpublished';
+export const PdfDocumentReferencePublishedStatuses: {
+  [key in PdfDocumentPublishedStatusesKeys]: 'final' | 'preliminary';
+} = {
+  published: 'final',
+  unpublished: 'preliminary',
+};
+
+export function isDocumentPublished(doc: DocumentReference): boolean {
+  return doc.docStatus === PdfDocumentReferencePublishedStatuses.published;
+}
+
+export function handleBadSpaces(text: string): string {
+  // https://github.com/nodejs/node/issues/46123
+  // replacing U+202f with simple whitespace due to bug in NodeJS v18.11 - 18.5
+  // for PDFs to work correctly
+  return text.replace(' ', ' ');
+}
+
+export function splitLongStringToPageSize(
+  text: string,
+  font: PDFFont,
+  fontSize: number,
+  desiredWidth: number
+): string[] {
+  const inputStrings = text.split('\n'); // handle new lines first
+  const resultStrings: string[] = [];
+
+  inputStrings.forEach((str) => {
+    const words = str.split(' ');
+
+    let validLine = '';
+    let lineWidth = 0;
+    words.forEach((word) => {
+      const wordWidth = font.widthOfTextAtSize(word + ' ', fontSize);
+      if (lineWidth + wordWidth <= desiredWidth) {
+        validLine = `${validLine.concat(word)} `;
+        lineWidth += wordWidth;
+      } else {
+        resultStrings.push(validLine);
+        validLine = word + ' ';
+        lineWidth = wordWidth;
+      }
+    });
+    resultStrings.push(validLine);
+  });
+  return resultStrings;
+}
+
+export const rgbNormalized = (r: number, g: number, b: number): Color => rgb(r / 255, g / 255, b / 255);
+
+export async function createPdfClient(initialStyles: PdfClientStyles): Promise<PdfClient> {
+  const pdfDoc = await PDFDocument.create();
+  pdfDoc.registerFontkit(fontkit);
+
+  let page: PDFPage;
+  let pageLeftBound = 0;
+  let pageRightBound = 0;
+  let currXPos = 0;
+  let currYPos = 0;
+  let bottomOfPageHeaderYPos = 0;
+  const pageTextWidth = (): number => {
+    return pageRightBound - pageLeftBound;
+  };
+  let pageStyles = initialStyles.initialPage;
+  const pages: PDFPage[] = [];
+  let currentPageIndex: number | undefined;
+
+  const addNewPage = (styles: PageStyles, newLeftBound?: number, newRightBound?: number): void => {
+    console.log('\nAdding new page');
+    console.log(`currentPageIndex is ${currentPageIndex} of ${pages.length} pages`);
+    let addedBrandNewPage = false;
+    // figure out if we just need to run on to a pre-existing page or truly add a new one
+    if (currentPageIndex !== undefined && currentPageIndex < pages.length - 1) {
+      console.log('Current page is not the last page. Setting page to the next page');
+      page = pages[currentPageIndex + 1];
+    } else {
+      console.log('Current page was the last page. Adding brand new page');
+      page = pdfDoc.addPage();
+      addedBrandNewPage = true;
+
+      page.setSize(styles.width, styles.height);
+
+      pageStyles = styles;
+      pages.push(page);
+    }
+
+    const { height, width } = page.getSize();
+    // Start at the top of the page then move down as elements are added to the PDF. If there is a header, then we need to set currYPos differently
+    currYPos = height - (styles.pageMargins.top ?? 0); // top of page. Content starts after this point
+    currYPos -= Y_POS_GAP; //by default, we have some kind of gap without this subtraction
+
+    pageLeftBound = newLeftBound ? newLeftBound : styles.pageMargins.left ?? 0;
+    pageRightBound = newRightBound ? newRightBound : width - (styles.pageMargins.right ?? 0);
+    currXPos = pageLeftBound;
+
+    if (currentPageIndex !== undefined) {
+      currentPageIndex++;
+      console.log(`Incrementing page index to ${currentPageIndex}`);
+    } else currentPageIndex = 0;
+
+    if (!addedBrandNewPage && styles.setHeadline && currentPageIndex !== 0) {
+      console.log(`On the next page and there is a header, setting currY pos to bottomOfPageHeaderYPos`);
+      currYPos = bottomOfPageHeaderYPos;
+      console.log(`currYPos is ${currYPos}. bottomOfPageHeaderYPos is ${bottomOfPageHeaderYPos}`);
+    }
+    if (addedBrandNewPage && styles.setHeadline) {
+      console.log('addedBrandNewPage is true and styles.setHeadline is defined. settingHeadline');
+      styles.setHeadline();
+      bottomOfPageHeaderYPos = currYPos;
+    }
+
+    console.log('Done with new page\n');
+  };
+
+  // adding initial page when initializing pdfClient
+  addNewPage(initialStyles.initialPage);
+
+  /**
+   * Designed to be called after all content has been written. Goes through each page of the document and writes a page number in the
+   * bottom margin. If margin is 0 or smaller than the text height, we can't write page numbers; it is a no-op in this case.
+   */
+  const numberPages = (textStyle: TextStyle): void => {
+    console.log('Numbering pages');
+    const bottomMargin = pageStyles.pageMargins.bottom;
+    if (!bottomMargin) {
+      console.warn('Unable to number pages, no bottom margin is set or no space is available.');
+      return;
+    }
+
+    const midMargin = bottomMargin / 2;
+    const textHeight = getTextDimensions('Page 1 of 2', textStyle).height;
+    if (textHeight >= midMargin) {
+      console.warn('Unable to number pages, text height exceeds half of margin available space.');
+      return;
+    }
+
+    const { font, fontSize, color, side } = textStyle;
+
+    const totalPages = pages.length;
+    // set current page back to index 0
+    // for each page, go through each one, write the page number, and then continue
+    for (let i = 0; i < totalPages; i++) {
+      currXPos = pageLeftBound;
+      // set y to middle of the margin
+      currYPos = midMargin;
+
+      currentPageIndex = i;
+      setPageByIndex(currentPageIndex);
+      const text = `Page ${i + 1} of ${totalPages}`;
+      const { width: lineWidth } = getTextDimensions(text, textStyle);
+      console.log(
+        `currXPos is ${currXPos}. currYPos is ${currYPos}. currentPageIndex is ${currentPageIndex}. Writing text '${text}'`
+      );
+
+      if (side === 'right') currXPos = pageLeftBound + pageTextWidth() - lineWidth;
+      else if (side === 'center') currXPos = pageLeftBound + (pageTextWidth() - lineWidth) / 2;
+
+      page.drawText(text, {
+        font: font,
+        size: fontSize,
+        x: currXPos,
+        y: currYPos,
+        color,
+      });
+      console.log(
+        `After draw text. currXPos is ${currXPos}. currYPos is ${currYPos}. currentPageIndex is ${currentPageIndex}. Wrote text '${text}'`
+      );
+    }
+    return;
+  };
+
+  const drawText = (text: string, textStyle: TextStyle): void => {
+    const { font, fontSize, color, side, spacing } = textStyle;
+    currXPos = pageLeftBound;
+
+    splitLongStringToPageSize(text, font, fontSize, pageTextWidth()).forEach((line, index) => {
+      const { width: lineWidth, height: lineHeight } = getTextDimensions(line, textStyle);
+      if (currYPos - lineHeight < (pageStyles.pageMargins.bottom ?? 0))
+        addNewPage(pageStyles, pageLeftBound, pageRightBound);
+
+      if (index !== 0) currYPos -= lineHeight + spacing; // skip first and add new line before writing text
+
+      if (side === 'right') currXPos = pageLeftBound + pageTextWidth() - lineWidth;
+      else if (side === 'center') currXPos = pageLeftBound + (pageTextWidth() - lineWidth) / 2;
+
+      page.drawText(line, {
+        font: font,
+        size: fontSize,
+        x: currXPos,
+        y: currYPos,
+        color,
+      });
+    });
+    if (textStyle.newLineAfter) {
+      const currentTextHeight = font.heightAtSize(fontSize);
+      currYPos -= currentTextHeight + spacing;
+      currXPos = pageLeftBound;
+    }
+  };
+
+  /**
+   * Draws text starting at the specified xPos. Will default to pageLeftBound if xPos is before
+   * left bound. Adds a newline if the starting xPos is at or after the rightPageBound.
+   *
+   * Warning: does not handle newlines in long strings
+   *
+   */
+  const drawStartXPosSpecifiedText = (
+    text: string,
+    textStyle: TextStyle,
+    startingXPos: number,
+    bounds?: { leftBound: number; rightBound: number }
+  ): { endXPos: number; endYPos: number } => {
+    console.log('In drawStartXPosSpecifiedText');
+    const { font, fontSize, spacing } = textStyle;
+    const leftBound = bounds?.leftBound !== undefined ? bounds.leftBound : pageLeftBound;
+    const rightBound = bounds?.rightBound !== undefined ? bounds.rightBound : pageRightBound;
+
+    const currentTextHeight = font.heightAtSize(fontSize);
+    if (startingXPos < leftBound) currXPos = leftBound;
+    else if (startingXPos >= rightBound) {
+      newLine(currentTextHeight);
+      currXPos = leftBound;
+    } else currXPos = startingXPos;
+
+    if (text.length > 0) {
+      const firstChar = text[0];
+      const firstWidth = font.widthOfTextAtSize(firstChar, fontSize);
+      const availableWidth = rightBound - currXPos;
+
+      if (availableWidth < firstWidth) {
+        console.log('Not enough width for first glyph — forcing newline');
+        newLine(currentTextHeight + spacing);
+        currXPos = leftBound;
+      }
+    }
+
+    if (bounds) {
+      console.log(`Drawing at xPos: ${leftBound}. String to draw is ${text}`);
+      drawTextSequential(text, textStyle, { leftBound, rightBound });
+    } else {
+      console.log(`Drawing at xPos: ${currXPos}. String to draw is ${text}`);
+      drawTextSequential(text, textStyle, { leftBound: currXPos, rightBound: pageRightBound });
+    }
+
+    if (textStyle.newLineAfter) {
+      console.log('>>>TextStyle included newline');
+      currYPos -= currentTextHeight + spacing;
+      currXPos = leftBound;
+    }
+
+    console.log('Done in drawStartXPosSpecifiedText');
+    return { endXPos: currXPos, endYPos: currYPos };
+  };
+
+  const drawTextSequential = (
+    text: string,
+    textStyle: Exclude<TextStyle, 'side'>,
+    bounds?: { leftBound: number; rightBound: number }
+  ): void => {
+    console.log('\nin drawTextSequential');
+    const { font, fontSize, color, spacing } = textStyle;
+    const { width: lineWidth, height: lineHeight } = getTextDimensions(text, textStyle);
+    const leftBound = bounds?.leftBound !== undefined ? bounds.leftBound : pageLeftBound;
+    const rightBound = bounds?.rightBound !== undefined ? bounds.rightBound : pageRightBound;
+
+    if (bounds?.leftBound !== undefined) currXPos = leftBound;
+    console.log(`Text is '${text}'\n
+      lineWidth is ${lineWidth}\n
+      lineHeight is ${lineHeight}\n
+      currXpos is ${currXPos}\n
+      leftBound is ${leftBound}\n
+      rightBound is ${rightBound}\n`);
+
+    // if the text contains \n, we need to recursively handle each of those ourselves, otherwise
+    // pdf-lib will try to do it for us, but with unpredictable line break spacing
+    if (text.includes('\n')) {
+      console.log('Found return character in text. recursively drawing each line');
+      const lines = text.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        console.log(`Drawing split line: '${lines[i]}'`);
+        drawTextSequential(lines[i], textStyle, bounds);
+        if (i < lines.length - 1) {
+          newLine(lineHeight + spacing + 2);
+        }
+      }
+      return;
+    }
+
+    // Add a new page if there's no space on the current page
+    if (currYPos - lineHeight < (pageStyles.pageMargins.bottom ?? 0)) {
+      addNewPage(pageStyles, pageLeftBound, pageRightBound);
+      currXPos = leftBound;
+    }
+
+    // Calculate available space on the current line
+    const availableWidth = rightBound - currXPos;
+    const totalWidth = rightBound - leftBound;
+    if (totalWidth <= 0) {
+      console.warn('Invalid text bounds. Skipping render', { leftBound, rightBound });
+      return;
+    }
+    console.log(`AvailableWidth is ${availableWidth}. Total width is ${totalWidth}`);
+
+    // If the text fits within the current line, draw it directly
+    if (lineWidth < totalWidth) {
+      console.log('lineWidth of text fits between left and right bounds');
+      if (lineWidth > availableWidth) {
+        console.log(
+          `lineWidth ${lineWidth} is greater than available width ${availableWidth}. Adding newline and drawing.`
+        );
+        newLine(lineHeight + spacing);
+      }
+      page.drawText(text, {
+        font: font,
+        size: fontSize,
+        x: currXPos,
+        y: currYPos,
+        color,
+      });
+      currXPos += lineWidth;
+
+      // If textStyle specifies to move to the next line after drawing
+      if (textStyle.newLineAfter) {
+        currYPos -= lineHeight + spacing;
+        currXPos = leftBound;
+      }
+    } else {
+      console.log('text will not fit between left and right bounds. Need to split text');
+      // If the text is too wide, find the part that fits
+      let fittingText = '';
+      let remainingText = text;
+      let currentWidth = 0;
+
+      // APPROACH 1: Split on spaces
+      // determine what fits based on word breaks to avoid cutting words off with linebreaks
+      const words = remainingText.split(' ');
+      const { width: firstWordWidth } = getTextDimensions(words[0], textStyle);
+      let splitMethodIsWords = true;
+
+      let elements = words;
+      let separator = ' ';
+      let widthOfSeparator = getTextDimensions(separator, textStyle).width;
+
+      // APPROACH 2: if the first word is itself bigger than the total width (rightBound - leftBound), then we need a different approach
+      // it's ok just to check the first word, because if subsequent words are too long, we recurse anyway
+      console.log(`words[0] is ${words[0]}. firstWordWidth is ${firstWordWidth}`);
+      if (firstWordWidth + widthOfSeparator > totalWidth) {
+        splitMethodIsWords = false;
+        elements = remainingText.split('');
+        separator = '';
+        widthOfSeparator = 0;
+      }
+
+      console.log(`Splitting method is ${splitMethodIsWords ? 'words' : 'characters'}`);
+      for (let i = 0; i < elements.length; i++) {
+        const { width: elementWidth } = getTextDimensions(elements[i], textStyle);
+        if (currentWidth + elementWidth + widthOfSeparator > availableWidth) {
+          fittingText = elements.slice(0, i).join(separator);
+          remainingText = elements.slice(i, undefined).join(separator);
+          break;
+        }
+        currentWidth += elementWidth + widthOfSeparator;
+      }
+
+      if (!fittingText) {
+        // Fresh line. newLine resets to pageLeftBound, so re-pin to the column.
+        newLine(lineHeight + spacing);
+        currXPos = leftBound;
+
+        const { width: firstWidth } = getTextDimensions(elements[0], textStyle);
+
+        if (firstWidth > totalWidth) {
+          // Column too narrow for even one element (caller pinned leftBound to a
+          // nearly-full line). Re-flow at full page width so nothing is dropped,
+          // mangled one glyph per line, or recursed on forever.
+          const pageWidth = pageRightBound - pageLeftBound;
+          if (firstWidth <= pageWidth) {
+            currXPos = pageLeftBound;
+            drawTextSequential(text, textStyle, { leftBound: pageLeftBound, rightBound: pageRightBound });
+            return;
+          }
+
+          // Element wider than the whole page: draw with overflow to make
+          // progress, then continue at full width.
+          console.warn('Element wider than the full page width; drawing with overflow', {
+            firstWidth,
+            pageWidth,
+          });
+          page.drawText(elements[0], {
+            font: font,
+            size: fontSize,
+            x: currXPos,
+            y: currYPos,
+            color,
+          });
+          const rest = elements.slice(1).join(separator);
+          if (rest) {
+            newLine(lineHeight);
+            drawTextSequential(rest, textStyle, { leftBound: pageLeftBound, rightBound: pageRightBound });
+          }
+          return;
+        }
+
+        // First element fits on a fresh line; retry there.
+        drawTextSequential(text, textStyle, bounds);
+        return;
+      }
+
+      // Draw the fitting part on the current line
+      page.drawText(fittingText, {
+        font: font,
+        size: fontSize,
+        x: currXPos,
+        y: currYPos,
+        color,
+      });
+
+      // Move to the next line and reset x position
+      newLine(lineHeight);
+
+      // Recursively call the function with the remaining text
+      console.log('recursively calling drawTextSequential');
+      drawTextSequential(remainingText, textStyle, bounds);
+    }
+  };
+
+  const drawImage = (img: PDFImage, styles: ImageStyle, textStyle?: TextStyle): void => {
+    const { width } = page.getSize();
+    const { height } = textStyle ? getTextDimensions('A', textStyle) : { height: styles.height };
+    if (currYPos - height < (pageStyles.pageMargins.bottom ?? 0)) addNewPage(pageStyles, pageLeftBound, pageRightBound);
+
+    currYPos -= styles.margin?.top ?? 0;
+    currXPos = styles.center ? (width - styles.width) / 2 : currXPos + (styles.margin?.left ?? 0);
+
+    page.drawImage(img, {
+      x: currXPos,
+      y: currYPos,
+      width: styles.width,
+      height: styles.height,
+    });
+    // space after image
+    if (styles.center) {
+      currYPos -= styles.height + (styles.margin?.bottom ?? 0);
+    } else {
+      currXPos += styles.width + (styles.margin?.right ?? 0);
+    }
+  };
+
+  const drawLabelValueRow = (
+    label: string,
+    value: string | undefined,
+    labelStyle: TextStyle,
+    valueStyle: TextStyle,
+    options?: {
+      drawDivider?: boolean;
+      dividerStyle?: LineStyle;
+      dividerMargin?: number;
+      defaultValue?: string;
+      spacing?: number;
+      labelValueGap?: number;
+    }
+  ): void => {
+    const drawDivider = options?.drawDivider ?? false;
+    const dividerMargin = options?.dividerMargin ?? 4;
+    const defaultValue = options?.defaultValue ?? '-';
+    const spacing = options?.spacing ?? Math.max(labelStyle.spacing ?? 0, valueStyle.spacing ?? 0);
+    const labelValueGap = options?.labelValueGap ?? 10;
+
+    const displayValue = !value || value.trim() === '' ? defaultValue : value;
+
+    const availableWidth = pageRightBound - pageLeftBound;
+
+    const maxLabelWidth = availableWidth * 0.5;
+    const maxValueWidth = availableWidth * 0.5 - labelValueGap;
+
+    const labelLines = splitLongStringToPageSize(label, labelStyle.font, labelStyle.fontSize, maxLabelWidth);
+    const valueLines = splitLongStringToPageSize(displayValue, valueStyle.font, valueStyle.fontSize, maxValueWidth);
+
+    const labelHeight = labelStyle.font.heightAtSize(labelStyle.fontSize) * labelLines.length;
+    const valueHeight = valueStyle.font.heightAtSize(valueStyle.fontSize) * valueLines.length;
+    const maxHeight = Math.max(labelHeight, valueHeight);
+
+    if (currYPos - maxHeight < (pageStyles.pageMargins.bottom ?? 0)) {
+      addNewPage(pageStyles, pageLeftBound, pageRightBound);
+    }
+
+    const startY = currYPos;
+    const startX = pageLeftBound;
+
+    let labelY = startY;
+    for (let i = 0; i < labelLines.length; i++) {
+      const line = labelLines[i];
+      const yPos = labelY - labelStyle.font.heightAtSize(labelStyle.fontSize, { descender: false });
+      page.drawText(line, {
+        font: labelStyle.font,
+        size: labelStyle.fontSize,
+        x: startX,
+        y: yPos,
+        color: labelStyle.color,
+      });
+      labelY -= labelStyle.font.heightAtSize(labelStyle.fontSize);
+    }
+
+    let valueY = startY;
+    for (let i = 0; i < valueLines.length; i++) {
+      const line = valueLines[i];
+      const lineWidth = valueStyle.font.widthOfTextAtSize(line, valueStyle.fontSize);
+      const yPos = valueY - valueStyle.font.heightAtSize(valueStyle.fontSize, { descender: false });
+
+      const valueX = pageRightBound - lineWidth;
+
+      page.drawText(line, {
+        font: valueStyle.font,
+        size: valueStyle.fontSize,
+        x: valueX,
+        y: yPos,
+        color: valueStyle.color,
+      });
+      valueY -= valueStyle.font.heightAtSize(valueStyle.fontSize);
+    }
+
+    currYPos = Math.min(labelY, valueY) - spacing;
+    currXPos = pageLeftBound;
+
+    if (drawDivider) {
+      const dividerStyle = options?.dividerStyle ?? {
+        thickness: 1,
+        color: rgbNormalized(0xdf, 0xe5, 0xe9),
+        margin: { top: dividerMargin, bottom: dividerMargin },
+      };
+
+      page.drawLine({
+        color: dividerStyle.color,
+        thickness: dividerStyle.thickness,
+        start: { x: pageLeftBound, y: currYPos - dividerMargin },
+        end: { x: pageRightBound, y: currYPos - dividerMargin },
+      });
+
+      currYPos -= dividerMargin * 2 - dividerStyle.thickness;
+    } else {
+      currYPos -= spacing;
+      currXPos = pageLeftBound;
+    }
+  };
+
+  const newLine = (yDrop: number): void => {
+    // add check if it's gonna fit in current page or we gonna need new one
+    currYPos -= yDrop;
+    currXPos = pageLeftBound;
+  };
+
+  const getCurrentPageIndex = (): number => {
+    return currentPageIndex ?? 0;
+  };
+
+  const getTotalPages = (): number => {
+    return pages.length;
+  };
+
+  const setPageByIndex = (pageIndex: number): void => {
+    if (!pages.length) throw new Error('Cannot set page. No pages exist');
+    if (pageIndex >= pages.length || pageIndex < 0) throw new Error('Page index is out of bounds');
+    page = pages[pageIndex];
+  };
+
+  const getX = (): number => {
+    return currXPos;
+  };
+
+  const getY = (): number => {
+    return currYPos;
+  };
+
+  const setX = (x: number): void => {
+    currXPos = x;
+  };
+
+  const setY = (y: number): void => {
+    currYPos = y;
+  };
+
+  const getLeftBound = (): number => {
+    return pageLeftBound;
+  };
+
+  const getRightBound = (): number => {
+    return pageRightBound;
+  };
+
+  const setLeftBound = (newBound: number): void => {
+    pageLeftBound = newBound;
+  };
+
+  const setRightBound = (newBound: number): void => {
+    pageRightBound = newBound;
+  };
+
+  const getTextDimensions = (text: string, textStyle: TextStyle): { width: number; height: number } => {
+    const { font, fontSize } = textStyle;
+    return {
+      width: font.widthOfTextAtSize(text, fontSize),
+      height: font.heightAtSize(fontSize),
+    };
+  };
+
+  const save = async (): Promise<Uint8Array> => {
+    return await pdfDoc.save();
+  };
+
+  const embedFont = async (file: Buffer): Promise<PDFFont> => {
+    return await pdfDoc.embedFont(new Uint8Array(file));
+  };
+
+  const embedStandardFont = async (font: StandardFonts): Promise<PDFFont> => {
+    return await pdfDoc.embedFont(font);
+  };
+
+  const embedImage = async (file: Buffer): Promise<PDFImage> => {
+    return await pdfDoc.embedPng(new Uint8Array(file));
+  };
+
+  const embedJpg = async (file: Buffer): Promise<PDFImage> => {
+    return await pdfDoc.embedJpg(new Uint8Array(file));
+  };
+
+  const embedPdfFromBase64 = async (base64String: string): Promise<void> => {
+    console.log('decoding base64');
+    const byteArray = Uint8Array.from(atob(base64String), (c) => c.charCodeAt(0));
+
+    console.log('getting total page count');
+    const sourcePdf = await PDFDocument.load(byteArray);
+    const totalPages = sourcePdf.getPageCount();
+    console.log(`will embed ${totalPages} pages`);
+
+    console.log('embedding PDF bytes');
+    const embeddedPages = await pdfDoc.embedPdf(
+      byteArray,
+      Array.from({ length: totalPages }, (_, i) => i)
+    );
+
+    console.log('adding embedded pages');
+    for (const embeddedPage of embeddedPages) {
+      const page = pdfDoc.addPage([embeddedPage.width, embeddedPage.height]);
+      page.drawPage(embeddedPage, {
+        x: 0,
+        y: 0,
+        width: embeddedPage.width,
+        height: embeddedPage.height,
+      });
+    }
+    console.log('done handling pdf attachment within pdf');
+  };
+
+  const embedImageFromBase64 = async (base64String: string, imgType: SupportedObsImgAttachmentTypes): Promise<void> => {
+    console.log('decoding base64');
+    const byteArray = Uint8Array.from(atob(base64String), (c) => c.charCodeAt(0));
+    console.log(`embedding ${imgType} IMG bytes`);
+    const image = imgType === 'PNG' ? await pdfDoc.embedPng(byteArray) : await pdfDoc.embedJpg(byteArray);
+    const page = pdfDoc.addPage();
+
+    const { width: pageWidth, height: pageHeight } = page.getSize();
+    const { width: imgWidth, height: imgHeight } = image;
+
+    const DEFAULT_MARGIN = 25;
+    const ITEM_WIDTH = pageWidth - DEFAULT_MARGIN * 2;
+    const IMAGE_MAX_HEIGHT = pageHeight - pageHeight * 0.25; // basically saying, never take up the whole page height wise
+    const scale = Math.max(image.width / ITEM_WIDTH, image.height / IMAGE_MAX_HEIGHT);
+    // if its larger, it will be scaled down else it will keep its original dimensions
+    const drawWidth = scale > 1 ? image.width / scale : image.width;
+    const drawHeight = scale > 1 ? image.height / scale : image.height;
+
+    console.log('drawing the image attachment on a new page', imgWidth, imgHeight);
+    page.drawImage(image, {
+      x: DEFAULT_MARGIN,
+      y: pageHeight - drawHeight - DEFAULT_MARGIN,
+      width: drawWidth,
+      height: drawHeight,
+    });
+  };
+
+  const drawSeparatedLine = (lineStyle: LineStyle): void => {
+    const startX = pageLeftBound + (lineStyle.margin?.left ?? 0);
+    const endX = pageRightBound - (lineStyle.margin?.right ?? 0);
+    // we should add 16 to move line in between strings and then subtract margins
+    const coordY = currYPos + 16 - (lineStyle.margin?.top ?? 0);
+    page.drawLine({
+      color: lineStyle.color,
+      thickness: lineStyle.thickness,
+      start: { x: startX, y: coordY },
+      end: { x: endX, y: coordY },
+    });
+    currYPos -= (lineStyle.margin?.top ?? 0) + lineStyle.thickness + (lineStyle.margin?.bottom ?? 0);
+  };
+
+  const setPageStyles = (newStyles: PageStyles): void => {
+    pageStyles = newStyles;
+  };
+
+  const drawVariableWidthColumns = (columns: Column[], yPosStartOfColumn: number, startPageIndex: number): void => {
+    console.log('drawing variable width columns');
+    if (!columns.length) return;
+
+    const maxEndXPos = columns.reduce((acc: number, col: Column) => {
+      console.log(`col.startXPos + col.width: ${col.startXPos} + ${col.width}`);
+      const colEndXPos = col.startXPos + col.width;
+      return colEndXPos > acc ? colEndXPos : acc;
+    }, 0);
+
+    const pageWidth = pageRightBound - pageLeftBound;
+    const DEFAULT_COL_GAP = 15;
+
+    console.log(`maxEndXPos: ${maxEndXPos}. PageRightBound: ${pageRightBound}. PageWidth: ${pageWidth}`);
+    if (maxEndXPos > pageRightBound) {
+      console.warn(
+        `Columns and content exceed page width. Will attempt to split into even columns with a ${DEFAULT_COL_GAP}pt gap`
+      );
+
+      // determine what equal columns and gaps would be
+      const numGaps = columns.length - 1;
+      const totalGapWidth = numGaps * DEFAULT_COL_GAP;
+
+      const totalAvailableContentWidth = pageWidth - totalGapWidth;
+      const equalColumnWidth = totalAvailableContentWidth / columns.length;
+
+      for (let i = 0; i < columns.length; i++) {
+        const newStartingPos = pageLeftBound + (equalColumnWidth + DEFAULT_COL_GAP) * i;
+        columns[i] = { ...columns[i], startXPos: newStartingPos, width: equalColumnWidth };
+      }
+    }
+
+    let maxPageIndex = currentPageIndex;
+    let minYPos = currYPos;
+    console.log(`before columns. maxPageIndex: ${maxPageIndex}. minYPos: ${minYPos}`);
+
+    columns.forEach((col, idx) => {
+      console.log(`\n\n>>>Drawing column ${idx} for ${JSON.stringify({ ...col, textStyle: undefined })}`);
+      // if a new page got added on a previous column, we need the next column to go back to the previous page
+      // continue writing, and if that column needs to run onto a new page, it needs to run onto the pre-existing new page
+      console.log(`Starting column on page index ${startPageIndex}`);
+      setPageByIndex(startPageIndex);
+      currentPageIndex = startPageIndex;
+
+      console.log(`yPosStartOfColumn is ${yPosStartOfColumn}. Current yPos is ${currYPos}`);
+      console.log(`Setting yPos to ${yPosStartOfColumn}`);
+      currYPos = yPosStartOfColumn;
+
+      const { content, textStyle, width, startXPos } = col;
+      console.log(`This is getY at start of column ${currYPos} for col ${col.content}`);
+      drawTextSequential(`${content}`, textStyle, {
+        leftBound: startXPos,
+        rightBound: startXPos + width,
+      });
+      console.log(
+        `This is getY at end of column ${currYPos} for col ${col.content}. currentPageIndex is ${currentPageIndex}`
+      );
+
+      // if a column took us to the top of the next page, we want to track that, because when we're done writing columns, page index and y need to go back there
+      if (maxPageIndex === undefined) {
+        // not sure when this would happen but ok
+        maxPageIndex = currentPageIndex;
+      } else if (currentPageIndex > maxPageIndex) {
+        maxPageIndex = currentPageIndex;
+        minYPos = currYPos;
+      } else if (maxPageIndex === currentPageIndex && currYPos < minYPos) {
+        minYPos = currYPos;
+      }
+    });
+
+    // set the cursor back to the lowest point we got while drawing columns
+    console.log(`Done drawing columns. Setting current page index to ${maxPageIndex} and currYPos to ${minYPos}`);
+    setPageByIndex(maxPageIndex!);
+    currentPageIndex = maxPageIndex;
+    currYPos = minYPos;
+  };
+
+  const drawLink = (text: string, url: string, style: TextStyle): void => {
+    const { width, height } = getTextDimensions(text, style);
+    const x = currXPos;
+    const y = currYPos;
+
+    page.drawText(text, {
+      x,
+      y,
+      size: style.fontSize,
+      font: style.font,
+      color: style.color,
+    });
+
+    const linkAnnotation = pdfDoc.context.obj({
+      Type: PDFName.of('Annot'),
+      Subtype: PDFName.of('Link'),
+      Rect: pdfDoc.context.obj([PDFNumber.of(x), PDFNumber.of(y), PDFNumber.of(x + width), PDFNumber.of(y + height)]),
+      Border: pdfDoc.context.obj([PDFNumber.of(0), PDFNumber.of(0), PDFNumber.of(0)]),
+      A: pdfDoc.context.obj({
+        Type: PDFName.of('Action'),
+        S: PDFName.of('URI'),
+        URI: PDFString.of(url),
+      }),
+    });
+    const linkRef = pdfDoc.context.register(linkAnnotation);
+    const existingAnnots = page.node.Annots();
+
+    if (existingAnnots) {
+      existingAnnots.push(linkRef);
+    } else {
+      page.node.set(PDFName.of('Annots'), pdfDoc.context.obj([linkRef]));
+    }
+
+    currXPos += width;
+    if (style.newLineAfter) {
+      currYPos -= height + style.spacing;
+      currXPos = pageLeftBound;
+    }
+  };
+
+  const getPageTopY = (): number => {
+    const { height } = page.getSize();
+    return height - (pageStyles.pageMargins.top ?? 0) - Y_POS_GAP;
+  };
+
+  return {
+    addNewPage,
+    drawText,
+    drawTextSequential,
+    drawStartXPosSpecifiedText,
+    drawImage,
+    drawLabelValueRow,
+    newLine,
+    getX,
+    getY,
+    getPageTopY,
+    setX,
+    setY,
+    save,
+    embedFont,
+    embedStandardFont,
+    embedImage,
+    embedJpg,
+    embedPdfFromBase64,
+    embedImageFromBase64,
+    drawSeparatedLine,
+    getLeftBound,
+    getRightBound,
+    setLeftBound,
+    setRightBound,
+    getTextDimensions,
+    setPageStyles,
+    drawVariableWidthColumns,
+    getCurrentPageIndex,
+    setPageByIndex,
+    getTotalPages,
+    drawLink,
+    numberPages,
+  };
+}
+
+export const SEPARATED_LINE_STYLE: LineStyle = {
+  thickness: 1,
+  color: rgbNormalized(227, 230, 239),
+  margin: {
+    top: 8,
+    bottom: 8,
+  },
+};
+
+export const BLACK_LINE_STYLE = { ...SEPARATED_LINE_STYLE, color: rgbNormalized(0, 0, 0) };
+
+export const calculateAge = (dob: string): number => {
+  const dobDate = new Date(dob);
+  const today = new Date();
+  const age = today.getFullYear() - dobDate.getFullYear();
+  const monthDiff = today.getMonth() - dobDate.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dobDate.getDate())) {
+    return age - 1;
+  }
+  return age;
+};
+
+export async function getPdfLogo(): Promise<Buffer | undefined> {
+  const url = getLogoFor('pdf');
+  try {
+    if (!url) {
+      return fs.readFileSync('./assets/logo.png');
+    }
+
+    if (url.startsWith('http')) {
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`Failed to fetch logo: ${res.status} ${res.statusText}`);
+      }
+      return Buffer.from(await res.arrayBuffer());
+    }
+
+    return fs.readFileSync(url);
+  } catch (error) {
+    console.warn(`Could not load PDF logo from "${url || './assets/logo.png'}": ${(error as Error).message}`);
+    captureException(error);
+    return undefined;
+  }
+}

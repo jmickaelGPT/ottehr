@@ -1,0 +1,32 @@
+import { TextField } from '@mui/material';
+import { ControllerRenderProps, FieldValues, useFormContext } from 'react-hook-form';
+import { configAoeTextEntryTestId } from '../utils/test-ids';
+interface FreeTextQuestionProps {
+  questionText: string;
+  linkId: string;
+  required: boolean;
+  isReadOnly?: boolean;
+  field: ControllerRenderProps<FieldValues, string>;
+}
+
+export const AOEFreeTextQuestion: React.FC<FreeTextQuestionProps> = (props) => {
+  // free text field
+  const {
+    formState: { errors },
+  } = useFormContext();
+
+  const { questionText, linkId, required, isReadOnly, field } = props;
+
+  return (
+    <TextField
+      {...field}
+      id={`free-text-${linkId}`}
+      label={questionText}
+      sx={{ width: '100%' }}
+      required={required}
+      error={!!errors[linkId]}
+      // max length for labs input is 150 characters https://github.com/masslight/ottehr/issues/2467
+      inputProps={{ 'data-testid': configAoeTextEntryTestId(linkId), readOnly: isReadOnly, maxLength: 150 }}
+    />
+  );
+};

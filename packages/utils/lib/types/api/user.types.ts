@@ -1,0 +1,78 @@
+import { User as OystehrUser } from '@oystehr/sdk';
+import { Coding, Practitioner } from 'fhir/r4b';
+import { PARTICIPATION_CODE_SYSTEM } from '../../fhir';
+
+export type User = OystehrUser & {
+  profileResource?: Practitioner;
+  faxNumber?: string;
+  addressLine1?: string;
+  addressLine2?: string;
+  addressCity?: string;
+  addressState?: string;
+  addressZip?: string;
+  birthDate?: string;
+};
+
+export enum RoleType {
+  Administrator = 'Administrator',
+  AssistantAdmin = 'AssistantAdmin',
+  Billing = 'Billing',
+  CallCentre = 'CallCentre',
+  CustomerSupport = 'Customer Support',
+  FrontDesk = 'Front Desk',
+  Inactive = 'Inactive',
+  Manager = 'Manager',
+  // Medical Assistant
+  NewUser = 'NewUser',
+  Provider = 'Provider',
+  RegionalTelemedLead = 'RegionalTelemedLead',
+  Staff = 'Staff',
+}
+
+export interface AccessPolicy {
+  rule: {
+    action: string | string[];
+    resource: string | string[];
+    effect: 'Allow' | 'Deny';
+  }[];
+}
+
+export const UserRole = (code: string, display: string): Coding[] => [
+  {
+    system: PARTICIPATION_CODE_SYSTEM,
+    code,
+    display,
+  },
+];
+
+export const AVAILABLE_EMPLOYEE_ROLES: {
+  value: RoleType;
+  label: string;
+  hint: string;
+}[] = [
+  {
+    value: RoleType.Administrator,
+    label: 'Administrator',
+    hint: `Adjust full settings for entire system`,
+  },
+  {
+    value: RoleType.Manager,
+    label: 'Manager',
+    hint: `Adjust operating hours or schedule overrides; adjust pre-booked visits per hour`,
+  },
+  {
+    value: RoleType.Staff,
+    label: 'Staff',
+    hint: `No settings changes; essentially read-only`,
+  },
+  {
+    value: RoleType.Provider,
+    label: 'Provider',
+    hint: `A clinician, such as a doctor, a PA or an NP`,
+  },
+  {
+    value: RoleType.CustomerSupport,
+    label: 'Customer Support',
+    hint: `A customer support representative`,
+  },
+];

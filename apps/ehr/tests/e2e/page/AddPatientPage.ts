@@ -1,0 +1,159 @@
+import { expect, Page } from '@playwright/test';
+import { dataTestIds } from '../../../src/constants/data-test-ids';
+
+export class AddPatientPage {
+  #page: Page;
+
+  constructor(page: Page) {
+    this.#page = page;
+  }
+
+  async selectOffice(officeName: string): Promise<void> {
+    await this.#page.getByTestId(dataTestIds.addPatientPage.bookableSelect).click();
+    await this.#page.locator(`li[role="option"]:has-text("${officeName}")`).first().click();
+  }
+
+  async enterMobilePhone(phone: string): Promise<void> {
+    await this.#page.getByTestId(dataTestIds.addPatientPage.mobilePhoneInput).locator('input').fill(phone);
+  }
+
+  async verifyMobilePhoneNumberValidationErrorShown(): Promise<void> {
+    await expect(
+      this.#page.locator('p:text("Phone number must be 10 digits in the format (xxx) xxx-xxxx")')
+    ).toBeVisible();
+  }
+
+  async verifySearchForPatientsErrorShown(): Promise<void> {
+    await expect(this.#page.locator('p:text("Please search for patients before adding")')).toBeVisible();
+  }
+
+  async clickSearchForPatientsButton(): Promise<void> {
+    await this.#page.getByTestId(dataTestIds.addPatientPage.searchForPatientsButton).click();
+  }
+
+  async clickAddButton(): Promise<void> {
+    await this.#page.getByTestId(dataTestIds.addPatientPage.addButton).click();
+  }
+
+  async clickCancelButton(): Promise<void> {
+    await this.#page.getByTestId(dataTestIds.addPatientPage.cancelButton).click();
+  }
+
+  async verifyPageStillOpened(): Promise<void> {
+    await this.#page.waitForTimeout(1000);
+    await expectAddPatientPage(this.#page);
+  }
+
+  async clickPatientNotFoundButton(): Promise<void> {
+    await this.#page.getByTestId(dataTestIds.addPatientPage.patientNotFoundButton).click();
+    // Wait for new patient form to appear
+    await expect(this.#page.locator('[placeholder="MM/DD/YYYY"]')).toBeVisible({ timeout: 60_000 });
+  }
+
+  async enterFirstName(firstName: string): Promise<void> {
+    await this.#page.getByTestId(dataTestIds.addPatientPage.firstNameInput).locator('input').fill(firstName);
+  }
+
+  async enterLastName(lastName: string): Promise<void> {
+    await this.#page.getByTestId(dataTestIds.addPatientPage.lastNameInput).locator('input').fill(lastName);
+  }
+
+  async enterDateOfBirth(dateOfBirth: string): Promise<void> {
+    const locator = this.#page.locator('[placeholder="MM/DD/YYYY"]');
+    await locator.waitFor({ state: 'visible', timeout: 60_000 });
+    await locator.click();
+    await this.#page.waitForTimeout(2000);
+    // just because of date input for some reason not accepting wrong date
+    await locator.pressSequentially(dateOfBirth);
+  }
+
+  async selectSexAtBirth(sexAtBirth: string): Promise<void> {
+    await this.#page.getByTestId(dataTestIds.addPatientPage.sexAtBirthDropdown).click();
+    await this.#page.getByText(sexAtBirth, { exact: true }).click();
+  }
+
+  async selectReasonForVisit(reasonForVisit: string): Promise<void> {
+    await this.#page.getByTestId(dataTestIds.addPatientPage.reasonForVisitDropdown).click();
+    await this.#page.getByText(reasonForVisit).click();
+  }
+
+  async selectVisitType(visitType: string): Promise<void> {
+    await this.#page.getByTestId(dataTestIds.addPatientPage.visitTypeDropdown).click();
+    await this.#page.getByText(visitType).click();
+  }
+
+  async verifyDateFormatValidationErrorShown(): Promise<void> {
+    await expect(this.#page.locator('p:text("please enter date in format MM/DD/YYYY")')).toBeVisible();
+  }
+
+  async selectExistingPatient(existingPatient: string): Promise<void> {
+    await this.#page.getByLabel(existingPatient).first().check();
+  }
+
+  async clickPrefillForButton(): Promise<void> {
+    await this.#page.getByTestId(dataTestIds.addPatientPage.prefillForButton).click();
+  }
+
+  async verifyPrefilledPatientName(patientName: string): Promise<void> {
+    await expect(
+      this.#page.getByTestId(dataTestIds.addPatientPage.prefilledPatientName).getByText(patientName)
+    ).toBeVisible();
+  }
+
+  async verifyPrefilledPatientBirthday(patientBirthday: string): Promise<void> {
+    await expect(
+      this.#page.getByTestId(dataTestIds.addPatientPage.prefilledPatientBirthday).getByText(patientBirthday)
+    ).toBeVisible();
+  }
+
+  async verifyPrefilledPatientBirthSex(patientBirthSex: string): Promise<void> {
+    await expect(
+      this.#page.getByTestId(dataTestIds.addPatientPage.prefilledPatientBirthSex).getByText(patientBirthSex)
+    ).toBeVisible();
+  }
+
+  async verifyPrefilledPatientEmail(patientEmail: string): Promise<void> {
+    await expect(
+      this.#page.getByTestId(dataTestIds.addPatientPage.prefilledPatientEmail).getByText(patientEmail)
+    ).toBeVisible();
+  }
+
+  async selectFirstAvailableSlot(): Promise<{ time: string; date: string }> {
+    const buttonLocator = this.#page.getByTestId(dataTestIds.slots.slot).first();
+    // Read the slot's local date BEFORE clicking — the data attribute is on the
+    // slot button and the component should not unmount it on click, but reading
+    // first avoids any race with state updates.
+    const date = (await buttonLocator.getAttribute('data-slot-date')) ?? '';
+    await buttonLocator.click();
+    const time = (await buttonLocator.textContent()) ?? '';
+    return { time, date };
+  }
+
+  async clickCloseSelectDateWarningDialog(): Promise<void> {
+    await this.#page.getByTestId(dataTestIds.dialog.closeButton).click();
+  }
+
+  async selectServiceCategory(serviceCategory: string): Promise<void> {
+    const dropdown = this.#page.getByTestId(dataTestIds.addPatientPage.serviceCategoryDropdown);
+    const isDisabled = await dropdown.evaluate(
+      (el) => el.getAttribute('aria-disabled') === 'true' || el.classList.contains('Mui-disabled')
+    );
+    if (isDisabled) {
+      await expect(dropdown).toContainText(serviceCategory);
+    } else {
+      await dropdown.click();
+      await this.#page.getByText(serviceCategory).click();
+    }
+  }
+}
+
+export async function expectAddPatientPage(page: Page): Promise<AddPatientPage> {
+  await page.waitForURL(`/visits/add`);
+  await expect(page.locator('h3').getByText('Add Visit')).toBeVisible();
+  return new AddPatientPage(page);
+}
+
+export async function openAddPatientPage(page: Page): Promise<AddPatientPage> {
+  await page.goto(`/visits/add`);
+  return expectAddPatientPage(page);
+}

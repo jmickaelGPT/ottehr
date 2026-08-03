@@ -1,0 +1,679 @@
+import Oystehr from '@oystehr/sdk';
+import {
+  Address,
+  Appointment,
+  Location,
+  Patient,
+  Questionnaire,
+  QuestionnaireItem,
+  QuestionnaireResponseItem,
+  Schedule,
+  Slot,
+} from 'fhir/r4b';
+import { DateTime } from 'luxon';
+import { FHIR_APPOINTMENT_INTAKE_HARVESTING_COMPLETED_TAG, isLocationVirtual } from '../fhir';
+import {
+  IN_PERSON_INTAKE_PAPERWORK_QUESTIONNAIRE,
+  ServiceCategoryCode,
+  VIRTUAL_INTAKE_PAPERWORK_QUESTIONNAIRE,
+} from '../ottehr-config';
+import {
+  CreateAppointmentInputParams,
+  CreateAppointmentResponse,
+  CreateSlotParams,
+  E2E_TEST_RESOURCE_PROCESS_ID_SYSTEM,
+  PatchPaperworkParameters,
+  PatientInfo,
+  PersonSex,
+  ServiceMode,
+  SubmitPaperworkParameters,
+} from '../types';
+import {
+  getAdditionalQuestionsAnswers,
+  getAllergiesStepAnswers,
+  getAttorneyInformationStepAnswers,
+  getCardPaymentStepAnswers,
+  getConsentStepAnswers,
+  getContactInformationAnswers,
+  getEmergencyContactStepAnswers,
+  getEmployerInformationStepAnswers,
+  getInviteParticipantStepAnswers,
+  getMedicalConditionsStepAnswers,
+  getMedicationsStepAnswers,
+  getPatientDetailsStepAnswers,
+  getPaymentOptionSelfPayAnswers,
+  getPreferredPharmacyStepAnswers,
+  getPrimaryCarePhysicianStepAnswers,
+  getResponsiblePartyStepAnswers,
+  getSchoolWorkNoteStepAnswers,
+  getSurgicalHistoryStepAnswers,
+  isoToDateObject,
+} from './helpers';
+import { chooseJson } from './oystehrApi';
+
+interface AppointmentData {
+  firstNames?: string[];
+  lastNames?: string[];
+  reasonsForVisit?: string[];
+  phoneNumbers?: string[];
+  emails?: string[];
+  gender?: string;
+  birthDate?: string;
+  telecom?: {
+    system: string;
+    value: string;
+  }[];
+  address?: Address[];
+}
+
+interface DemoConfig {
+  numberOfAppointments?: number;
+}
+
+type DemoAppointmentData = AppointmentData & DemoConfig;
+
+interface PaperworkStepDefinition {
+  linkId: string;
+  getAnswers: () => PatchPaperworkParameters['answers'];
+}
+
+const findItemByLinkId = (items: QuestionnaireItem[] | undefined, linkId: string): boolean => {
+  if (!items) return false;
+  return items.some((item: QuestionnaireItem) => {
+    if (item.linkId === linkId) return true;
+    if (item.item) return findItemByLinkId(item.item, linkId);
+    return false;
+  });
+};
+
+const getQuestionnaireForServiceMode = (serviceMode: ServiceMode): Questionnaire | undefined => {
+  return serviceMode === ServiceMode.virtual
+    ? VIRTUAL_INTAKE_PAPERWORK_QUESTIONNAIRE()
+    : IN_PERSON_INTAKE_PAPERWORK_QUESTIONNAIRE();
+};
+
+export const questionnaireHasPage = (serviceMode: ServiceMode, linkId: string): boolean => {
+  const questionnaire = getQuestionnaireForServiceMode(serviceMode);
+  if (!questionnaire?.item) return false;
+  return findItemByLinkId(questionnaire.item, linkId);
+};
+
+export const hasEmployerInformationPage = (): boolean => {
+  return questionnaireHasPage(ServiceMode['in-person'], 'employer-information-page');
+};
+
+export const hasAttorneyInformationPage = (): boolean => {
+  return questionnaireHasPage(ServiceMode['in-person'], 'attorney-mva-page');
+};
+
+const getAllPaperworkSteps = (
+  patientInfo: PatientInfo,
+  birthDate: { day: string; month: string; year: string } | undefined
+): PaperworkStepDefinition[] => [
+  {
+    linkId: 'contact-information-page',
+    getAnswers: () =>
+      getContactInformationAnswers({
+        firstName: patientInfo.firstName,
+        lastName: patientInfo.lastName,
+        ...(birthDate ? { birthDate } : {}),
+        email: patientInfo.email,
+        phoneNumber: patientInfo.phoneNumber,
+        birthSex: patientInfo.sex,
+      }),
+  },
+  { linkId: 'patient-details-page', getAnswers: () => getPatientDetailsStepAnswers({}) },
+  { linkId: 'primary-care-physician-page', getAnswers: () => getPrimaryCarePhysicianStepAnswers({}) },
+  { linkId: 'pharmacy-page', getAnswers: () => getPreferredPharmacyStepAnswers() },
+  { linkId: 'current-medications-page', getAnswers: () => getMedicationsStepAnswers() },
+  { linkId: 'allergies-page', getAnswers: () => getAllergiesStepAnswers() },
+  { linkId: 'medical-history-page', getAnswers: () => getMedicalConditionsStepAnswers() },
+  { linkId: 'surgical-history-page', getAnswers: () => getSurgicalHistoryStepAnswers() },
+  { linkId: 'payment-option-page', getAnswers: () => getPaymentOptionSelfPayAnswers() },
+  { linkId: 'responsible-party-page', getAnswers: () => getResponsiblePartyStepAnswers({}) },
+  { linkId: 'employer-information-page', getAnswers: () => getEmployerInformationStepAnswers({}) },
+  { linkId: 'emergency-contact-page', getAnswers: () => getEmergencyContactStepAnswers({}) },
+  { linkId: 'attorney-mva-page', getAnswers: () => getAttorneyInformationStepAnswers({}) },
+  { linkId: 'card-payment-page', getAnswers: () => getCardPaymentStepAnswers() },
+  { linkId: 'school-work-note-page', getAnswers: () => getSchoolWorkNoteStepAnswers() },
+  { linkId: 'invite-participant-page', getAnswers: () => getInviteParticipantStepAnswers() },
+  { linkId: 'additional-page', getAnswers: () => getAdditionalQuestionsAnswers({ useRandomAnswers: true }) },
+  { linkId: 'consent-forms-page', getAnswers: () => getConsentStepAnswers({}) },
+];
+
+export const buildPaperworkPatches = (
+  patientInfo: PatientInfo,
+  birthDate: { day: string; month: string; year: string } | undefined,
+  serviceMode: ServiceMode
+): QuestionnaireResponseItem[] => {
+  const allSteps = getAllPaperworkSteps(patientInfo, birthDate);
+  return allSteps.filter((step) => questionnaireHasPage(serviceMode, step.linkId)).map((step) => step.getAnswers());
+};
+
+const DEFAULT_FIRST_NAMES = [
+  'Alice',
+  'Bob',
+  'Charlie',
+  'Diana',
+  'Ethan',
+  'Gabriel',
+  'Hannah',
+  'Jake',
+  'John',
+  'Jane',
+  'Katherine',
+  'Liam',
+  'Mia',
+  'Noah',
+  'Olivia',
+  'William',
+];
+const DEFAULT_LAST_NAMES = [
+  'Smith',
+  'Johnson',
+  'Williams',
+  'Jones',
+  'Brown',
+  'Clark',
+  'Davis',
+  'Elliott',
+  'Foster',
+  'Garcia',
+  'Hernandez',
+];
+const DEFAULT_REASONS_FOR_VISIT = [
+  'Cough and/or congestion',
+  'Fever',
+  'Throat pain',
+  'Ear pain',
+  'Vomiting and/or diarrhea',
+  'Abdominal (belly) pain',
+  'Rash or skin issue',
+  'Urinary problem',
+  'Breathing problem',
+  'Injury to arms or legs',
+  'Injury to head or fall on head',
+  'Cut to arms or legs',
+  'Cut to face or head',
+  'Choked or swallowed something',
+  'Allergic reaction',
+  'Eye concern',
+];
+
+export type GetPaperworkAnswers = ({
+  patientInfo,
+  zambdaUrl,
+  authToken,
+  projectId,
+  appointmentId,
+}: {
+  patientInfo: PatientInfo;
+  zambdaUrl: string;
+  authToken: string;
+  projectId: string;
+  appointmentId: string;
+}) => Promise<QuestionnaireResponseItem[]>;
+
+export type SampleAppointmentResponse = CreateAppointmentResponse & {
+  selectedLocation: Location;
+};
+
+export const createSampleAppointments = async ({
+  oystehr,
+  authToken,
+  phoneNumber,
+  createAppointmentZambdaId,
+  zambdaUrl,
+  selectedLocationId,
+  locationState,
+  demoData,
+  projectId,
+  paperworkAnswers,
+  serviceMode,
+  appointmentMetadata,
+  skipPaperwork,
+  serviceCategory,
+}: {
+  oystehr: Oystehr | undefined;
+  authToken: string;
+  phoneNumber: string;
+  createAppointmentZambdaId: string;
+  zambdaUrl: string;
+  selectedLocationId?: string;
+  locationState?: string;
+  demoData?: DemoAppointmentData;
+  projectId: string;
+  paperworkAnswers?: GetPaperworkAnswers;
+  serviceMode?: ServiceMode;
+  serviceCategory?: ServiceCategoryCode;
+  appointmentMetadata?: Appointment['meta'];
+  skipPaperwork?: boolean;
+}): Promise<SampleAppointmentResponse> => {
+  if (!projectId) {
+    throw new Error('PROJECT_ID is not set');
+  }
+
+  if (!oystehr) {
+    console.log('oystehr client is not defined');
+    throw new Error('oystehr client is not defined');
+  }
+
+  try {
+    const numberOfAppointments = demoData?.numberOfAppointments || 10;
+
+    // Run all appointment creations in parallel
+    const appointmentPromises: Promise<SampleAppointmentResponse | null>[] = Array.from(
+      { length: numberOfAppointments },
+      async (_, i) => {
+        try {
+          const serviceModeToUse = serviceMode || (i % 2 === 0 ? ServiceMode['in-person'] : ServiceMode.virtual);
+
+          const randomPatientInfo = await generateRandomPatientInfo(
+            oystehr,
+            zambdaUrl,
+            authToken,
+            projectId,
+            serviceModeToUse,
+            phoneNumber,
+            {
+              firstNames: DEFAULT_FIRST_NAMES,
+              lastNames: DEFAULT_LAST_NAMES,
+              reasonsForVisit: DEFAULT_REASONS_FOR_VISIT,
+              ...demoData,
+            },
+            selectedLocationId,
+            locationState,
+            serviceCategory,
+            i
+          );
+
+          if (appointmentMetadata) {
+            randomPatientInfo.appointmentMetadata = appointmentMetadata;
+          } else {
+            const sampleAppointmentMeta = {
+              tag: [
+                {
+                  system: E2E_TEST_RESOURCE_PROCESS_ID_SYSTEM,
+                  code: `sample-appointments-from-outside-E2E-${DateTime.now().toISO()}`,
+                },
+              ],
+            };
+            randomPatientInfo.appointmentMetadata = sampleAppointmentMeta;
+          }
+
+          const createAppointmentResponse = await fetch(`${zambdaUrl}/zambda/${createAppointmentZambdaId}/execute`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${authToken}`,
+            },
+            body: JSON.stringify(randomPatientInfo),
+          });
+
+          if (!createAppointmentResponse.ok) {
+            let responseBody: string;
+            const text = await createAppointmentResponse.text();
+            try {
+              responseBody = JSON.stringify(JSON.parse(text), null, 2);
+            } catch {
+              responseBody = text;
+            }
+            // On-failure diagnostic for the recurring 4019 flake. slotId +
+            // worker + timestamp is enough to fetch the slot manually
+            // later, correlate against parallel runs, and check whether it
+            // elapsed between create-slot and create-appointment.
+            const diagnostic = JSON.stringify({
+              slotId: randomPatientInfo.slotId,
+              worker: process.env.TEST_PARALLEL_INDEX ?? 'n/a',
+              appointmentIndex: i,
+              serviceMode: serviceModeToUse,
+              timestamp: DateTime.now().toISO(),
+            });
+            throw new Error(
+              `Failed to create appointment. Diagnostic: ${diagnostic}\n` +
+                `Status: ${createAppointmentResponse.status}\nResponse body: ${responseBody}`
+            );
+          }
+
+          console.log(`Appointment ${i + 1} created successfully.`);
+
+          const appointmentData = await createAppointmentResponse.json();
+
+          if (!appointmentData.output) {
+            console.error('Error: appointment data output is missing');
+            throw new Error('Error: appointment data output is missing');
+          }
+
+          if (appointmentData.status !== 200) {
+            console.error(`Error creating appointment: ${JSON.stringify(appointmentData)}`);
+            return null;
+          }
+
+          const typedAppointment = appointmentData.output as CreateAppointmentResponse;
+
+          if (!typedAppointment) {
+            console.error('Error: appointment data is null');
+            throw new Error('Error: appointment data is null');
+          }
+
+          if (!skipPaperwork) {
+            await processPaperwork(
+              typedAppointment,
+              randomPatientInfo.patient,
+              zambdaUrl,
+              authToken,
+              projectId,
+              serviceModeToUse,
+              oystehr,
+              paperworkAnswers
+            );
+          }
+
+          // If it's a virtual appointment, mark it as 'arrived'
+          if (serviceModeToUse === ServiceMode.virtual) {
+            await oystehr.fhir.patch<Appointment>({
+              id: typedAppointment.appointmentId,
+              resourceType: 'Appointment',
+              operations: [{ op: 'replace', path: '/status', value: 'arrived' }],
+            });
+          }
+
+          return { ...typedAppointment, selectedLocation: randomPatientInfo.selectedLocation };
+        } catch (error) {
+          console.error(`Error processing appointment ${i + 1}:`, JSON.stringify(error));
+          throw error;
+        }
+      }
+    );
+
+    // Wait for all appointments to complete
+    const results = await Promise.all(appointmentPromises);
+
+    // Filter out failed attempts
+    const successfulAppointments = results.filter((data) => data != null);
+
+    if (successfulAppointments.length > 0) {
+      return successfulAppointments[0]; // Return the first successful appointment
+    }
+
+    throw new Error(`All appointment creation attempts failed.`);
+  } catch (error) {
+    console.error('Error creating appointments:', error);
+    throw error;
+  }
+};
+
+const processPaperwork = async (
+  appointmentData: CreateAppointmentResponse,
+  patientInfo: PatientInfo,
+  zambdaUrl: string,
+  authToken: string,
+  projectId: string,
+  serviceMode: ServiceMode,
+  oystehr: Oystehr,
+  paperworkAnswers?: GetPaperworkAnswers
+): Promise<void> => {
+  try {
+    const { appointmentId, questionnaireResponseId } = appointmentData;
+    if (!questionnaireResponseId) return;
+
+    const birthDate = isoToDateObject(patientInfo.dateOfBirth || '') || undefined;
+
+    const paperworkPatches = paperworkAnswers
+      ? await paperworkAnswers({ patientInfo, appointmentId: appointmentId!, authToken, zambdaUrl, projectId })
+      : buildPaperworkPatches(patientInfo, birthDate, serviceMode);
+
+    // Execute the paperwork patches
+    await makeSequentialPaperworkPatches(questionnaireResponseId, paperworkPatches, zambdaUrl, authToken, projectId);
+
+    try {
+      for (let i = 0; i < 10; i++) {
+        const appointment = (
+          await oystehr.fhir.search({
+            resourceType: 'Appointment',
+            params: [
+              {
+                name: '_id',
+                value: appointmentId,
+              },
+            ],
+          })
+        ).unbundle()[0] as Appointment;
+
+        const tags = appointment?.meta?.tag || [];
+        const isHarvestingDone = tags.some(
+          (tag) => tag?.code === FHIR_APPOINTMENT_INTAKE_HARVESTING_COMPLETED_TAG.code
+        );
+        if (isHarvestingDone) {
+          return;
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+      }
+    } catch (error) {
+      console.error('Error verifying paperwork harvesting completion:', error);
+    }
+
+    // Submit the paperwork
+    const response = await fetch(`${zambdaUrl}/zambda/submit-paperwork/execute-public`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authToken}`,
+        'x-zapehr-project-id': projectId,
+      },
+      body: JSON.stringify(<SubmitPaperworkParameters>{
+        answers: [],
+        questionnaireResponseId,
+        appointmentId,
+      }),
+    });
+
+    if (!response.ok) {
+      // This may be an error if some paperwork required answers were not provided.
+      // Check QuestionnaireResponse resource if it corresponds to all Questionnaire requirements
+      throw new Error(
+        `Error submitting paperwork, response: ${response}, body: ${JSON.stringify(await response.json())}`
+      );
+    }
+
+    console.log(`Paperwork submitted for appointment: ${appointmentId}`);
+  } catch (error) {
+    console.error(`Error processing paperwork:`, error);
+  }
+};
+
+type SampleAppointmentInputParams = CreateAppointmentInputParams & { selectedLocation: Location };
+
+const generateRandomPatientInfo = async (
+  oystehr: Oystehr,
+  zambdaUrl: string,
+  authToken: string,
+  projectId: string,
+  serviceMode: ServiceMode,
+  phoneNumber?: string,
+  demoData?: AppointmentData,
+  selectedLocationId?: string,
+  locationState?: string,
+  serviceCategory?: ServiceCategoryCode,
+  // Stagger key: parallel callers without this all race for the same capacity
+  // bucket and 9 of 10 fail with SLOT_UNAVAILABLE.
+  appointmentIndex = 0
+): Promise<SampleAppointmentInputParams> => {
+  const {
+    firstNames = DEFAULT_FIRST_NAMES,
+    lastNames = DEFAULT_LAST_NAMES,
+    reasonsForVisit = DEFAULT_REASONS_FOR_VISIT,
+    emails = [],
+    phoneNumbers = [],
+    gender,
+    birthDate,
+    address,
+    telecom,
+  } = demoData || {};
+
+  const sexes: PersonSex[] = [PersonSex.Male, PersonSex.Female, PersonSex.Intersex];
+  const randomFirstName = firstNames[Math.floor(Math.random() * firstNames.length)];
+  const randomLastName = lastNames[Math.floor(Math.random() * lastNames.length)];
+  const randomEmail =
+    emails.length > 0
+      ? emails[Math.floor(Math.random() * emails.length)]
+      : `${randomFirstName.toLowerCase()}.${randomLastName.toLowerCase()}@example.com`;
+  const randomPhoneNumber =
+    phoneNumbers.length > 0 ? phoneNumbers[Math.floor(Math.random() * phoneNumbers.length)] : phoneNumber;
+  const randomDateOfBirth =
+    birthDate ||
+    DateTime.now()
+      .minus({ years: 7 + Math.floor(Math.random() * 16) })
+      .toISODate();
+  const randomSex = (gender as Patient['gender']) || sexes[Math.floor(Math.random() * sexes.length)];
+
+  const allOfficesAndSchedules = (
+    await oystehr.fhir.search<Location | Schedule>({
+      resourceType: 'Location',
+      params: [
+        { name: '_count', value: '1000' },
+        { name: 'address-state:missing', value: 'false' },
+        { name: 'status', value: 'active' },
+        { name: '_has:Schedule:actor:_id:missing', value: 'false' },
+        { name: '_revinclude', value: 'Schedule:actor:Location' },
+      ],
+    })
+  ).unbundle();
+
+  const activeOffices = allOfficesAndSchedules.filter((loc) => loc.resourceType === 'Location') as Location[];
+  const allSchedules = allOfficesAndSchedules.filter((loc) => loc.resourceType === 'Schedule') as Schedule[];
+
+  const telemedOffices = activeOffices.filter((loc) => isLocationVirtual(loc));
+
+  let selectedLocation = activeOffices.find((loc) => selectedLocationId && loc.id === selectedLocationId);
+
+  if (serviceMode === ServiceMode.virtual && locationState) {
+    selectedLocation = telemedOffices.find(
+      (loc) => locationState && loc.address?.state?.toLowerCase() === locationState.toLowerCase()
+    );
+  }
+
+  let locationId: string | undefined = '';
+  if (serviceMode === ServiceMode['in-person']) {
+    if (!selectedLocation?.id) {
+      console.log('Location not found in search results');
+      throw new Error(`Location ${process.env.LOCATION} not found in search results`);
+    }
+    locationId = selectedLocation.id;
+  } else if (serviceMode === ServiceMode.virtual) {
+    if (!selectedLocation?.id) {
+      locationId = telemedOffices[Math.floor(Math.random() * telemedOffices.length)].id;
+      locationState = telemedOffices.find((loc) => loc.id === locationId)?.address?.state;
+    } else {
+      locationId = selectedLocation.id;
+    }
+    if (!locationId) {
+      throw new Error('No telemed location found in search results');
+    }
+  }
+
+  const randomReason = reasonsForVisit[Math.floor(Math.random() * reasonsForVisit.length)];
+
+  const matchingSchedule = allSchedules.find((schedule) => {
+    const scheduleOwner = schedule.actor?.[0]?.reference;
+    if (scheduleOwner) {
+      const [type, id] = scheduleOwner.split('/');
+      return type === 'Location' && id === locationId;
+    }
+    return false;
+  });
+
+  if (!matchingSchedule?.id) {
+    console.log('Schedule not found in search results');
+    throw new Error(`No matching schedule found for location ID: ${locationId}`);
+  }
+  const now = DateTime.now();
+  // Round to the next 15-min boundary, then stagger by index — see appointmentIndex.
+  const currentMinutes = now.minute;
+  const minutesToAdd = (15 - (currentMinutes % 15)) % 15 || 15;
+  const nextInPersonSlot = now.plus({ minutes: minutesToAdd + 15 * appointmentIndex }).startOf('minute');
+  const createSlotInput: CreateSlotParams = {
+    scheduleId: matchingSchedule.id,
+    startISO: serviceMode === ServiceMode['in-person'] ? nextInPersonSlot.toISO() : now.toISO(),
+    lengthInMinutes: 15,
+    serviceModality: serviceMode,
+    walkin: serviceMode === ServiceMode.virtual ? true : false,
+    serviceCategoryCode: serviceCategory ?? 'urgent-care',
+  };
+
+  let persistedSlot: Slot;
+  try {
+    const persistedSlotResult = await fetch(`${zambdaUrl}/zambda/create-slot/execute-public`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authToken}`,
+        'x-zapehr-project-id': projectId,
+      },
+      body: JSON.stringify(createSlotInput),
+    }).then((res) => res.json());
+    persistedSlot = await chooseJson(persistedSlotResult);
+  } catch (error) {
+    console.error('Error creating slot:', error);
+    throw new Error('Failed to create slot');
+  }
+
+  const patientData = {
+    newPatient: true,
+    firstName: randomFirstName,
+    lastName: randomLastName,
+    dateOfBirth: randomDateOfBirth,
+    sex: randomSex,
+    email: randomEmail,
+    phoneNumber: randomPhoneNumber,
+    reasonForVisit: randomReason,
+    ...(address ? { address } : {}),
+    ...(telecom ? { telecom } : {}),
+  };
+
+  if (serviceMode === 'virtual') {
+    return {
+      patient: patientData,
+      slotId: persistedSlot.id!,
+      language: 'en',
+      selectedLocation: selectedLocation!,
+      locationState,
+    };
+  }
+
+  return {
+    patient: patientData,
+    slotId: persistedSlot.id!,
+    selectedLocation: selectedLocation!,
+    language: 'en',
+  };
+};
+
+export async function makeSequentialPaperworkPatches(
+  questionnaireResponseId: string,
+  stepAnswers: QuestionnaireResponseItem[],
+  intakeZambdaUrl: string,
+  authToken: string,
+  projectId: string
+): Promise<void> {
+  await stepAnswers.reduce(async (previousPromise, answer) => {
+    await previousPromise;
+    const response = await fetch(`${intakeZambdaUrl}/zambda/patch-paperwork/execute-public`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authToken}`,
+        'x-zapehr-project-id': projectId,
+      },
+      body: JSON.stringify(<PatchPaperworkParameters>{
+        answers: answer,
+        questionnaireResponseId: questionnaireResponseId,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to patch paperwork with linkId: ${answer.linkId}`);
+    }
+  }, Promise.resolve() as Promise<void>);
+}

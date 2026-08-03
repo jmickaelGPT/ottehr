@@ -1,0 +1,17 @@
+build/
+dist/
+.esbuild/
+packages/**/.esbuild
+.serverless/
+.github
+apps/**/env
+old-ottehr/
+!packages/**/*.ts
+!packages/**/*.tsx
+!packages/**/*.js
+!packages/**/*.jsx
+!apps/**/*.ts
+!apps/**/*.tsx
+!apps/**/*.js
+!apps/**/*.jsx
+!/vite.config.ts

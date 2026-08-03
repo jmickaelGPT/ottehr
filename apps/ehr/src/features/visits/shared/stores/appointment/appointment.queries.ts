@@ -1,0 +1,989 @@
+import {
+  ErxConnectPractitionerParams,
+  ErxEnrollPractitionerParams,
+  ErxGetMedicationResponse,
+  ErxSearchAllergensResponse,
+  ErxSearchMedicationsResponse,
+} from '@oystehr/sdk';
+import { keepPreviousData, useMutation, UseMutationResult, useQuery, UseQueryResult } from '@tanstack/react-query';
+import { Bundle, Coding, Encounter, FhirResource, InsurancePlan, Medication, Patient } from 'fhir/r4b';
+import { DateTime } from 'luxon';
+import { enqueueSnackbar } from 'notistack';
+import { useEffect } from 'react';
+import { getPatientInstructionQuickPicks, icd10Search } from 'src/api/api';
+import { QUERY_STALE_TIME } from 'src/constants';
+import { FEATURE_FLAGS } from 'src/constants/feature-flags';
+import { useApiClients } from 'src/hooks/useAppClients';
+import useEvolveUser from 'src/hooks/useEvolveUser';
+import {
+  AISuggestionNotesInput,
+  APIError,
+  BillingSuggestionInput,
+  CancelMatchUnsolicitedResultTask,
+  CODE_SYSTEM_NDC,
+  CommunicationDTO,
+  CPTSearchRequestParams,
+  FinalizeUnsolicitedResultMatch,
+  GetCreateInHouseLabOrderResourcesInput,
+  GetCreateInHouseLabOrderResourcesOutput,
+  GetCreateLabOrderResources,
+  GetMedicationOrdersInput,
+  GetMedicationOrdersResponse,
+  GetUnsolicitedResultsDetailInput,
+  GetUnsolicitedResultsDetailOutput,
+  GetUnsolicitedResultsIconStatusInput,
+  GetUnsolicitedResultsIconStatusOutput,
+  GetUnsolicitedResultsMatchDataInput,
+  GetUnsolicitedResultsMatchDataOutput,
+  GetUnsolicitedResultsPatientListInput,
+  GetUnsolicitedResultsPatientListOutput,
+  GetUnsolicitedResultsRelatedRequestsInput,
+  GetUnsolicitedResultsRelatedRequestsOutput,
+  GetUnsolicitedResultsTasksInput,
+  GetUnsolicitedResultsTasksOutput,
+  Icd10SearchRequestParams,
+  Icd10SearchResponse,
+  IcdSearchResponse,
+  InstructionType,
+  INVENTORY_MEDICATION_TYPE_CODE,
+  LabOrderResourcesRes,
+  MEDICATION_IDENTIFIER_NAME_SYSTEM,
+  MEDISPAN_DISPENSABLE_DRUG_ID_CODE_SYSTEM,
+  MeetingData,
+  ProcedureDetail,
+  PromiseReturnType,
+  UpdateMedicationOrderInput,
+} from 'utils';
+import { useErrorQuery, useSuccessQuery } from 'utils/lib/frontend';
+import { OystehrTelemedAPIClient } from '../../api/oystehrApi';
+import { useOystehrAPIClient } from '../../hooks/useOystehrAPIClient';
+import { useAppointmentData } from './appointment.store';
+
+export const useGetDocumentReferences = (
+  {
+    appointmentId,
+    patientId,
+  }: {
+    appointmentId: string | undefined;
+    patientId: string | undefined;
+  },
+  onSuccess: (data: Bundle<FhirResource>) => void
+  // eslint-disable-next-line @typescript-eslint/explicit-function-return-type
+) => {
+  const { oystehr } = useApiClients();
+  const queryResult = useQuery({
+    queryKey: ['telemed-appointment-documents', appointmentId],
+
+    queryFn: () => {
+      if (oystehr && appointmentId && patientId) {
+        return oystehr.fhir.batch({
+          requests: [
+            {
+              method: 'GET',
+              url: `/DocumentReference?status=current&subject=Patient/${patientId}&related=Appointment/${appointmentId}`,
+            },
+          ],
+        });
+      }
+      throw new Error('fhir client not defined or appointmentId and patientId not provided 3');
+    },
+
+    enabled: Boolean(oystehr) && Boolean(appointmentId),
+  });
+
+  useSuccessQuery(queryResult.data, (data) => onSuccess?.(data as Bundle<FhirResource>));
+
+  return queryResult;
+};
+
+export const useGetMeetingData = (
+  getAccessTokenSilently: () => Promise<string>,
+  onSuccess: (data: MeetingData | null) => void,
+  onError: (error: Error) => void
+): UseQueryResult<MeetingData, Error> => {
+  const { encounter } = useAppointmentData();
+
+  const queryResult = useQuery({
+    queryKey: ['meeting-data'],
+
+    queryFn: async () => {
+      const token = await getAccessTokenSilently();
+
+      if (encounter?.id && token) {
+        const videoTokenResp = await fetch(
+          `${import.meta.env.VITE_APP_PROJECT_API_URL}/telemed/v2/meeting/${encounter.id}/join`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+            method: 'GET',
+          }
+        );
+        const data = await videoTokenResp.json();
+        if (!videoTokenResp.ok) {
+          throw new Error('Error trying to get meeting data for appointment: ' + JSON.stringify(data));
+        }
+        return data as MeetingData;
+      }
+
+      throw new Error('token or encounterId not provided');
+    },
+
+    // todo: why is this disabled?
+    enabled: false,
+  });
+
+  useSuccessQuery(queryResult.data, onSuccess);
+
+  useErrorQuery(queryResult.error, onError);
+
+  return queryResult;
+};
+
+export type ExtractObjectType<T> = T extends (infer U)[] ? U : never;
+
+export const useGetMedicationsSearch = (
+  medicationSearchTerm: string
+): UseQueryResult<ErxSearchMedicationsResponse, Error> => {
+  const { oystehr } = useApiClients();
+
+  const queryResult = useQuery({
+    queryKey: ['medications-search', medicationSearchTerm],
+
+    queryFn: async () => {
+      if (oystehr) {
+        return oystehr.erx.searchMedications({ name: medicationSearchTerm });
+      }
+      throw new Error('api client not defined');
+    },
+
+    enabled: Boolean(medicationSearchTerm),
+    placeholderData: keepPreviousData,
+    staleTime: QUERY_STALE_TIME,
+  });
+
+  useEffect(() => {
+    if (queryResult.error) {
+      enqueueSnackbar('An error occurred during the search. Please try again in a moment', {
+        variant: 'error',
+      });
+    }
+  }, [queryResult.error]);
+
+  return queryResult;
+};
+
+export const useGetMedicationDetails = (medicationId: number): UseQueryResult<ErxGetMedicationResponse, Error> => {
+  const { oystehr } = useApiClients();
+
+  const queryResult = useQuery({
+    queryKey: ['medication-details', medicationId],
+
+    queryFn: async () => {
+      if (oystehr) {
+        return oystehr.erx.getMedication({ drugId: medicationId });
+      }
+      throw new Error('api client not defined');
+    },
+
+    enabled: Boolean(medicationId),
+    placeholderData: keepPreviousData,
+    staleTime: QUERY_STALE_TIME,
+  });
+
+  useEffect(() => {
+    if (queryResult.error) {
+      enqueueSnackbar(`An error occurred during looking up medication details: ${queryResult.error.message}`, {
+        variant: 'error',
+      });
+    }
+  }, [queryResult.error]);
+
+  return queryResult;
+};
+
+export const useGetAllergiesSearch = (
+  allergiesSearchTerm: string
+): UseQueryResult<ErxSearchAllergensResponse, Error> => {
+  const { oystehr } = useApiClients();
+
+  const queryResult = useQuery({
+    queryKey: ['allergies-search', allergiesSearchTerm],
+
+    queryFn: async () => {
+      if (oystehr) {
+        return oystehr.erx.searchAllergens({ name: allergiesSearchTerm });
+      }
+      throw new Error('api client not defined');
+    },
+
+    enabled: Boolean(allergiesSearchTerm),
+    placeholderData: keepPreviousData,
+    staleTime: QUERY_STALE_TIME,
+  });
+
+  useEffect(() => {
+    if (queryResult.error) {
+      enqueueSnackbar('An error occurred during the search. Please try again in a moment', {
+        variant: 'error',
+      });
+    }
+  }, [queryResult.error]);
+
+  return queryResult;
+};
+
+export const useGetCreateExternalLabResources = ({
+  patientId,
+  encounterId,
+  search,
+  labOrgIdsString,
+}: GetCreateLabOrderResources): UseQueryResult<LabOrderResourcesRes | null, Error> => {
+  const apiClient = useOystehrAPIClient();
+  return useQuery({
+    queryKey: ['external lab resource search', patientId, search, labOrgIdsString],
+
+    queryFn: async () => {
+      const res = await apiClient?.getCreateExternalLabResources({ patientId, encounterId, search, labOrgIdsString });
+      if (res) {
+        return res;
+      } else {
+        return null;
+      }
+    },
+
+    enabled: Boolean(apiClient && (patientId || search)),
+    placeholderData: keepPreviousData,
+    staleTime: QUERY_STALE_TIME,
+  });
+};
+
+export const useGetCreateInHouseLabResources = ({
+  encounterId,
+}: GetCreateInHouseLabOrderResourcesInput): UseQueryResult<GetCreateInHouseLabOrderResourcesOutput | null, Error> => {
+  const apiClient = useOystehrAPIClient();
+  return useQuery({
+    queryKey: ['inhouse lab resource search', encounterId],
+
+    queryFn: async () => {
+      const res = await apiClient?.getCreateInHouseLabOrderResources({ encounterId });
+      if (res) {
+        return res;
+      } else {
+        return null;
+      }
+    },
+
+    enabled: Boolean(apiClient),
+    placeholderData: keepPreviousData,
+    staleTime: QUERY_STALE_TIME,
+  });
+};
+
+export function useDisplayUnsolicitedResultsIcon(
+  input: GetUnsolicitedResultsIconStatusInput
+): UseQueryResult<GetUnsolicitedResultsIconStatusOutput | null, Error> {
+  const apiClient = useOystehrAPIClient();
+  const { requestType } = input;
+
+  return useQuery({
+    queryKey: ['get unsolicited results resources', requestType],
+
+    queryFn: async () => {
+      const data = await apiClient?.getUnsolicitedResultsResources(input);
+      if (data && 'tasksAreReady' in data) {
+        return data;
+      }
+      return null;
+    },
+
+    enabled: Boolean(apiClient && FEATURE_FLAGS.LAB_ORDERS_ENABLED),
+    staleTime: 1000 * 15, // 15 seconds
+  });
+}
+
+export function useGetUnsolicitedResultsTasks(
+  input: GetUnsolicitedResultsTasksInput
+): UseQueryResult<GetUnsolicitedResultsTasksOutput | null, Error> {
+  const apiClient = useOystehrAPIClient();
+  const { requestType } = input;
+
+  return useQuery({
+    queryKey: ['get unsolicited results resources', requestType],
+
+    queryFn: async () => {
+      const data = await apiClient?.getUnsolicitedResultsResources(input);
+      if (data && 'unsolicitedResultsTasks' in data) {
+        return data;
+      }
+      return null;
+    },
+
+    enabled: Boolean(apiClient),
+  });
+}
+
+export function useGetUnsolicitedResultsMatchData(
+  input: GetUnsolicitedResultsMatchDataInput
+): UseQueryResult<GetUnsolicitedResultsMatchDataOutput | null, Error> {
+  const apiClient = useOystehrAPIClient();
+  const { requestType, diagnosticReportId } = input;
+
+  return useQuery({
+    queryKey: ['get unsolicited results resources', requestType, diagnosticReportId],
+
+    queryFn: async () => {
+      const data = await apiClient?.getUnsolicitedResultsResources({ requestType, diagnosticReportId });
+      if (data && 'unsolicitedLabInfo' in data) {
+        return data;
+      }
+      return null;
+    },
+
+    enabled: Boolean(apiClient && diagnosticReportId),
+    placeholderData: keepPreviousData,
+    staleTime: QUERY_STALE_TIME,
+  });
+}
+
+export function useGetUnsolicitedResultsRelatedRequests(
+  input: GetUnsolicitedResultsRelatedRequestsInput
+): UseQueryResult<GetUnsolicitedResultsRelatedRequestsOutput | null, Error> {
+  const apiClient = useOystehrAPIClient();
+  const { requestType, diagnosticReportId, patientId } = input;
+
+  return useQuery({
+    queryKey: ['get unsolicited results resources', requestType, diagnosticReportId, patientId],
+
+    queryFn: async () => {
+      const data = await apiClient?.getUnsolicitedResultsResources({ requestType, diagnosticReportId, patientId });
+      if (data && 'possibleRelatedSRsWithVisitDate' in data) {
+        return data;
+      }
+      return null;
+    },
+
+    enabled: Boolean(apiClient && diagnosticReportId),
+    placeholderData: keepPreviousData,
+    staleTime: QUERY_STALE_TIME,
+  });
+}
+
+export function useGetUnsolicitedResultsDetail(
+  input: GetUnsolicitedResultsDetailInput
+): UseQueryResult<GetUnsolicitedResultsDetailOutput | null, Error> {
+  const apiClient = useOystehrAPIClient();
+  const { requestType, diagnosticReportId } = input;
+
+  return useQuery({
+    queryKey: ['get unsolicited results resources', requestType, diagnosticReportId],
+
+    queryFn: async () => {
+      const data = await apiClient?.getUnsolicitedResultsResources({ requestType, diagnosticReportId });
+      if (data && 'unsolicitedLabDTO' in data) {
+        return data;
+      }
+      return null;
+    },
+
+    enabled: Boolean(apiClient && diagnosticReportId),
+    placeholderData: keepPreviousData,
+    staleTime: QUERY_STALE_TIME,
+  });
+}
+
+export function useGetUnsolicitedResultsForPatientList(
+  input: GetUnsolicitedResultsPatientListInput
+): UseQueryResult<GetUnsolicitedResultsPatientListOutput | null, Error> {
+  const apiClient = useOystehrAPIClient();
+  const { requestType, patientId } = input;
+
+  return useQuery({
+    queryKey: ['get unsolicited results resources', requestType, patientId],
+
+    queryFn: async () => {
+      const data = await apiClient?.getUnsolicitedResultsResources({ requestType, patientId });
+      if (data && 'unsolicitedLabListDTOs' in data) {
+        return data;
+      }
+      return null;
+    },
+
+    enabled: Boolean(apiClient && patientId),
+    placeholderData: keepPreviousData,
+    staleTime: QUERY_STALE_TIME,
+  });
+}
+
+export function useCancelMatchUnsolicitedResultTask(): UseMutationResult<
+  void,
+  Error,
+  CancelMatchUnsolicitedResultTask
+> {
+  const apiClient = useOystehrAPIClient();
+
+  return useMutation({
+    mutationFn: async (input: CancelMatchUnsolicitedResultTask) => {
+      const { taskId, event } = input;
+      const data = await apiClient?.updateLabOrderResources({ taskId, event });
+
+      if (data && 'possibleRelatedSRsWithVisitDate' in data) {
+        return data;
+      }
+
+      return;
+    },
+  });
+}
+
+export function useFinalizeUnsolicitedResultMatch(): UseMutationResult<void, Error, FinalizeUnsolicitedResultMatch> {
+  const apiClient = useOystehrAPIClient();
+
+  return useMutation({
+    mutationFn: async (input: FinalizeUnsolicitedResultMatch) => {
+      const data = await apiClient?.updateLabOrderResources(input);
+      if (data && 'possibleRelatedSRsWithVisitDate' in data) {
+        return data;
+      }
+      return;
+    },
+    onSuccess: async () => {
+      // slight delay so that the subscription zambda has time to run and when the tasks are reloaded the new ones will be there
+      await new Promise((res) => setTimeout(res, 800));
+    },
+  });
+}
+
+export const useGetCPTHCPCSSearch = ({
+  search,
+  type,
+  radiologyOnly,
+}: CPTSearchRequestParams): UseQueryResult<IcdSearchResponse | undefined, APIError> => {
+  const { oystehr } = useApiClients();
+
+  const queryResult = useQuery({
+    queryKey: ['hcpcs-search', search, radiologyOnly],
+
+    queryFn: async () => {
+      switch (type) {
+        case 'cpt': {
+          const terminologyResponse = await oystehr?.terminology.searchCpt({
+            query: search,
+            searchType: 'all',
+            limit: 100,
+          });
+          if (!terminologyResponse) {
+            throw new Error('could not get terminology results');
+          }
+          if (radiologyOnly) {
+            terminologyResponse.codes = terminologyResponse!.codes.filter((code) => code.code.startsWith('7'));
+          }
+          terminologyResponse.codes = terminologyResponse.codes.sort((a, b) => a.code.localeCompare(b.code));
+          return terminologyResponse;
+        }
+        case 'hcpcs': {
+          const terminologyResponse = await oystehr?.terminology.searchHcpcs({
+            query: search,
+            searchType: 'all',
+            limit: 100,
+          });
+          if (!terminologyResponse) {
+            throw new Error('could not get terminology results');
+          }
+          terminologyResponse.codes = terminologyResponse.codes.sort((a, b) => a.code.localeCompare(b.code));
+          return terminologyResponse;
+        }
+        case 'both': {
+          const [cptResponse, hcpcsResponse] = await Promise.all([
+            oystehr?.terminology.searchCpt({
+              query: search,
+              searchType: 'all',
+              limit: 100,
+            }),
+            oystehr?.terminology.searchHcpcs({
+              query: search,
+              searchType: 'all',
+              limit: 100,
+            }),
+          ]);
+          if (!cptResponse || !hcpcsResponse) {
+            throw new Error('could not get terminology results');
+          }
+          let combinedCodes = [...cptResponse.codes, ...hcpcsResponse.codes].filter(
+            (codeValues, index, self) => index === self.findIndex((t) => t.code === codeValues.code)
+          );
+
+          // Put the exact code first
+          combinedCodes = combinedCodes.sort((a, b) => {
+            const aExact = a.code.toLowerCase() === search.toLowerCase();
+            const bExact = b.code.toLowerCase() === search.toLowerCase();
+            if (aExact && !bExact) return -1;
+            if (!aExact && bExact) return 1;
+            return a.code.localeCompare(b.code);
+          });
+
+          return { codes: combinedCodes };
+        }
+      }
+    },
+
+    enabled: Boolean(oystehr && search),
+    placeholderData: keepPreviousData,
+    staleTime: QUERY_STALE_TIME,
+  });
+
+  return queryResult;
+};
+
+// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
+export const useAiSuggestionNotes = () => {
+  const apiClient = useOystehrAPIClient();
+  return useMutation({
+    mutationFn: (props: AISuggestionNotesInput) => {
+      if (!apiClient) {
+        throw new Error('api client is not defined');
+      }
+      return apiClient.aiSuggestionNotes(props);
+    },
+    retry: 2,
+  });
+};
+
+// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
+export const useRecommendBillingSuggestions = () => {
+  const apiClient = useOystehrAPIClient();
+  return useMutation({
+    mutationFn: (props: BillingSuggestionInput) => {
+      if (!apiClient) {
+        throw new Error('api client is not defined');
+      }
+      return apiClient.recommendBillingSuggestions(props);
+    },
+    retry: 0,
+  });
+};
+
+// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
+export const useRecommendBillingCodes = () => {
+  const apiClient = useOystehrAPIClient();
+  return useMutation({
+    mutationFn: (props: ProcedureDetail) => {
+      if (!apiClient) {
+        throw new Error('api client is not defined');
+      }
+      return apiClient.recommendBillingCodes(props);
+    },
+    retry: 2,
+  });
+};
+
+export const useICD10SearchNew = ({
+  search,
+}: Icd10SearchRequestParams): UseQueryResult<Icd10SearchResponse | undefined, Error> => {
+  const { oystehrZambda } = useApiClients();
+
+  const queryResult = useQuery({
+    queryKey: ['icd-10-search', search],
+
+    queryFn: async () => {
+      if (!oystehrZambda) return undefined;
+      return icd10Search(oystehrZambda, { search });
+    },
+
+    enabled: Boolean(oystehrZambda && search),
+    placeholderData: keepPreviousData,
+    staleTime: QUERY_STALE_TIME,
+  });
+
+  useEffect(() => {
+    if (queryResult.error) {
+      enqueueSnackbar('An error occurred during the search. Please try again in a moment.', {
+        variant: 'error',
+      });
+    }
+  }, [queryResult.error]);
+
+  return queryResult;
+};
+
+// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
+export const useUpdatePaperwork = () => {
+  const { oystehrZambda } = useApiClients();
+
+  return useMutation({
+    mutationFn: async ({
+      appointmentID,
+      paperwork = {},
+    }: {
+      appointmentID: string;
+      paperwork: Record<string, string>;
+    }) => {
+      const UPDATE_PAPERWORK_ZAMBDA_ID = 'update-paperwork';
+
+      if (!oystehrZambda) {
+        throw new Error('api client not defined');
+      }
+
+      const response = await oystehrZambda.zambda.execute({
+        id: UPDATE_PAPERWORK_ZAMBDA_ID,
+        appointmentID,
+        paperwork,
+        timezone: DateTime.now().zoneName,
+      });
+      return import.meta.env.VITE_APP_IS_LOCAL === 'true' ? response : response.output;
+    },
+  });
+};
+
+export const useGetPatientInstructions = (
+  { type }: { type: InstructionType },
+  onSuccess?: (data: PromiseReturnType<ReturnType<OystehrTelemedAPIClient['getPatientInstructions']>> | null) => void
+  // eslint-disable-next-line @typescript-eslint/explicit-function-return-type
+) => {
+  const apiClient = useOystehrAPIClient();
+  const { oystehrZambda } = useApiClients();
+
+  const queryResult = useQuery({
+    queryKey: ['telemed-get-patient-instructions', type],
+    queryFn: async () => {
+      if (!apiClient) {
+        throw new Error('api client not defined');
+      }
+      if (!oystehrZambda) {
+        throw new Error('oystehrZambda not defined');
+      }
+      if (type === 'provider') {
+        return apiClient.getPatientInstructions({ type });
+      }
+      const quickPicksResponse = await getPatientInstructionQuickPicks(oystehrZambda);
+      return quickPicksResponse.quickPicks.map<CommunicationDTO>((quickPick) => {
+        return {
+          title: quickPick.name,
+          text: quickPick.text,
+        };
+      });
+    },
+    enabled: !!apiClient && !!oystehrZambda,
+  });
+
+  useSuccessQuery(queryResult.data, onSuccess);
+
+  return queryResult;
+};
+
+// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
+export const useSavePatientInstruction = () => {
+  const apiClient = useOystehrAPIClient();
+
+  return useMutation({
+    mutationFn: (instruction: { text?: string; title?: string }) => {
+      if (apiClient) {
+        return apiClient.savePatientInstruction(instruction);
+      }
+      throw new Error('api client not defined');
+    },
+  });
+};
+
+export const useDeletePatientInstruction = (): UseMutationResult<void, Error, { instructionId: string }> => {
+  const apiClient = useOystehrAPIClient();
+
+  return useMutation({
+    mutationFn: (instruction: { instructionId: string }) => {
+      if (apiClient) {
+        return apiClient.deletePatientInstruction(instruction);
+      }
+      throw new Error('api client not defined');
+    },
+  });
+};
+
+export const useSyncERXPatient = ({
+  patient,
+  encounter,
+  enabled,
+  onError,
+}: {
+  patient: Patient;
+  encounter: Encounter;
+  enabled: boolean;
+  onError: (err: any) => void;
+  // eslint-disable-next-line @typescript-eslint/explicit-function-return-type
+}) => {
+  const { oystehr } = useApiClients();
+
+  const queryResult = useQuery({
+    queryKey: ['erx-sync-patient', patient],
+
+    queryFn: async () => {
+      if (oystehr) {
+        console.log(`Start syncing patient with erx patient ${patient.id}`);
+        try {
+          await oystehr.erx.syncPatient({ patientId: patient.id!, encounterId: encounter.id! });
+          console.log('Successfully synced erx patient');
+        } catch (err) {
+          console.error('Error during syncing erx patient: ', err);
+          throw err;
+        }
+        return true;
+      }
+      throw new Error('oystehr client is not defined');
+    },
+
+    retry: 2,
+    enabled,
+    staleTime: 0,
+    gcTime: 0,
+    refetchOnMount: true,
+  });
+
+  useErrorQuery(queryResult.error, onError);
+
+  return queryResult;
+};
+
+export const useConnectPractitionerToERX = ({
+  patientId,
+  encounterId,
+}: {
+  patientId?: string;
+  encounterId?: string;
+}): UseMutationResult<string, Error, void> => {
+  const { oystehr } = useApiClients();
+
+  return useMutation({
+    mutationKey: ['erx-connect-practitioner', patientId],
+
+    mutationFn: async () => {
+      if (oystehr) {
+        console.log(`Start connecting practitioner to erx`);
+        try {
+          const params: ErxConnectPractitionerParams = {};
+          if (patientId) {
+            params.patientId = patientId;
+          }
+          if (encounterId) {
+            params.encounterId = encounterId;
+          }
+          const resp = await oystehr.erx.connectPractitioner(params);
+          console.log('Successfully connected practitioner to erx');
+          return resp.ssoLink;
+        } catch (err) {
+          console.error('Error during connecting practitioner to erx: ', err);
+          throw err;
+        }
+      }
+      throw new Error('oystehr client is not defined');
+    },
+
+    retry: 2,
+  });
+};
+
+// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
+export const useEnrollPractitionerToERX = ({ onError }: { onError?: (err: any) => void }) => {
+  const { oystehr } = useApiClients();
+
+  return useMutation({
+    mutationKey: ['erx-enroll-practitioner'],
+
+    mutationFn: async (practitionerId: string) => {
+      if (oystehr) {
+        console.log(`Start enrolling practitioner to erx`);
+        try {
+          const params: ErxEnrollPractitionerParams = { practitionerId };
+          await oystehr.erx.enrollPractitioner(params);
+          console.log('Successfully enrolled practitioner to erx');
+          return;
+        } catch (err: any) {
+          if (err && err.code === '4006') {
+            // Practitioner is already enrolled to erx
+            return;
+          }
+          console.error('Error during enrolling practitioner to erx: ', err);
+          throw err;
+        }
+      }
+      throw new Error('oystehr client is not defined');
+    },
+
+    retry: 2,
+    onError,
+  });
+};
+
+// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
+export const useCheckPractitionerEnrollment = ({ enabled }: { enabled: boolean }) => {
+  const { oystehr } = useApiClients();
+  const user = useEvolveUser();
+
+  return useQuery({
+    queryKey: ['erx-check-practitioner-enrollment'],
+
+    queryFn: async () => {
+      if (oystehr) {
+        console.log(`Start checking practitioner enrollment`);
+        try {
+          if (!user?.profileResource?.id) {
+            throw new Error("Current user doesn't have a profile resource id");
+          }
+          const resp = await oystehr.erx.checkPractitionerEnrollment({
+            practitionerId: user?.profileResource?.id,
+          });
+          console.log('Successfully checked practitioner enrollment');
+          return resp;
+        } catch (err) {
+          console.error('Error during checking practitioner enrollment: ', err);
+          throw err;
+        }
+      }
+      throw new Error('oystehr client is not defined');
+    },
+
+    retry: 2,
+    enabled,
+    staleTime: 0,
+    gcTime: 0,
+    refetchOnMount: true,
+  });
+};
+
+/*
+ * This should be deletable now but need to verify that ClaimsQueue feature has been mothballed
+ */
+export const useGetInsurancePlan = ({ id }: { id: string | undefined }): UseQueryResult<InsurancePlan, Error> => {
+  const { oystehr } = useApiClients();
+  const queryResult = useQuery({
+    queryKey: ['telemed-insurance-plan', id],
+
+    queryFn: () => {
+      if (oystehr && id) {
+        return oystehr.fhir.get<InsurancePlan>({
+          resourceType: 'InsurancePlan',
+          id,
+        });
+      }
+      throw new Error('fhir client not defined or Insurance Plan ID not provided');
+    },
+
+    enabled: Boolean(oystehr) && Boolean(id),
+  });
+
+  return queryResult;
+};
+
+// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
+export const useCreateUpdateMedicationOrder = () => {
+  const apiClient = useOystehrAPIClient();
+  return useMutation({
+    mutationFn: (props: UpdateMedicationOrderInput) => {
+      if (apiClient) {
+        return apiClient.createUpdateMedicationOrder({
+          ...props,
+        });
+      }
+      throw new Error('error during create update medication order');
+    },
+    retry: 2,
+  });
+};
+
+export const useGetMedicationOrders = (
+  searchBy: GetMedicationOrdersInput['searchBy']
+): UseQueryResult<GetMedicationOrdersResponse | null, Error> => {
+  const apiClient = useOystehrAPIClient();
+
+  const encounterIdIsDefined = searchBy.field === 'encounterId' && searchBy.value;
+  const encounterIdsHasLen = searchBy.field === 'encounterIds' && searchBy.value.length > 0;
+
+  return useQuery({
+    queryKey: ['telemed-get-medication-orders', JSON.stringify(searchBy)],
+
+    queryFn: async () => {
+      if (apiClient) {
+        if (encounterIdIsDefined || encounterIdsHasLen) {
+          return await apiClient.getMedicationOrders({ searchBy });
+        } else {
+          return null;
+        }
+      }
+      throw new Error('api client not defined');
+    },
+
+    enabled: !!apiClient && Boolean(encounterIdIsDefined || encounterIdsHasLen),
+    retry: 2,
+    staleTime: 5 * 60 * 1000,
+  });
+};
+
+type MedicationListData = {
+  idToName: Record<string, string>;
+  idToMedispanCode: Record<string, string>;
+  idToNdc: Record<string, string>;
+};
+
+const emptyMedicationListData: MedicationListData = {
+  idToName: {},
+  idToMedispanCode: {},
+  idToNdc: {},
+};
+
+// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
+export const useGetMedicationList = () => {
+  const { oystehr } = useApiClients();
+
+  const buildMedicationListData = (data: Medication[]): MedicationListData => {
+    const idToName: Record<string, string> = {};
+    const idToMedispanCode: Record<string, string> = {};
+    const idToNdc: Record<string, string> = {};
+    for (const entry of data || []) {
+      const identifier = entry.identifier?.find((id: Coding) => id.system === MEDICATION_IDENTIFIER_NAME_SYSTEM);
+      if (identifier?.value && entry.id) {
+        idToName[entry.id] = identifier.value;
+      }
+      const medispanCoding = entry.code?.coding?.find(
+        (c: Coding) => c.system === MEDISPAN_DISPENSABLE_DRUG_ID_CODE_SYSTEM
+      );
+      if (medispanCoding?.code && entry.id) {
+        idToMedispanCode[entry.id] = medispanCoding.code;
+      }
+      const ndcCoding = entry.code?.coding?.find((c: Coding) => c.system === CODE_SYSTEM_NDC);
+      if (ndcCoding?.code && entry.id) {
+        idToNdc[entry.id] = ndcCoding.code;
+      }
+    }
+    return { idToName, idToMedispanCode, idToNdc };
+  };
+
+  const queryResult = useQuery({
+    queryKey: ['medication-list-search'],
+
+    queryFn: async () => {
+      if (!oystehr) {
+        return emptyMedicationListData;
+      }
+      const data = await oystehr.fhir.search<Medication>({
+        resourceType: 'Medication',
+        params: [
+          { name: 'identifier', value: INVENTORY_MEDICATION_TYPE_CODE },
+          { name: 'status:not', value: 'inactive' },
+        ],
+      });
+
+      return buildMedicationListData(data.unbundle());
+    },
+
+    placeholderData: keepPreviousData,
+    staleTime: QUERY_STALE_TIME,
+  });
+
+  useEffect(() => {
+    if (queryResult.error) {
+      enqueueSnackbar('An error occurred while searching medications.', {
+        variant: 'error',
+      });
+    }
+  }, [queryResult.error]);
+
+  return queryResult;
+};

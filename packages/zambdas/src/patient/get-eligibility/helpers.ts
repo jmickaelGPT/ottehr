@@ -1,0 +1,123 @@
+import Oystehr from '@oystehr/sdk';
+import { captureException } from '@sentry/aws-serverless';
+import {
+  Coverage,
+  CoverageEligibilityRequest,
+  CoverageEligibilityResponse,
+  DomainResource,
+  Organization,
+} from 'fhir/r4b';
+import { DateTime } from 'luxon';
+import {
+  ELIGIBILITY_BENEFIT_CODES,
+  findOrgMatchingReference,
+  getPayerUrl,
+  InsuranceCheckStatusWithDate,
+  InsuranceEligibilityCheckStatus,
+  parseCoverageEligibilityResponse,
+  removeTimeFromDate,
+} from 'utils';
+
+interface InsuranceIds {
+  primary: string;
+  secondary?: string;
+}
+
+export const getInsurancePlansAndOrgs = async (
+  planIds: InsuranceIds,
+  oystehrClient: Oystehr
+): Promise<Organization[]> => {
+  const orgs = [
+    await oystehrClient.rcm.getPayer({ id: planIds.primary }),
+    ...(planIds.secondary ? [await oystehrClient.rcm.getPayer({ id: planIds.secondary })] : []),
+  ];
+
+  return orgs;
+};
+
+export interface MakeCoverageEligibilityRequestInput {
+  coverageReference: string;
+  payorReference: string;
+  providerReference: string;
+  patientReference: string;
+  contained?: DomainResource['contained'];
+}
+
+export const makeCoverageEligibilityRequest = (
+  input: MakeCoverageEligibilityRequestInput
+): CoverageEligibilityRequest => {
+  const { coverageReference, patientReference, payorReference, providerReference, contained } = input;
+  const today = removeTimeFromDate(DateTime.now().toISO());
+  const coverageEligibilityRequest: CoverageEligibilityRequest = {
+    resourceType: 'CoverageEligibilityRequest',
+    status: 'active',
+    purpose: ['benefits'],
+    created: today,
+    servicedDate: today,
+    contained,
+    patient: {
+      reference: patientReference,
+    },
+    insurer: {
+      reference: payorReference,
+    },
+    provider: {
+      reference: providerReference,
+    },
+    item: [
+      {
+        category: {
+          coding: [
+            {
+              system: 'http://terminology.oystehr.com/CodeSystem/benefit-category',
+              code: ELIGIBILITY_BENEFIT_CODES,
+            },
+          ],
+        },
+      },
+    ],
+    insurance: [
+      {
+        coverage: {
+          reference: coverageReference,
+        },
+      },
+    ],
+  };
+  return coverageEligibilityRequest;
+};
+
+export const parseEligibilityCheckResponsePromiseResult = async (
+  eligibilityCheckResponse: PromiseFulfilledResult<Response> | PromiseRejectedResult
+): Promise<InsuranceCheckStatusWithDate> => {
+  const now = DateTime.now().toISO();
+  if (eligibilityCheckResponse.status === 'rejected') {
+    console.log('eligibility check service failure reason: ', JSON.stringify(eligibilityCheckResponse.reason, null, 2));
+    return { status: InsuranceEligibilityCheckStatus.eligibilityNotChecked, dateISO: now };
+  } else if (!eligibilityCheckResponse.value.ok) {
+    const message = await eligibilityCheckResponse.value.json();
+    console.log('eligibility check service failure reason: ', JSON.stringify(message, null, 2));
+    return { status: InsuranceEligibilityCheckStatus.eligibilityNotChecked, dateISO: now };
+  }
+  try {
+    const coverageResponse = (await eligibilityCheckResponse.value.json()) as CoverageEligibilityResponse;
+    console.log('coverageResponse: ', JSON.stringify(coverageResponse, null, 2));
+    return parseCoverageEligibilityResponse(coverageResponse);
+  } catch (error: any) {
+    console.error('API response included an error', error);
+    captureException(error);
+    return { status: InsuranceEligibilityCheckStatus.eligibilityNotChecked, dateISO: now };
+  }
+};
+
+export const getPayorRef = (coverage: Coverage, orgs: Organization[]): string | undefined => {
+  let payor: Organization | undefined;
+  for (const payorRef of coverage.payor) {
+    const match = findOrgMatchingReference(payorRef.reference, orgs);
+    if (match) {
+      payor = match;
+      break;
+    }
+  }
+  return payor ? getPayerUrl(payor.id!) : undefined;
+};

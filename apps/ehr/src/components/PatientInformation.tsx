@@ -1,0 +1,170 @@
+import { Box, Paper, Skeleton, Table, TableBody, TableCell, TableRow, Typography, useTheme } from '@mui/material';
+import { Fragment, ReactElement, ReactNode } from 'react';
+import CopyButton from './CopyButton';
+
+export interface PatientProps {
+  [key: string]: string | null | undefined | ReactElement;
+}
+
+export interface IconProps {
+  [key: string]: ReactElement;
+}
+
+export interface LastModProps {
+  [key: string]: string | undefined;
+}
+
+interface PatientInformationProps {
+  patientDetails?: PatientProps;
+  title: string;
+  loading?: boolean;
+  icon?: IconProps;
+  editValue?: IconProps;
+  width?: string;
+  element?: ReactElement;
+  lastModifiedBy?: LastModProps;
+  titleButton?: ReactNode;
+  headerCellContent?: ReactNode;
+  footerCellContent?: ReactNode;
+}
+
+const CopyFields = [
+  'Member ID',
+  'Street address',
+  'Address line 2',
+  'Patient email',
+  'Patient mobile',
+  'Phone',
+  'Parent/Guardian email',
+  'Parent/Guardian mobile',
+  'Patient mobile',
+  'PCP phone number',
+  'Pharmacy phone number',
+  "Policy holder's name",
+  "Policy holder's date of birth",
+  'Full name',
+  'Date of birth',
+  'Email',
+];
+
+export default function PatientInformation({
+  loading,
+  patientDetails,
+  title,
+  icon,
+  width = '100%',
+  editValue,
+  element,
+  lastModifiedBy,
+  titleButton,
+  headerCellContent,
+  footerCellContent,
+}: PatientInformationProps): ReactElement {
+  const theme = useTheme();
+
+  return (
+    <Paper
+      sx={{
+        marginTop: 2,
+        padding: 3,
+      }}
+    >
+      <Box sx={{ mb: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Typography variant="h4" color="primary.dark">
+          {title}
+        </Typography>
+        {titleButton}
+      </Box>
+
+      {patientDetails && (
+        <Table size="small" style={{ tableLayout: 'fixed', width: width }}>
+          <TableBody>
+            {headerCellContent && (
+              <TableRow>
+                <TableCell colSpan={2} sx={{ padding: 0, borderBottom: 'none' }}>
+                  {headerCellContent}
+                </TableCell>
+              </TableRow>
+            )}
+            {Object.keys(patientDetails).map((patientDetailsKey) => {
+              const lastMod = lastModifiedBy && lastModifiedBy[patientDetailsKey];
+              return (
+                <Fragment key={patientDetailsKey}>
+                  <TableRow sx={{ '&:last-child td': { borderBottom: 0 } }}>
+                    <>
+                      <TableCell
+                        sx={{
+                          width: '50%',
+                          color: theme.palette.primary.dark,
+                          paddingLeft: 0,
+                          borderBottom: lastMod ? 'none' : 'auto',
+                        }}
+                      >
+                        <Box sx={{ display: 'flex', justifyContent: 'flex-start', alignItems: 'center' }}>
+                          {patientDetailsKey}
+                          {icon ? icon[patientDetailsKey] : ''}
+                        </Box>
+                      </TableCell>
+                      <TableCell
+                        sx={{
+                          textAlign: 'right',
+                          wordWrap: 'break-word',
+                          paddingRight: 0,
+                          borderBottom: lastMod ? 'none' : 'auto',
+                        }}
+                      >
+                        <Box sx={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
+                          {loading ? (
+                            <Skeleton aria-busy="true" width={200} />
+                          ) : (
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, wordBreak: 'break-word' }}>
+                              {/* Render the edit affordance whenever the caller declares the
+                                  field editable — gating on a present value blocked the user
+                                  from setting a value after it became empty (e.g. RFV
+                                  cleared after a service-category switch). */}
+                              {editValue && editValue[patientDetailsKey]}
+                              {patientDetails[patientDetailsKey] || '-'}
+                              {typeof patientDetails[patientDetailsKey] === 'string' &&
+                                patientDetails[patientDetailsKey] &&
+                                CopyFields.includes(patientDetailsKey.trim()) && (
+                                  <CopyButton text={patientDetails[patientDetailsKey] ?? ''} />
+                                )}
+                            </Box>
+                          )}
+                        </Box>
+                      </TableCell>
+                    </>
+                  </TableRow>
+                  {lastMod && (
+                    <TableRow>
+                      <TableCell
+                        colSpan={2}
+                        sx={{
+                          textAlign: 'right',
+                          wordWrap: 'break-word',
+                          paddingRight: 0,
+                          paddingTop: 0,
+                          fontSize: '12px',
+                        }}
+                      >
+                        Last Modified {lastMod}
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </Fragment>
+              );
+            })}
+            {footerCellContent && (
+              <TableRow>
+                <TableCell colSpan={2} sx={{ padding: 0, paddingTop: 2, borderBottom: 'none' }}>
+                  {footerCellContent}
+                </TableCell>
+              </TableRow>
+            )}
+          </TableBody>
+        </Table>
+      )}
+      {element}
+    </Paper>
+  );
+}

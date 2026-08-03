@@ -1,0 +1,13 @@
+{
+  "html.validate.styles": false,
+  "js/ts.tsdk.path": "node_modules/typescript/lib",
+  "terminal.integrated.defaultProfile.windows": "WSL",
+  "terminal.integrated.profiles.windows": {
+    "WSL": {
+      "path": "C:\\Windows\\System32\\wsl.exe"
+    }
+  },
+  "terminal.integrated.automationProfile.windows": {
+    "path": "C:\\Windows\\System32\\wsl.exe"
+  }
+}

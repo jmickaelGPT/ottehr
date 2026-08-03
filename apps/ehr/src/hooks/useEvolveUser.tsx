@@ -1,0 +1,265 @@
+import { useAuth0 } from '@auth0/auth0-react';
+import { useMutation, UseMutationResult, useQuery, UseQueryResult } from '@tanstack/react-query';
+import { Operation } from 'fast-json-patch';
+import { Practitioner } from 'fhir/r4b';
+import { DateTime, Duration } from 'luxon';
+import { useCallback, useEffect, useMemo } from 'react';
+import {
+  BRANDING_CONFIG,
+  getFullestAvailableName,
+  getNPIIdentifier,
+  getPatchOperationForNewMetaTag,
+  getPatchOperationToUpdateExtension,
+  initialsFromName,
+  RoleType,
+  SyncUserResponse,
+  User,
+  USER_TIMEZONE_EXTENSION_URL,
+} from 'utils';
+import { useSuccessQuery } from 'utils/lib/frontend';
+import { create } from 'zustand';
+import { getUser } from '../api/api';
+import { useApiClients } from './useAppClients';
+import { useAuthToken } from './useAuthToken';
+
+export interface EvolveUser extends User {
+  userName: string;
+  userInitials: string;
+  lastLogin: string | undefined;
+  hasRole: (role: RoleType[]) => boolean;
+}
+
+interface EvolveUserState {
+  user?: User;
+  profile?: Practitioner;
+}
+
+const useEvolveUserStore = create<EvolveUserState>()(() => ({}));
+
+// extracting it here, cause even if we use store - it will still initiate requests as much as we have usages of this hook,
+// so just to use this var as a synchronization mechanism - lifted it here
+let _practitionerLoginUpdateStarted = false;
+
+export default function useEvolveUser(): EvolveUser | undefined {
+  const { oystehr } = useApiClients();
+  const user = useEvolveUserStore((state) => state.user);
+  const profile = useEvolveUserStore((state) => state.profile);
+  const { user: auth0User } = useAuth0();
+
+  const isProviderHasEverythingToBeEnrolled = Boolean(
+    profile?.id &&
+      profile?.telecom?.find((phone) => phone.system === 'sms' || phone.system === 'phone')?.value &&
+      getNPIIdentifier(profile)?.value &&
+      profile?.name?.[0]?.given?.[0] &&
+      profile?.name?.[0]?.family
+  );
+
+  const userRoles = user?.roles;
+  const hasRole = useCallback(
+    (role: RoleType[]): boolean => {
+      return userRoles?.find((r) => role.includes(r.name as RoleType)) != undefined;
+    },
+    [userRoles]
+  );
+
+  useGetUser();
+
+  useSyncPractitioner((data) => {
+    if (data.updated) {
+      console.log('Practitioner sync success');
+    }
+  });
+  const { refetch: refetchProfile } = useGetProfile();
+  const { isPending: isPractitionerLastLoginBeingUpdated, mutateAsync: mutatePractitionerAsync } =
+    useUpdatePractitioner();
+
+  useSuccessQuery(
+    profile,
+    () => {
+      if (user?.profile && !profile) {
+        void refetchProfile();
+      }
+    },
+    [profile, user?.profile, refetchProfile]
+  );
+
+  useEffect(() => {
+    if (user && oystehr && profile && !isPractitionerLastLoginBeingUpdated && !_practitionerLoginUpdateStarted) {
+      _practitionerLoginUpdateStarted = true;
+
+      const patchOps: Operation[] = [
+        getPatchOperationForNewMetaTag(profile!, {
+          system: 'last-login',
+          code: DateTime.now().toISO() ?? 'Unknown',
+        }),
+      ];
+
+      // Save the browser timezone on the Practitioner resource so backend
+      // notifications (e.g. SMS) can format times in the provider's local timezone.
+      const browserTimezone = DateTime.local().zoneName;
+      if (browserTimezone) {
+        const timezonePatchOp = getPatchOperationToUpdateExtension(profile!, {
+          url: USER_TIMEZONE_EXTENSION_URL,
+          valueString: browserTimezone,
+        });
+        if (timezonePatchOp) {
+          patchOps.push(timezonePatchOp);
+        }
+      }
+
+      void mutatePractitionerAsync(patchOps).catch(console.error);
+    }
+  }, [oystehr, isPractitionerLastLoginBeingUpdated, mutatePractitionerAsync, profile, user]);
+
+  useEffect(() => {
+    const lastLogin = auth0User?.updated_at;
+    if (lastLogin) {
+      const loginTime = DateTime.fromISO(lastLogin);
+      if (Math.abs(loginTime.diffNow('seconds').seconds) <= Duration.fromObject({ seconds: 5 }).seconds) {
+        localStorage.removeItem('selectedDate');
+      }
+    }
+  }, [auth0User?.updated_at]);
+
+  const { userName, userInitials, lastLogin } = useMemo(() => {
+    if (profile) {
+      const userName = getFullestAvailableName(profile) ?? `${BRANDING_CONFIG.projectName} Team`;
+      const userInitials = initialsFromName(userName);
+      const lastLogin = profile.meta?.tag?.find((tag) => tag.system === 'last-login')?.code;
+      return { userName, userInitials, lastLogin };
+    }
+    return {
+      userName: `${BRANDING_CONFIG.projectName} team`,
+      userInitials: initialsFromName(`${BRANDING_CONFIG.projectName} Team`),
+    };
+  }, [profile]);
+
+  return useMemo(() => {
+    if (user) {
+      return {
+        ...user,
+        userName,
+        userInitials,
+        lastLogin,
+        profileResource: profile,
+        isProviderHasEverythingToBeEnrolled,
+        hasRole,
+      };
+    }
+    return undefined;
+  }, [hasRole, isProviderHasEverythingToBeEnrolled, lastLogin, profile, user, userInitials, userName]);
+}
+
+// const MINUTE = 1000 * 60; // For Credentials Sync
+// const DAY = MINUTE * 60 * 24; // For Credentials Sync
+
+const useGetUser = (): UseQueryResult<User, Error> => {
+  const token = useAuthToken();
+  const user = useEvolveUserStore((state) => state.user);
+
+  return useQuery({
+    queryKey: ['get-user'],
+
+    queryFn: async (): Promise<User> => {
+      console.log('[useGetUser] Fetching user with token:', {
+        hasToken: !!token,
+        tokenPreview: token?.substring(0, 20) + '...',
+      });
+      const user = await getUser(token!);
+      console.log('[useGetUser] User fetched successfully:', {
+        userId: user?.id,
+        userName: user?.name,
+      });
+      useEvolveUserStore.setState({ user: user as User });
+      return user;
+    },
+
+    enabled: Boolean(token && !user),
+  });
+};
+
+const useGetProfile = (): UseQueryResult<Practitioner | null, Error> => {
+  const token = useAuthToken();
+  const user = useEvolveUserStore((state) => state.user);
+  const { oystehr } = useApiClients();
+
+  return useQuery({
+    queryKey: ['get-practitioner-profile'],
+
+    queryFn: async (): Promise<Practitioner | null> => {
+      try {
+        if (!user?.profile) {
+          useEvolveUserStore.setState({ profile: undefined });
+          return null;
+        }
+
+        const [resourceType, resourceId] = (user?.profile || '').split('/');
+        if (resourceType && resourceId && resourceType === 'Practitioner') {
+          const practitioner = await oystehr?.fhir.get<Practitioner>({ resourceType, id: resourceId });
+          useEvolveUserStore.setState({ profile: practitioner });
+          return practitioner ? practitioner : null;
+        }
+        return null;
+      } catch (e) {
+        console.error(`error fetching user's fhir profile: ${JSON.stringify(e)}`);
+        useEvolveUserStore.setState({ profile: undefined });
+        throw e;
+      }
+    },
+
+    enabled: Boolean(token && oystehr),
+  });
+};
+
+// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
+const useSyncPractitioner = (_onSuccess: (data: SyncUserResponse) => void) => {
+  // console.log('Credentials sync is not enabled');
+  /**
+   * Credentials sync functionality -- Uncomment if you are synchronizing credentials from an external system
+  
+  const client = useOystehrAPIClient();
+  const token = useAuthToken();
+  const { oystehr } = useApiClients();
+  const queryClient = useQueryClient();
+  return useQuery({
+    queryKey: ['sync-user', oystehr],
+    queryFn: async () => {
+      if (!client) return undefined;
+      _practitionerSyncStarted = true;
+      const result = await client?.syncUser();
+      _practitionerSyncFinished = true;
+      if (result.updated) {
+        void queryClient.refetchQueries({ queryKey: ['get-practitioner-profile'] });
+      } else {
+        useEvolveUserStore.setState((state) => ({ profile: { ...(state.profile! || {}) } }));
+      }
+      return result;
+    },
+    onSuccess,
+    gcTime: DAY,
+    staleTime: DAY,
+    enabled: Boolean(token && oystehr && oystehr.config.accessToken && !_practitionerSyncStarted),
+  });
+  */
+};
+
+const useUpdatePractitioner = (): UseMutationResult<void, Error, Operation[]> => {
+  const user = useEvolveUserStore((state) => state.user);
+  const { oystehr } = useApiClients();
+
+  return useMutation({
+    mutationKey: ['update-practitioner'],
+
+    mutationFn: async (patchOps: Operation[]): Promise<void> => {
+      if (!oystehr || !user) return;
+
+      await oystehr.fhir.patch({
+        resourceType: 'Practitioner',
+        id: user.profile.replace('Practitioner/', ''),
+        operations: [...patchOps],
+      });
+    },
+
+    retry: 3,
+  });
+};

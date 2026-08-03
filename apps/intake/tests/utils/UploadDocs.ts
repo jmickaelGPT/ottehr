@@ -1,0 +1,116 @@
+// cSpell:ignore filechooser
+import { expect, Locator, Page } from '@playwright/test';
+import path, { dirname } from 'path';
+import { fileURLToPath } from 'url';
+import { dataTestIds } from '../../src/helpers/data-test-ids';
+import { FileUploadHelpers } from './playwright-helpers';
+
+export type UploadedFile = { uploadedFile: Locator; link: string | null };
+export class UploadDocs {
+  page: Page;
+
+  constructor(page: Page) {
+    this.page = page;
+  }
+
+  private getPathToProjectRoot(currentPath: string): string {
+    if (currentPath.split('/').at(-1) === 'intake') {
+      return currentPath;
+    }
+    return this.getPathToProjectRoot(path.resolve(currentPath, '..'));
+  }
+
+  async uploadPhoto(locator: string, fileName: string): Promise<Locator> {
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = dirname(__filename);
+
+    // Count existing Clear buttons before upload
+    const clearButtonsCountBefore = await this.page.getByTestId(dataTestIds.fileCardClearButton).count();
+
+    const filePath = path.join(this.getPathToProjectRoot(__dirname), `/images-for-tests/${fileName}`);
+
+    // Extract id value from selector (supports both #id and [id="value"] formats)
+    let idValue: string;
+    if (locator.startsWith('#')) {
+      idValue = locator.replace('#', '');
+    } else if (locator.startsWith('[id=')) {
+      const match = locator.match(/\[id=["']([^"']+)["']\]/);
+      idValue = match ? match[1] : locator;
+    } else {
+      idValue = locator;
+    }
+
+    // Check if THIS specific field has "Click to re-upload" link (scoped to field container)
+    const fieldContainer = this.page.locator(`[for="${idValue}"]`).locator('..');
+    const reuploadLink = fieldContainer.getByText('Click to re-upload');
+    const hasReupload = (await reuploadLink.count()) > 0;
+
+    if (hasReupload) {
+      // File already uploaded, use reupload helper
+      await FileUploadHelpers.reuploadFile(this.page, locator, filePath);
+    } else {
+      // File not uploaded yet, use regular upload helper
+      await FileUploadHelpers.uploadFile(this.page, locator, filePath);
+    }
+
+    // Wait for no "Uploading..." buttons to be visible (all uploads completed)
+    await expect(this.page.getByTestId(dataTestIds.fileCardUploadingButton)).toHaveCount(0, { timeout: 60000 });
+
+    // Wait for one more "Clear" button to appear (confirms this file is uploaded and saved)
+    await expect(this.page.getByTestId(dataTestIds.fileCardClearButton)).toHaveCount(clearButtonsCountBefore + 1, {
+      timeout: 60000,
+    });
+
+    // Find the uploaded image within the field container
+    // The image src will be a blob URL (created via URL.createObjectURL)
+    const uploadedPhoto = fieldContainer.locator('img').first();
+    await expect(uploadedPhoto).toBeVisible({ timeout: 60000 });
+
+    // Verify the image has a valid src (should be a blob URL)
+    const imageSrc = await uploadedPhoto.getAttribute('src');
+    expect(imageSrc).toBeTruthy();
+
+    return uploadedPhoto;
+  }
+
+  async uploadFile(locator: Locator, file: Locator): Promise<UploadedFile> {
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = dirname(__filename);
+
+    const [fileChooser] = await Promise.all([this.page.waitForEvent('filechooser'), locator.click()]);
+
+    const filePath = path.join(this.getPathToProjectRoot(__dirname), `/images-for-tests/template.pdf`);
+    await fileChooser.setFiles(filePath);
+    await expect(this.page.getByTestId(dataTestIds.continueButton)).toBeEnabled();
+
+    const uploadedFile = file;
+    const link = await file.getAttribute('href');
+    await expect(uploadedFile).toBeVisible();
+    return { uploadedFile, link };
+  }
+
+  async fillPhotoFrontID(): Promise<Locator> {
+    return await this.uploadPhoto('#photo-id-front', 'Landscape_1.jpg');
+  }
+  async fillPhotoBackID(): Promise<Locator> {
+    return await this.uploadPhoto('#photo-id-back', 'Portrait_2.jpg');
+  }
+  async fillInsuranceFront(): Promise<Locator> {
+    return await this.uploadPhoto('#insurance-card-front', 'Landscape_1.jpg');
+  }
+  async fillInsuranceBack(): Promise<Locator> {
+    return await this.uploadPhoto('#insurance-card-back', 'Portrait_2.jpg');
+  }
+  async fillSecondaryInsuranceFront(): Promise<Locator> {
+    return await this.uploadPhoto('[id="secondary-insurance.item.14"]', 'Landscape_1.jpg');
+  }
+  async fillSecondaryInsuranceBack(): Promise<Locator> {
+    return await this.uploadPhoto('[id="secondary-insurance.item.15"]', 'Portrait_2.jpg');
+  }
+  async fillPatientCondition(): Promise<Locator> {
+    return await this.uploadPhoto('#photo', 'Landscape_1.jpg');
+  }
+  async fillPatientConditionPhotoPaperwork(): Promise<Locator> {
+    return await this.uploadPhoto('#patient-photos', 'Landscape_1.jpg');
+  }
+}

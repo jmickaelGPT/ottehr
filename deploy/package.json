@@ -1,0 +1,33 @@
+{
+  "name": "deploy",
+  "version": "1.36.35",
+  "description": "Scripts for generating HCL and interacting with Terraform",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "bundle-zambdas": "cd ../packages/zambdas && npm run bundle",
+    "lint-terraform": "terraform fmt",
+    "lint": "cross-env NODE_OPTIONS=--max-old-space-size=8192 eslint --ext .ts --report-unused-disable-directives --max-warnings 0 .",
+    "generate": "tsx generate-oystehr-resources.ts ../config local ./oystehr/",
+    "apply-local": "node ./run-apply.cjs local",
+    "apply-e2e": "node ./run-apply.cjs e2e",
+    "apply-e2e2": "node ./run-apply.cjs e2e2",
+    "apply-e2e3": "node ./run-apply.cjs e2e3",
+    "apply-development": "node ./run-apply.cjs development",
+    "apply-testing": "node ./run-apply.cjs testing",
+    "apply-staging": "node ./run-apply.cjs staging",
+    "apply-demo": "node ./run-apply.cjs demo",
+    "apply-production": "node ./run-apply.cjs production",
+    "terraform-init": "terraform init --backend-config=./backend.config",
+    "terraform-setup": "rm -rf .terraform && npm run terraform-init && terraform workspace new e2e && terraform workspace new e2e2 && terraform workspace new e2e3 && terraform workspace new local && terraform workspace new development && terraform workspace new testing && terraform workspace new staging && terraform workspace new demo && terraform workspace new production && terraform workspace select local",
+    "fill-env-with-created-resources-data": "tsx fill-env-with-created-resources-data.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^24.2.1",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "utils": "*"
+  }
+}

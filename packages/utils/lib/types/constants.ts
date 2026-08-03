@@ -1,0 +1,87 @@
+import { Coding } from 'fhir/r4b';
+import { ottehrCodeSystemUrl, ottehrExtensionUrl } from '../fhir/systemUrls';
+
+// NOTE: PROJECT_WEBSITE was moved to ottehr-config/branding to avoid circular dependencies.
+// Import it from 'utils' or 'utils/lib/ottehr-config/branding' directly.
+// Do NOT re-export here as it triggers the circular dependency during module loading.
+
+export const TELEMED_VIDEO_ROOM_CODE = 'chime-video-meetings';
+
+export const INTERPRETER_PHONE_NUMBER = '(888) 555 0002';
+
+export const PATIENT_INDIVIDUAL_PRONOUNS_URL = 'http://hl7.org/fhir/StructureDefinition/individual-pronouns';
+export const PATIENT_INDIVIDUAL_PRONOUNS_CUSTOM_URL =
+  'https://fhir.zapehr.com/r4/StructureDefinitions/individual-pronouns-custom';
+export const PATIENT_FILLING_OUT_AS_URL = 'https://fhir.zapehr.com/r4/StructureDefinitions/form-user';
+export const PATIENT_RACE_URL = 'https://fhir.zapehr.com/r4/StructureDefinitions/race';
+export const PATIENT_ETHNICITY_URL = 'https://fhir.zapehr.com/r4/StructureDefinitions/ethnicity';
+export const PATIENT_SEXUAL_ORIENTATION_URL =
+  'http://hl7.org/fhir/us/cdmh/StructureDefinition/cdmh-patient-sexualOrientation';
+export const PATIENT_POINT_OF_DISCOVERY_URL = 'https://fhir.zapehr.com/r4/StructureDefinitions/point-of-discovery';
+export const PATIENT_SEND_MARKETING_URL = 'https://fhir.zapehr.com/r4/StructureDefinitions/send-marketing';
+export const PATIENT_HEARING_IMPAIRED_RELAY_SERVICE_URL =
+  'https://fhir.zapehr.com/r4/StructureDefinitions/hearing-impaired-relay-service';
+export const PATIENT_COMMON_WELL_CONSENT_URL = 'https://fhir.zapehr.com/r4/StructureDefinitions/common-well-consent';
+export const PATIENT_GENDER_IDENTITY_URL = 'http://hl7.org/fhir/StructureDefinition/individual-genderIdentity';
+export const PATIENT_GENDER_IDENTITY_DETAILS_URL =
+  'https://fhir.zapehr.com/r4/StructureDefinitions/individual-genderIdentity';
+export const PATIENT_RELEASE_OF_INFO_URL = 'https://fhir.zapehr.com/r4/StructureDefinitions/release-of-info';
+export const PATIENT_RX_HISTORY_CONSENT_STATUS_URL =
+  'https://fhir.zapehr.com/r4/StructureDefinitions/rx-history-consent-status';
+export const PATIENT_DECEASED_NOTE_URL = 'https://fhir.zapehr.com/r4/StructureDefinitions/deceased-note';
+export const PREFERRED_COMMUNICATION_METHOD_EXTENSION_URL = ottehrExtensionUrl('preferred-communication-method');
+export const COVERAGE_ADDITIONAL_INFORMATION_URL =
+  'https://fhir.zapehr.com/r4/StructureDefinitions/additional-information';
+export const RELATED_PERSON_SAME_AS_PATIENT_ADDRESS_URL =
+  'https://fhir.zapehr.com/r4/StructureDefinitions/related-person-same-as-patient-address';
+export const PRACTICE_NAME_URL = 'https://fhir.zapehr.com/r4/StructureDefinitions/practice-name';
+export const DATE_OF_BIRTH_URL = 'https://fhir.zapehr.com/r4/StructureDefinitions/birth-date';
+
+export const TIMEZONES = ['America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles'];
+
+export const E2E_TEST_RESOURCE_PROCESS_ID_SYSTEM = 'E2E_TEST_RESOURCE_PROCESS_ID';
+
+export const MEDISPAN_DISPENSABLE_DRUG_ID_CODE_SYSTEM =
+  'https://terminology.fhir.oystehr.com/CodeSystem/medispan-dispensable-drug-id';
+export const MEDISPAN_DISPENSABLE_DRUG_ID_CODE_SYSTEM_FOR_INTERACTIONS = ottehrCodeSystemUrl(
+  'medispan-dispensable-drug-id-for-interactions'
+);
+
+export const INSURANCE_REQ_EXTENSION_URL = 'https://extensions.fhir.zapehr.com/insurance-requirements';
+export const ORG_TYPE_CODE_SYSTEM = 'http://terminology.hl7.org/CodeSystem/organization-type';
+// currently all orgs are payers. if we ever have a need to store a parent company (Aetna, rather than Aetna, New York, for instance)
+// we'll use the INSURANCE_ORG_TYPE_INSURANCE_COMPANY type on the parent org
+// export const INSURANCE_ORG_TYPE_INSURANCE_COMPANY = 'ins';
+export const ORG_TYPE_PAYER_CODE = 'pay';
+
+export const ORG_TYPE_OCCUPATIONAL_MEDICINE_EMPLOYER_CODE = 'occupational-medicine-employer';
+
+export const AI_QUESTIONNAIRE_ID = 'aiInterviewQuestionnaire';
+
+export const REASON_FOR_VISIT_SEPARATOR = ' - ';
+
+export const USER_TIMEZONE_EXTENSION_URL = ottehrExtensionUrl('user-timezone');
+
+export const PATIENT_INFO_META_DATA_SYSTEM = 'https://fhir.zapehr.com/r4/StructureDefinitions/patient-info-meta-data';
+export const PATIENT_INFO_META_DATA_RETURNING_PATIENT_CODE = 'returning-patient';
+
+export const RETURNING_PATIENT_META_TAG = (): Coding => ({
+  system: PATIENT_INFO_META_DATA_SYSTEM,
+  code: PATIENT_INFO_META_DATA_RETURNING_PATIENT_CODE,
+});
+
+// related helper for sanitizing these codes sanitizeStringForFhirCode
+// https://hl7.org/fhir/R4B/datatypes.html#code
+export const FHIR_CODE_REGEX = /^[^\s]+(\s[^\s]+)*$/;
+
+// ---------------------------------------------------------------------------
+// Invoice configuration defaults
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_INVOICE_SMS_TEMPLATE =
+  "Thank you, {{patient-full-name}}, for visiting {{clinic}} at {{location}} on {{visit-date}}! You have a balance due of {{amount}}.\n\n\ud83d\udcb3 If we have your card on file, it will be billed on {{due-date}}, and no action is needed. If you'd like to use a different payment method, please pay the invoice with your preferred method before due date: {{invoice-link}}";
+
+export const DEFAULT_INVOICE_MEMO_TEMPLATE =
+  "Thank you, {{patient-full-name}}, for visiting {{clinic}} at {{location}} on {{visit-date}}! You have a balance due of {{amount}}.\n\n\ud83d\udcb3 If we have your card on file, it will be billed on {{due-date}}, and no action is needed. If you'd like to use a different payment method, please pay the invoice with your preferred method before the due date. For more details about the visit, please, visit your patient portal, {{patient-portal-link}}";
+
+export const DEFAULT_INVOICE_DUE_DAYS = 7;

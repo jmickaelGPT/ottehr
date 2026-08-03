@@ -1,0 +1,173 @@
+import { Box, Typography } from '@mui/material';
+import { FC } from 'react';
+import { AssessmentTitle } from 'src/components/AssessmentTitle';
+import { dataTestIds } from 'src/constants/data-test-ids';
+import VitalHistoryElement from 'src/features/visits/shared/components/vitals/components/VitalsHistoryEntry';
+import { useGetVitals } from 'src/features/visits/shared/components/vitals/hooks/useGetVitals';
+import { NoteDTO, VitalFieldNames } from 'utils';
+
+type PatientVitalsContainerProps = {
+  notes?: NoteDTO[];
+  encounterId: string | undefined;
+};
+
+export const PatientVitalsContainer: FC<PatientVitalsContainerProps> = ({ notes, encounterId }) => {
+  const { data: encounterVitals } = useGetVitals(encounterId);
+
+  const temperature = encounterVitals?.[VitalFieldNames.VitalTemperature] || [];
+  const heartbeat = encounterVitals?.[VitalFieldNames.VitalHeartbeat] || [];
+  const respirationRate = encounterVitals?.[VitalFieldNames.VitalRespirationRate] || [];
+  const bloodPressure = encounterVitals?.[VitalFieldNames.VitalBloodPressure] || [];
+  const oxygenSaturation = encounterVitals?.[VitalFieldNames.VitalOxygenSaturation] || [];
+  const weight = encounterVitals?.[VitalFieldNames.VitalWeight] || [];
+  const height = encounterVitals?.[VitalFieldNames.VitalHeight] || [];
+  const vision = encounterVitals?.[VitalFieldNames.VitalVision] || [];
+  const lastMenstrualPeriod = encounterVitals?.[VitalFieldNames.VitalLastMenstrualPeriod] || [];
+
+  return (
+    <Box
+      sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, width: '100%' }}
+      data-testid={dataTestIds.progressNotePage.vitalsContainer}
+    >
+      <Typography variant="h5" color="primary.dark">
+        Vitals
+      </Typography>
+
+      {temperature && temperature.length > 0 && (
+        <>
+          <AssessmentTitle>Temperature</AssessmentTitle>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+            {temperature?.map((item) => (
+              <VitalHistoryElement
+                dataTestId={dataTestIds.progressNotePage.vitalsItem}
+                historyEntry={item}
+                key={item.resourceId}
+              />
+            ))}
+          </Box>
+        </>
+      )}
+      {heartbeat && heartbeat.length > 0 && (
+        <>
+          <AssessmentTitle>Heartbeat</AssessmentTitle>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+            {heartbeat?.map((item) => (
+              <VitalHistoryElement
+                dataTestId={dataTestIds.progressNotePage.vitalsItem}
+                historyEntry={item}
+                key={item.resourceId}
+              />
+            ))}
+          </Box>
+        </>
+      )}
+      {respirationRate && respirationRate.length > 0 && (
+        <>
+          <AssessmentTitle>Respiration rate</AssessmentTitle>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+            {respirationRate?.map((item) => (
+              <VitalHistoryElement
+                dataTestId={dataTestIds.progressNotePage.vitalsItem}
+                historyEntry={item}
+                key={item.resourceId}
+              />
+            ))}
+          </Box>
+        </>
+      )}
+      {bloodPressure && bloodPressure.length > 0 && (
+        <>
+          <AssessmentTitle>Blood pressure</AssessmentTitle>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+            {bloodPressure?.map((item) => (
+              <VitalHistoryElement
+                dataTestId={dataTestIds.progressNotePage.vitalsItem}
+                historyEntry={item}
+                key={item.resourceId}
+              />
+            ))}
+          </Box>
+        </>
+      )}
+      {oxygenSaturation && oxygenSaturation.length > 0 && (
+        <>
+          <AssessmentTitle>Oxygen saturation</AssessmentTitle>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+            {oxygenSaturation?.map((item) => (
+              <VitalHistoryElement
+                dataTestId={dataTestIds.progressNotePage.vitalsItem}
+                historyEntry={item}
+                key={item.resourceId}
+              />
+            ))}
+          </Box>
+        </>
+      )}
+      {weight && weight.length > 0 && (
+        <>
+          <AssessmentTitle>Weight</AssessmentTitle>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+            {weight?.map((item) => (
+              <VitalHistoryElement
+                dataTestId={dataTestIds.progressNotePage.vitalsItem}
+                historyEntry={item}
+                key={item.resourceId}
+              />
+            ))}
+          </Box>
+        </>
+      )}
+      {height && height.length > 0 && (
+        <>
+          <AssessmentTitle>Height</AssessmentTitle>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+            {height?.map((item) => (
+              <VitalHistoryElement
+                dataTestId={dataTestIds.progressNotePage.vitalsItem}
+                historyEntry={item}
+                key={item.resourceId}
+              />
+            ))}
+          </Box>
+        </>
+      )}
+      {vision && vision.length > 0 && (
+        <>
+          <AssessmentTitle>Vision</AssessmentTitle>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+            {vision?.map((item) => (
+              <VitalHistoryElement
+                dataTestId={dataTestIds.progressNotePage.vitalsItem}
+                historyEntry={item}
+                key={item.resourceId}
+              />
+            ))}
+          </Box>
+        </>
+      )}
+      {lastMenstrualPeriod && lastMenstrualPeriod.length > 0 && (
+        <>
+          <AssessmentTitle>Last Menstrual Period</AssessmentTitle>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+            {lastMenstrualPeriod?.map((item) => (
+              <VitalHistoryElement
+                dataTestId={dataTestIds.progressNotePage.vitalsItem}
+                historyEntry={item}
+                key={item.resourceId}
+              />
+            ))}
+          </Box>
+        </>
+      )}
+
+      {notes && notes.length > 0 && (
+        <>
+          <AssessmentTitle>Vitals notes</AssessmentTitle>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+            {notes?.map((note) => <Typography key={note.resourceId}>{note.text}</Typography>)}
+          </Box>
+        </>
+      )}
+    </Box>
+  );
+};

@@ -1,0 +1,30 @@
+{
+  "name": "utils",
+  "private": true,
+  "type": "module",
+  "version": "1.36.35",
+  "main": "lib/main.ts",
+  "types": "lib/main.ts",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  },
+  "scripts": {
+    "start": "vite",
+    "build": "concurrently --kill-others-on-fail \"tsc\" \"vite build\"",
+    "lint": "cross-env NODE_OPTIONS=--max-old-space-size=8192 eslint --ext .ts,.tsx,.js,.jsx --report-unused-disable-directives --max-warnings 0 .",
+    "lint:fix": "cross-env NODE_OPTIONS=--max-old-space-size=8192 eslint --ext .ts,.tsx,.js,.jsx --report-unused-disable-directives --max-warnings 0 --fix .",
+    "preview": "vite preview",
+    "test": "vitest --silent",
+    "coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "lodash-es": "^4.17.21",
+    "config-types": "*"
+  },
+  "devDependencies": {
+    "@types/lodash-es": "^4.17.12",
+    "stripe": "^17.7.0"
+  }
+}

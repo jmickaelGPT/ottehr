@@ -1,0 +1,572 @@
+import {
+  AllergyIntolerance,
+  ClinicalImpression,
+  Communication,
+  Condition,
+  DocumentReference,
+  EpisodeOfCare,
+  MedicationRequest,
+  MedicationStatement,
+  Observation,
+  Practitioner,
+  Procedure,
+  Reference,
+  Resource,
+  ServiceRequest,
+  Task,
+} from 'fhir/r4b';
+import { ObservationDTO } from 'utils';
+import z from 'zod';
+import { EncounterExternalLabResult, EncounterInHouseLabResult } from '../lab';
+import {
+  AiObservationField,
+  ASQ_FIELD,
+  ASQKeys,
+  VitalAlertCriticality,
+  VitalBloodPressureObservationMethod,
+  VitalFieldNames,
+  VitalHeartbeatObservationMethod,
+  VitalsOxygenSatObservationMethod,
+  VitalTemperatureObservationMethod,
+} from './chart-data.constants';
+import { GetChartDataResponse } from './get-chart-data.types';
+
+export interface AIChatDetails {
+  documents: DocumentReference[];
+  providers: Practitioner[];
+}
+
+// todo: need to refactor and simplify types; there are different sets of fields for useChartData and useChartFields, but this types contains all possible values and not very useful
+export interface AllChartValues {
+  chiefComplaint?: FreeTextNoteDTO;
+  historyOfPresentIllness?: FreeTextNoteDTO;
+  mechanismOfInjury?: FreeTextNoteDTO;
+  ros?: FreeTextNoteDTO;
+  conditions?: MedicalConditionDTO[];
+  medications?: MedicationDTO[];
+  inhouseMedications?: MedicationDTO[];
+  prescribedMedications?: PrescribedMedicationDTO[];
+  allergies?: AllergyDTO[];
+  surgicalHistory?: CPTCodeDTO[];
+  surgicalHistoryNote?: FreeTextNoteDTO;
+  observations?: ObservationDTO[];
+  examObservations?: ExamObservationDTO[];
+  rosObservations?: ExamObservationDTO[];
+  medicalDecision?: ClinicalImpressionDTO;
+  cptCodes?: CPTCodeDTO[];
+  emCode?: CPTCodeDTO;
+  instructions?: CommunicationDTO[];
+  disposition?: DispositionDTO;
+  episodeOfCare?: HospitalizationDTO[];
+  diagnosis?: DiagnosisDTO[];
+  patientInfoConfirmed?: BooleanValueDTO;
+  addToVisitNote?: BooleanValueDTO;
+  addendumNote?: FreeTextNoteDTO;
+  notes?: NoteDTO[];
+  vitalsObservations?: VitalsObservationDTO[];
+  birthHistory?: BirthHistoryDTO[];
+  aiChat?: AIChatDetails;
+  externalLabResults?: EncounterExternalLabResult;
+  inHouseLabResults?: EncounterInHouseLabResult;
+  procedures?: ProcedureDTO[];
+  reasonForVisit?: FreeTextNoteDTO;
+  accident?: AccidentDTO;
+}
+
+export type RequestedFields =
+  | 'surgicalHistoryNote'
+  | 'chiefComplaint'
+  | 'historyOfPresentIllness'
+  | 'mechanismOfInjury'
+  | 'ros'
+  | 'episodeOfCare'
+  | 'prescribedMedications'
+  | 'disposition'
+  | 'notes'
+  | 'vitalsObservations'
+  | 'externalLabResults'
+  | 'inHouseLabResults'
+  | 'practitioners'
+  | 'medicalDecision'
+  | 'birthHistory'
+  | 'patientInfoConfirmed'
+  | 'addendumNote'
+  | 'medications'
+  | 'inhouseMedications'
+  | 'procedures'
+  | 'observations'
+  | 'preferredPharmacies'
+  | 'reasonForVisit'
+  | 'accident'
+  | 'patientHasPreviousVisits';
+
+export type AllChartValuesKeys = keyof AllChartValues;
+
+export type ChartDataResources =
+  | AllergyIntolerance
+  | ClinicalImpression
+  | Communication
+  | Condition
+  | DocumentReference
+  | MedicationStatement
+  | Observation
+  | Procedure
+  | ServiceRequest
+  | EpisodeOfCare
+  | Task;
+
+export interface ChartDataWithResources {
+  chartData: GetChartDataResponse;
+  chartResources: Resource[];
+}
+
+export const saveableDTOSchema = z.object({
+  resourceId: z.string().uuid().optional(),
+  derivedFrom: z.string().optional(),
+  createICDRecommendations: z.boolean().optional(),
+});
+
+export type SaveableDTO = z.infer<typeof saveableDTOSchema>;
+
+export const freeTextNoteDTOSchema = z.object({
+  ...saveableDTOSchema.shape,
+  text: z.string().optional(),
+});
+
+export type FreeTextNoteDTO = z.infer<typeof freeTextNoteDTOSchema>;
+
+export interface BooleanValueDTO {
+  value?: boolean;
+}
+
+export interface MedicalConditionDTO extends SaveableDTO {
+  code?: string;
+  display?: string;
+  note?: string;
+  current?: boolean;
+  lastUpdated?: string;
+}
+
+export interface MedicationDTO extends SaveableDTO {
+  name: string;
+  status: Extract<MedicationStatement['status'], 'active' | 'completed'>;
+  intakeInfo: MedicationIntakeInfo;
+  type: 'scheduled' | 'as-needed' | 'prescribed-medication';
+  id?: string;
+  practitioner?: Practitioner | Reference;
+}
+
+export interface MedicationIntakeInfo {
+  date?: string;
+  dose?: string;
+  patientCouldNotConfirmDosage?: boolean;
+}
+
+export interface PrescribedMedicationDTO extends SaveableDTO {
+  name?: string;
+  instructions?: string;
+  status?: MedicationRequest['status'] | 'loading';
+  provider?: string;
+  added?: string;
+  prescriptionId?: string;
+  encounterId?: string;
+}
+
+export interface AllergyDTO extends SaveableDTO {
+  // type:
+  //   | Exclude<ArrayInnerType<WithRequired<AllergyIntolerance, 'category'>['category']>, 'biologic' | 'environment'>
+  //   | 'other';
+  id?: string;
+  name?: string;
+  note?: string;
+  current?: boolean;
+  lastUpdated?: string;
+}
+
+export const EXAM_OBSERVATION_META_SYSTEM = 'exam-observation-field';
+export const ROS_OBSERVATION_META_SYSTEM = 'ros-observation-field';
+export const ADDITIONAL_QUESTIONS_META_SYSTEM = 'additional-questions-field';
+export const AI_OBSERVATION_META_SYSTEM = 'ai-observation';
+export const PATIENT_VITALS_META_SYSTEM = 'patient-vitals-field';
+export const NOTHING_TO_EAT_OR_DRINK_ID = 'nothing-to-eat-or-drink'; // fhir url
+export const NOTHING_TO_EAT_OR_DRINK_FIELD = 'nothingToEatOrDrink'; // backend/frontend - disposition field & form field
+export const NOTHING_TO_EAT_OR_DRINK_LABEL = 'Nothing to eat or drink until evaluated in the Emergency Department.'; // frontend form label
+export const REFUSAL_OF_EMS_TRANSPORT_ID = 'refusal-of-ems-transport';
+export const REFUSAL_OF_EMS_TRANSPORT_FIELD = 'refusalOfEmsTransport';
+export const REFUSAL_OF_EMS_TRANSPORT_LABEL = 'Refusal of EMS Transport';
+export const PATIENT_INSTRUCTIONS_TEMPLATE_CODE = 'patient-instruction-template';
+export const IN_PERSON_NOTE_ID = 'css-note';
+
+export interface ExamObservationComponentDTO {
+  code: string;
+  label: string;
+  value: boolean;
+  groupLabel: string;
+  columnLabel?: string;
+  abnormal?: boolean;
+}
+
+export interface ExamObservationDTO extends SaveableDTO {
+  field: string;
+  label?: string;
+  note?: string;
+  value?: boolean;
+  components?: ExamObservationComponentDTO[];
+}
+export interface VitalsBaseObservationDTO extends SaveableDTO {
+  field: VitalFieldNames;
+  resourceId?: string;
+  patientId?: string;
+  encounterId?: string;
+  authorId?: string;
+  authorName?: string;
+  lastUpdated?: string;
+  alertCriticality?: VitalAlertCriticality;
+}
+export interface VitalsNumericValueObservationDTO extends VitalsBaseObservationDTO {
+  value: number;
+}
+
+export type VitalsWeightOption = 'patient_refused';
+
+type VitalsWeightWithValueDTO = VitalsNumericValueObservationDTO & {
+  field: Extract<VitalFieldNames, 'vital-weight'>;
+  extraWeightOptions?: VitalsWeightOption[];
+};
+
+export type VitalsWeightPatientRefusedDTO = VitalsBaseObservationDTO & {
+  field: Extract<VitalFieldNames, 'vital-weight'>;
+  extraWeightOptions: ['patient_refused'];
+  value?: never;
+};
+
+export type VitalsWeightObservationDTO = VitalsWeightWithValueDTO | VitalsWeightPatientRefusedDTO;
+
+export interface VitalsHeightObservationDTO extends VitalsNumericValueObservationDTO {
+  field: Extract<VitalFieldNames, 'vital-height'>;
+}
+
+export interface VitalsTemperatureObservationDTO extends VitalsNumericValueObservationDTO {
+  field: Extract<VitalFieldNames, 'vital-temperature'>;
+  observationMethod?: VitalTemperatureObservationMethod;
+}
+
+export interface VitalsHeartbeatObservationDTO extends VitalsNumericValueObservationDTO {
+  field: Extract<VitalFieldNames, 'vital-heartbeat'>;
+  observationMethod?: VitalHeartbeatObservationMethod;
+}
+
+export interface VitalsBloodPressureObservationDTO extends VitalsBaseObservationDTO {
+  field: Extract<VitalFieldNames, 'vital-blood-pressure'>;
+  value?: never;
+  systolicPressure: number;
+  diastolicPressure: number;
+  observationMethod?: VitalBloodPressureObservationMethod;
+}
+
+export type VitalsVisionOption = 'child_too_young' | 'with_glasses' | 'without_glasses';
+
+export interface VitalsVisionObservationDTO extends VitalsBaseObservationDTO {
+  field: Extract<VitalFieldNames, 'vital-vision'>;
+  value?: never;
+  leftEyeVisionText: string;
+  rightEyeVisionText: string;
+  bothEyesVisionText?: string;
+  extraVisionOptions?: VitalsVisionOption[];
+}
+
+export interface VitalsOxygenSatObservationDTO extends VitalsNumericValueObservationDTO {
+  field: Extract<VitalFieldNames, 'vital-oxygen-sat'>;
+  observationMethod?: VitalsOxygenSatObservationMethod;
+}
+
+export interface VitalsRespirationRateObservationDTO extends VitalsNumericValueObservationDTO {
+  field: Extract<VitalFieldNames, 'vital-respiration-rate'>;
+}
+
+export type VitalsLastMenstrualPeriodObservationDTO = VitalsBaseObservationDTO & {
+  field: Extract<VitalFieldNames, 'vital-last-menstrual-period'>;
+  value: string;
+  isUnsure?: boolean;
+};
+
+export type VitalsObservationDTO =
+  | VitalsTemperatureObservationDTO
+  | VitalsHeartbeatObservationDTO
+  | VitalsBloodPressureObservationDTO
+  | VitalsOxygenSatObservationDTO
+  | VitalsRespirationRateObservationDTO
+  | VitalsWeightObservationDTO
+  | VitalsHeightObservationDTO
+  | VitalsVisionObservationDTO
+  | VitalsLastMenstrualPeriodObservationDTO;
+
+export interface ObservationBooleanFieldDTO extends SaveableDTO {
+  field: string;
+  value?: boolean;
+}
+
+export type ASQObservationDTO = {
+  field: typeof ASQ_FIELD;
+  value: ASQKeys;
+} & SaveableDTO;
+
+export type AiObservationDTO = {
+  field: typeof AiObservationField;
+  value: string;
+} & SaveableDTO;
+
+export interface CPTCodeDTO extends SaveableDTO {
+  code: string;
+  display: string;
+  modifier?: { code: string; display: string }[];
+  ndcCode?: string;
+}
+
+export const clinicalImpressionDTOSchema = z.object({
+  ...saveableDTOSchema.shape,
+  text: z.string().optional(),
+});
+
+export type ClinicalImpressionDTO = z.infer<typeof clinicalImpressionDTOSchema>;
+
+export interface CommunicationDTO extends SaveableDTO {
+  text?: string;
+  title?: string;
+  educationDocRefId?: string;
+}
+
+export enum NOTE_TYPE {
+  INTERNAL = 'internal',
+  INTAKE = 'intake',
+  VITALS = 'vitals',
+  SCREENING = 'screening',
+  MEDICATION = 'medication',
+  IMMUNIZATION = 'immunization',
+  ALLERGY = 'allergy',
+  INTAKE_MEDICATION = 'intake-medication',
+  MEDICAL_CONDITION = 'medical-condition',
+  SURGICAL_HISTORY = 'surgical-history',
+  HOSPITALIZATION = 'hospitalization',
+  ADDENDUM = 'addendum',
+  UNKNOWN = 'unknown',
+}
+
+export interface NoteDTO extends CommunicationDTO {
+  type: NOTE_TYPE;
+  resourceId?: string;
+  patientId: string;
+  encounterId: string;
+  text: string;
+  authorId: string;
+  authorName: string;
+  lastUpdated?: string; // system generated, not sent from frontend
+  edited?: boolean; // server-computed: true when Communication.sent and meta.lastUpdated have drifted past a small window
+  deleted?: boolean; // soft-delete marker; backed by Communication.status === 'entered-in-error'
+}
+
+export type DispositionType = 'ip' | 'ip-lab' | 'pcp' | 'ed' | 'ip-oth' | 'pcp-no-type' | 'another' | 'specialty';
+
+export type DispositionFollowUpType = 'dentistry' | 'ent' | 'ophthalmology' | 'orthopedics' | 'other' | 'lurie-ct';
+
+export interface DispositionDTO {
+  type: DispositionType;
+  note: string;
+  reason?: string;
+  specialty?: string;
+  specialtyOther?: string;
+  labService?: string[];
+  virusTest?: string[];
+  followUp?: {
+    type: DispositionFollowUpType;
+    note?: string;
+  }[];
+  followUpIn?: number;
+  [NOTHING_TO_EAT_OR_DRINK_FIELD]?: boolean;
+  [REFUSAL_OF_EMS_TRANSPORT_FIELD]?: boolean;
+}
+
+export interface HospitalizationDTO extends SaveableDTO {
+  code: string;
+  display: string;
+}
+
+export interface DiagnosisDTO extends SaveableDTO {
+  code: string;
+  display: string;
+  isPrimary: boolean;
+  addedViaLabOrder?: boolean;
+}
+
+export interface BirthHistoryDTO extends SaveableDTO {
+  field: 'age' | 'weight' | 'length' | 'preg-compl' | 'del-compl';
+  value?: number;
+  flag?: boolean;
+  note?: string;
+}
+
+export const SCHOOL_NOTE_CODE = 'school';
+export const WORK_NOTE_CODE = 'work';
+export type SchoolWorkNoteType = typeof SCHOOL_NOTE_CODE | typeof WORK_NOTE_CODE;
+
+export interface SchoolWorkNoteExcuseDocDTO {
+  documentHeader: string;
+  parentGuardianName: string;
+  headerNote: string;
+  bulletItems?: PdfBulletPointItem[];
+  footerNote: string;
+  providerDetails: SchoolWorkNoteExcuseDocProviderDetails;
+  type: SchoolWorkNoteType;
+}
+
+export interface SchoolWorkNoteExcuseDocProviderDetails {
+  name: string;
+  credentials: string;
+}
+
+export interface SchoolWorkNoteExcuseDocFileDTO {
+  id: string;
+  published?: boolean;
+  date?: string;
+  name?: string;
+  url?: string;
+  type: SchoolWorkNoteType;
+}
+
+export interface PharmacyDTO {
+  name: string;
+  address: string;
+  phone?: string;
+  primary?: true;
+}
+
+export interface PdfBulletPointItem {
+  text: string;
+  subItems?: PdfBulletPointItem[];
+}
+
+const defaultNotes: Record<DispositionType, string> = {
+  ip: 'Please proceed to the In Person Office as advised.',
+  'ip-lab':
+    'Please proceed to the In Person Office for a lab as advised.\nIf symptoms do not improve, please go to the A. Emergency Department Office, B. Urgent Care Office.',
+  pcp: 'Please see your Primary Care Physician.',
+  ed: 'Please go to the Emergency Department immediately.',
+  'ip-oth': 'Please go to an In Person Office.',
+  'pcp-no-type': 'Please see your Primary Care Physician as discussed.',
+  another: 'Please proceed to the ____ Office as advised.',
+  specialty: '',
+};
+
+export const getDefaultNote = (dispositionType: DispositionType): string => {
+  return defaultNotes[dispositionType];
+};
+
+export const followUpInOptions = [
+  {
+    label: '1 day',
+    value: 1,
+  },
+  {
+    label: '2 days',
+    value: 2,
+  },
+  {
+    label: '3 days',
+    value: 3,
+  },
+  {
+    label: '4 days',
+    value: 4,
+  },
+  {
+    label: '5 days',
+    value: 5,
+  },
+  {
+    label: '1 week',
+    value: 7,
+  },
+  {
+    label: '2 weeks',
+    value: 14,
+  },
+  {
+    label: 'as needed',
+    value: 0,
+  },
+];
+
+export interface BillingSuggestionInput {
+  newPatient: boolean | undefined;
+  patientAge?: string;
+  patientSex?: string;
+  hpi: string;
+  mdm: string;
+  externalLabOrders: string;
+  internalLabOrders: string;
+  radiologyOrders: any;
+  radiologyReports?: string;
+  procedures: any;
+  rosFindings?: string;
+  diagnoses: DiagnosisDTO[] | undefined;
+  billing: CPTCodeDTO[] | undefined;
+}
+
+export interface BillingSuggestionOutput {
+  icdCodes: {
+    code: string;
+    description: string;
+    reason: string;
+  }[];
+  cptCodes: {
+    code: string;
+    description: string;
+    reason: string;
+  }[];
+  emCode: {
+    code: string;
+    description: string;
+    upcodingSuggestion: string;
+  }[];
+  codingSuggestions: string;
+}
+
+export interface ProcedureDTO extends SaveableDTO {
+  encounterId?: string;
+  procedureType?: string;
+  cptCodes?: CPTCodeDTO[];
+  diagnoses?: DiagnosisDTO[];
+  procedureDateTime?: string;
+  documentedDateTime?: string;
+  performerType?: string;
+  medicationUsed?: string;
+  bodySite?: string;
+  bodySide?: string;
+  technique?: string[];
+  suppliesUsed?: string;
+  procedureDetails?: string;
+  specimenSent?: boolean;
+  complications?: string;
+  patientResponse?: string;
+  postInstructions?: string;
+  timeSpent?: string;
+  documentedBy?: string;
+  consentObtained?: boolean;
+}
+
+export interface AccidentDTO extends SaveableDTO {
+  type: string[];
+  date?: string;
+  state?: string;
+}
+
+export interface MigrateExamDataInput {
+  encounterId: string;
+  normalExternalGenitalExamSex?: 'male' | 'female';
+}
+
+export interface MigrateExamDataOutput {
+  message: string;
+  migratedCount: number;
+  chartData: GetChartDataResponse;
+}

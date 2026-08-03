@@ -1,0 +1,1066 @@
+import {
+  Appointment,
+  Coding,
+  Consent,
+  Coverage,
+  DocumentReference,
+  Encounter,
+  Location,
+  Organization,
+  Patient,
+  Practitioner,
+  QuestionnaireResponse,
+  RelatedPerson,
+} from 'fhir/r4b';
+import { DateTime } from 'luxon';
+import { Color, PDFFont, PDFImage, StandardFonts } from 'pdf-lib';
+import {
+  AppointmentContext,
+  ExternalLabOrderResult,
+  FollowupReason,
+  Gender,
+  InHouseLabResult as InHouseLabResultPdfData,
+  LabType,
+  NOTHING_TO_EAT_OR_DRINK_FIELD,
+  OrderedCoveragesWithSubscribers,
+  PatientPaymentDTO,
+  ProviderDetails,
+  QuantityDataEntryComponent,
+  REFUSAL_OF_EMS_TRANSPORT_FIELD,
+  SupportedObsImgAttachmentTypes,
+  VitalsVisitNoteData,
+} from 'utils';
+import { testDataForOrderForm } from '../../ehr/lab/external/submit-lab-order/helpers';
+import { UpcomingFollowUp } from './get-upcoming-follow-ups';
+import { Column, PdfInfo } from './pdf-utils';
+import { AllChartData, FullAppointmentResourcePackage } from './visit-details-pdf/types';
+
+export interface PageElementStyle {
+  side?: 'left' | 'right' | 'center';
+}
+
+export interface PerimeterDimensions {
+  left?: number;
+  top?: number;
+  right?: number;
+  bottom?: number;
+}
+
+export interface TextStyle extends PageElementStyle {
+  font: PDFFont;
+  fontSize: number;
+  spacing: number;
+  color?: Color;
+  newLineAfter?: boolean;
+  weight?: number;
+}
+
+export interface ImageStyle extends PageElementStyle {
+  width: number;
+  height: number;
+  margin?: PerimeterDimensions;
+  center?: boolean;
+}
+
+export interface PdfClientStyles {
+  initialPage: PageStyles;
+}
+
+export interface PageStyles {
+  height: number;
+  width: number;
+  pageMargins: PerimeterDimensions;
+  setHeadline?: () => void;
+}
+
+export interface LineStyle {
+  thickness: number;
+  color?: Color;
+  margin?: PerimeterDimensions;
+}
+
+export interface PdfClient {
+  addNewPage: (styles: PageStyles) => void;
+  drawText: (text: string, textStyle: TextStyle) => void;
+  drawTextSequential: (
+    text: string,
+    textStyle: Exclude<TextStyle, 'side'>,
+    bounds?: { leftBound: number; rightBound: number }
+  ) => void;
+  drawStartXPosSpecifiedText: (
+    text: string,
+    textStyle: TextStyle,
+    startingXPos: number,
+    bounds?: { leftBound: number; rightBound: number }
+  ) => { endXPos: number; endYPos: number };
+  drawImage: (img: PDFImage, styles: ImageStyle, textStyle?: TextStyle) => void;
+  drawLabelValueRow: (
+    label: string,
+    value: string,
+    labelStyle: TextStyle,
+    valueStyle: TextStyle,
+    options?: {
+      drawDivider?: boolean;
+      dividerStyle?: LineStyle;
+      dividerMargin?: number;
+      defaultValue?: string;
+      spacing?: number;
+    }
+  ) => void;
+  newLine: (yDrop: number) => void;
+  getX: () => number;
+  getY: () => number;
+  getPageTopY: () => number;
+  setX: (x: number) => void;
+  setY: (y: number) => void;
+  save: () => Promise<Uint8Array>;
+  embedFont: (path: Buffer) => Promise<PDFFont>;
+  embedStandardFont: (font: StandardFonts) => Promise<PDFFont>;
+  embedImage: (file: Buffer) => Promise<PDFImage>;
+  embedJpg: (file: Buffer) => Promise<PDFImage>;
+  embedPdfFromBase64: (base64String: string) => Promise<void>;
+  embedImageFromBase64: (base64String: string, imgType: SupportedObsImgAttachmentTypes) => Promise<void>;
+  drawSeparatedLine: (lineStyle: LineStyle) => void;
+  getLeftBound: () => number;
+  getRightBound: () => number;
+  setLeftBound: (newBound: number) => void;
+  setRightBound: (newBound: number) => void;
+  getTextDimensions: (text: string, textStyle: TextStyle) => { width: number; height: number };
+  setPageStyles: (newStyles: PageStyles) => void;
+  drawVariableWidthColumns: (columns: Column[], yPosStartOfColumn: number, startPageIndex: number) => void;
+  getCurrentPageIndex: () => number;
+  setPageByIndex: (pageIndex: number) => void;
+  getTotalPages: () => number;
+  drawLink: (text: string, url: string, textStyle: TextStyle) => void;
+  numberPages: (textStyle: TextStyle) => void;
+}
+
+// todo might make sense to have a separate interface for the order pdf base
+// and the result pdf base
+interface LabsData {
+  locationName?: string;
+  locationStreetAddress?: string;
+  locationCity?: string;
+  locationState?: string;
+  locationZip?: string;
+  locationPhone?: string;
+  locationFax?: string;
+  accountNumber: string;
+  orderNumber: string; // this is only for external labs
+  providerName: string;
+  providerNPI: string | undefined;
+  patientFirstName: string;
+  patientMiddleName: string | undefined;
+  patientLastName: string;
+  patientSex: string;
+  patientDOB: string;
+  patientId: string;
+  patientAddress: string;
+  patientPhone: string;
+  todayDate: string;
+  orderSubmitDate: string;
+  dateIncludedInFileName: string;
+  orderAssessments: { code: string; name: string }[];
+  orderPriority: string;
+  isManualOrder: boolean;
+  isPscOrder: boolean;
+}
+
+export type OrderFormInsuranceInfo = {
+  insuranceRank: number;
+  insuredName?: string;
+  insuredAddress?: string;
+  insuranceName?: string;
+  insuranceAddress?: string;
+  insuranceSubNum?: string;
+};
+export interface ExternalLabOrderFormData extends Omit<LabsData, 'orderAssessments'> {
+  labOrganizationName: string;
+  billClass: string;
+  testDetails: testDataForOrderForm[];
+  insuranceDetails?: OrderFormInsuranceInfo[];
+  brandingProjectName?: string;
+  isWorkersCompOrder: boolean;
+}
+
+export interface ExternalLabResult {
+  resultCodeAndDisplay: string;
+  loincCodeAndDisplay: string;
+  snomedDisplay: string;
+  resultInterpretation?: string;
+  resultInterpretationDisplay?: string;
+  resultValue: string;
+  referenceRangeText?: string;
+  resultNotes?: string[];
+  attachmentText?: string;
+  performingLabName?: string;
+  performingLabAddress?: string;
+  performingLabPhone?: string;
+  performingLabDirectorFullName?: string;
+  observationStatus: string;
+  additionalLabCode: string | undefined;
+}
+
+export interface InHouseLabResult {
+  name: string;
+  type: string;
+  value: string | undefined;
+  units?: string;
+  rangeString?: string[];
+  rangeQuantity?: QuantityDataEntryComponent;
+  interpretationCoding: Coding | undefined;
+}
+export interface InHouseLabResultConfig {
+  collectionDate: string;
+  finalResultDateTime: DateTime;
+  specimenSource: string;
+  results: InHouseLabResult[];
+  testName: string;
+  diagnosticReportId: string;
+}
+
+export type ResultSpecimenInfo = {
+  quantityString?: string;
+  unit?: string;
+  bodySite?: string;
+  collectedDateTime?: string;
+};
+
+export interface LabResultsData
+  extends Omit<
+    LabsData,
+    | 'orderNumber'
+    | 'labOrganizationName'
+    | 'orderSubmitDate'
+    | 'providerTitle'
+    | 'patientAddress'
+    | 'sampleCollectionDate'
+    | 'billClass'
+    | 'isManualOrder'
+  > {
+  testName: string;
+  testItemCode: string;
+  resultStatus: string;
+  abnormalResult?: boolean;
+  patientVisitNote?: string;
+  clinicalInfo?: string;
+  fastingStatus?: string;
+  resultSpecimenInfo?: ResultSpecimenInfo;
+}
+
+// will be arrays of base64 encoded strings
+export interface ExternalLabResultAttachments {
+  pdfAttachments: string[];
+  pngAttachments: string[];
+  jpgAttachments: string[];
+}
+export interface ExternalLabResultsData extends LabResultsData {
+  orderNumber: string;
+  alternatePlacerId: string | undefined;
+  accessionNumber: string;
+  orderSubmitDate: string;
+  collectionDate: string;
+  resultsReceivedDate: string;
+  reviewed?: boolean; // todo why is this possibly undefined ??
+  reviewingProvider: Practitioner | undefined;
+  reviewDate: string | undefined;
+  resultInterpretations: string[];
+  attachments: ExternalLabResultAttachments;
+  externalLabResults: ExternalLabResult[];
+  testItemCode: string;
+}
+
+export type ReflexExternalLabResultsData = Omit<ExternalLabResultsData, 'orderSubmitDate'>;
+
+export type UnsolicitedExternalLabResultsData = Omit<ExternalLabResultsData, 'orderNumber' | 'orderSubmitDate'>;
+
+export interface InHouseLabResultsData
+  extends Omit<
+    LabResultsData,
+    'accountNumber' | 'patientVisitNote' | 'clinicalInfo' | 'fastingStatus' | 'resultSpecimenInfo'
+  > {
+  inHouseLabResults: InHouseLabResultConfig[];
+  timezone: string | undefined;
+  serviceRequestID: string;
+  orderCreateDate: string;
+}
+
+export type ResultDataConfig =
+  | { type: LabType.external; data: ExternalLabResultsData }
+  | { type: LabType.inHouse; data: InHouseLabResultsData }
+  | { type: LabType.unsolicited; data: UnsolicitedExternalLabResultsData }
+  | { type: LabType.reflex; data: ReflexExternalLabResultsData };
+
+export interface ReceiptData {
+  facility?: {
+    name: string;
+    address: string;
+    phone: string;
+  };
+  patient: {
+    name: string;
+    dob: string;
+    account: string;
+  };
+  amount: string;
+  date: string;
+}
+
+export interface Medication {
+  name: string;
+  dose?: string;
+  route?: string;
+  location?: string;
+  date?: string;
+}
+
+export interface PrescribedMedication {
+  name?: string;
+  instructions?: string;
+  date?: string;
+}
+
+export interface PdfData {
+  attachmentDocRefs?: string[];
+  /** Populated by composers that have an Appointment so `createConfiguredSection` can evaluate section triggers. */
+  appointmentContext?: AppointmentContext;
+}
+
+export interface PdfStyles {
+  textStyles: Record<string, TextStyle>;
+  lineStyles: Record<string, LineStyle>;
+  imageStyles?: Record<string, ImageStyle>;
+  colors?: Record<string, Color>;
+}
+
+export interface PdfAssets {
+  fonts: Record<string, PDFFont>;
+  icons?: Record<string, PDFImage>;
+  images?: Record<string, PDFImage>;
+  logo?: PDFImage;
+}
+
+export interface AssetPaths {
+  fonts?: Record<string, string>;
+  icons?: Record<string, string>;
+}
+
+export interface ImageReference {
+  url: string;
+  key: string;
+}
+
+export interface PdfHeaderSection<TData extends PdfData, TSectionData = any> {
+  dataSelector: (data: TData) => TSectionData | undefined;
+  shouldRender?: (data: TSectionData) => boolean;
+  render: (client: PdfClient, data: TSectionData, styles: PdfStyles, assets: PdfAssets) => void;
+}
+
+export interface PdfSection<TData, TSectionData> {
+  title?: string | ((data: TSectionData) => string);
+  dataSelector: (data: TData) => TSectionData | undefined;
+  shouldRender?: (sectionData: TSectionData, rootData?: TData) => boolean;
+  preferredWidth?: 'full' | 'column';
+  extractImages?: (sectionData: TSectionData) => ImageReference[];
+  render: (client: PdfClient, sectionData: TSectionData, styles: PdfStyles, assets: PdfAssets) => void;
+  skip?: boolean;
+}
+
+export interface VisitInfo extends PdfData {
+  type: string;
+  serviceCategory?: string;
+  bookingType?: string;
+  time: string;
+  date: string;
+  location?: string;
+  reasonForVisit?: string;
+}
+
+export interface PatientInfo extends PdfData {
+  fullName: string;
+  preferredName: string;
+  dob: string;
+  sex: Gender;
+  id: string;
+  phone: string;
+  reasonForVisit: string;
+  authorizedNonlegalGuardians: string;
+  suffix: string;
+  pronouns: string;
+  patientSex: string;
+  ssn: string;
+}
+
+export interface PatientInfoForProgressNote extends PdfData {
+  patientName: string;
+  patientDOB: string;
+  patientId: string;
+  personAccompanying: string;
+  patientPhone: string;
+}
+
+export interface EncounterInfo extends PdfData {
+  isFollowup: boolean;
+}
+
+interface VisitDetailsForFollowUpVisit extends PdfData {
+  visitType: 'followup';
+  reason?: FollowupReason;
+  otherReason?: string;
+  message?: string;
+  location?: Location;
+  provider?: ProviderDetails;
+}
+
+interface VisitDetailsForInitialVisit extends PdfData {
+  visitType: 'initial';
+  type?: string;
+  serviceCategory?: string;
+  bookingType?: string;
+  dateOfService: string;
+  reasonForVisit: string;
+  provider: string;
+  intakePerson?: string;
+  signedOn: string;
+  visitID: string;
+  visitState: string;
+  insuranceCompany?: string;
+  insuranceSubscriberId?: string;
+  address: string;
+}
+
+export type VisitDetailsForProgressNote = VisitDetailsForFollowUpVisit | VisitDetailsForInitialVisit;
+
+export interface ChiefComplaint extends PdfData {
+  chiefComplaint?: string;
+  spentTime: string;
+  isInPerson: boolean;
+}
+
+export interface HistoryOfPresentIllness extends PdfData {
+  historyOfPresentIllness?: string;
+}
+
+export interface MechanismOfInjury extends PdfData {
+  mechanismOfInjury?: string;
+}
+
+export interface ReviewOfSystems extends PdfData {
+  reviewOfSystems?: string;
+}
+
+export interface MedicationsData extends PdfData {
+  medications?: string[];
+  medicationsNotes?: string[];
+}
+
+export interface AllergiesData extends PdfData {
+  allergies?: string[];
+  allergiesNotes?: string[];
+}
+
+export interface MedicalConditionsData extends PdfData {
+  medicalConditions?: string[];
+  medicalConditionsNotes?: string[];
+}
+
+export interface SurgicalHistoryData extends PdfData {
+  surgicalHistory?: string[];
+  surgicalHistoryNotes?: string[];
+}
+
+export interface HospitalizationData extends PdfData {
+  hospitalization?: string[];
+  hospitalizationNotes?: string[];
+}
+
+export interface InHouseMedicationsData extends PdfData {
+  inHouseMedications?: string[];
+  inHouseMedicationsNotes?: string[];
+}
+
+export interface ImmunizationOrders extends PdfData {
+  immunizationOrders?: string[];
+}
+
+export interface InHouseLabs extends PdfData {
+  inHouseLabResults: InHouseLabResultPdfData[];
+  inHouseLabOrders: string[]; // names of all the tests ordered
+}
+
+export interface ExternalLabs extends PdfData {
+  externalLabResults: ExternalLabOrderResult[];
+  externalLabOrders: string[]; // names of all the tests ordered
+}
+
+export interface AdditionalQuestions extends PdfData {
+  additionalQuestions: Record<string, any>;
+  currentASQ?: string;
+  notes?: string[];
+}
+
+export interface FollowupCompleted extends PdfData {
+  completedDateTime: string;
+}
+
+export interface IntakeNotes extends PdfData {
+  intakeNotes?: string[];
+}
+
+export interface Vitals extends PdfData {
+  vitals?: VitalsVisitNoteData & {
+    notes?: string[];
+  };
+}
+
+export interface Examination extends PdfData {
+  examination: {
+    [group: string]: {
+      groupLabel: string;
+      items?: Array<{
+        field: string;
+        label: string;
+        abnormal: boolean;
+      }>;
+      comment?: string;
+    };
+  };
+}
+
+export interface RosObservations extends PdfData {
+  rosObservations: {
+    [group: string]: {
+      items: Array<{
+        field: string;
+        label: string;
+        abnormal: boolean;
+      }>;
+    };
+  };
+}
+
+export interface Prescriptions extends PdfData {
+  prescriptions: string[];
+}
+
+export interface EmCode extends PdfData {
+  emCode?: string;
+}
+
+export interface MedicalDecision extends PdfData {
+  medicalDecision?: string;
+}
+
+export interface CptCodes extends PdfData {
+  cptCodes?: string[];
+}
+
+export interface PlanData extends PdfData {
+  patientInstructions?: string[];
+  disposition: {
+    header: string;
+    text: string;
+    [NOTHING_TO_EAT_OR_DRINK_FIELD]?: boolean;
+    [REFUSAL_OF_EMS_TRANSPORT_FIELD]?: boolean;
+    labService: string;
+    virusTest: string;
+    followUpIn?: number;
+    reason?: string;
+    specialty?: string;
+  };
+  subSpecialtyFollowup?: string[];
+  workSchoolExcuse?: string[];
+  addendumNote?: string;
+  addendumNotes?: AddendumEntry[];
+}
+
+export interface AddendumEntry {
+  text: string;
+  authorName: string;
+  timestamp?: string;
+  edited?: boolean;
+  deleted?: boolean;
+}
+
+export interface Assessment extends PdfData {
+  primary: string;
+  secondary: string[];
+}
+
+export interface Procedures extends PdfData {
+  procedures?: {
+    procedureType?: string;
+    cptCodes?: string[];
+    diagnoses?: string[];
+    procedureDateTime?: string;
+    performerType?: string;
+    medicationUsed?: string;
+    bodySite?: string;
+    bodySide?: string;
+    technique?: string[];
+    suppliesUsed?: string;
+    procedureDetails?: string;
+    specimenSent?: string;
+    complications?: string;
+    patientResponse?: string;
+    postInstructions?: string;
+    timeSpent?: string;
+    documentedBy?: string;
+  }[];
+}
+
+export interface ContactInfo extends PdfData {
+  streetAddress: string;
+  addressLineOptional: string;
+  city: string;
+  state: string;
+  zip: string;
+  patientMobile: string;
+  patientEmail: string;
+  patientPreferredCommunicationMethod: string;
+}
+
+export interface PatientDetails extends PdfData {
+  patientsEthnicity: string;
+  patientsRace: string;
+  howDidYouHearAboutUs: string;
+  patientSexualOrientation: string;
+  patientGenderIdentity: string;
+  patientGenderIdentityDetails: string;
+  patientSendMarketing: boolean;
+  preferredLanguage: string;
+  patientCommonWellConsent: boolean;
+}
+
+export interface PrimaryCarePhysician extends PdfData {
+  /**
+   * Mirrors `pcp-active` in `PATIENT_RECORD_CONFIG.FormFields.primaryCarePhysician.items`:
+   * `false` when the patient has explicitly indicated they do not have a PCP
+   * (no contained Practitioner, or `Practitioner.active === false`). When `false`
+   * the section renders the explanatory line instead of the field list — same as
+   * EHR's `PrimaryCareContainer`.
+   */
+  hasPcp: boolean;
+  pcpName: string;
+  pcpPracticeName: string;
+  pcpAddress: string;
+  pcpPhone: string;
+}
+
+export interface Documents extends PdfData {
+  photoIdFront?: any;
+  photoIdBack?: any;
+  insuranceCardFront?: any;
+  insuranceCardBack?: any;
+  secondaryInsuranceCardFront?: any;
+  secondaryInsuranceCardBack?: any;
+}
+export interface Insurance {
+  insuranceCarrier: string;
+  /** Human-readable insurance type, e.g. `"12 - PPO"`. Resolved from the candid code on Coverage. */
+  planType: string;
+  memberId: string;
+  policyHoldersName: string;
+  policyHoldersDateOfBirth: string;
+  policyHoldersSex: Gender;
+  streetAddress: string;
+  addressLineOptional: string;
+  city: string;
+  state: string;
+  zip: string;
+  relationship: string;
+  additionalInformation: string;
+}
+
+export interface InsuranceInfo extends PdfData {
+  primary: Insurance;
+  secondary: Insurance;
+}
+
+interface Payment {
+  date: string;
+  label: string;
+  amount: string;
+}
+
+export interface PatientPaymentsInfo extends PdfData {
+  payments: Payment[];
+}
+
+export interface ResponsiblePartyInfo extends PdfData {
+  relationship: string;
+  fullName: string;
+  dob: string;
+  sex: string;
+  phone: string;
+  email: string;
+  streetAddress: string;
+  addressLineOptional: string;
+  city: string;
+  state: string;
+  zip: string;
+}
+
+export interface EmergencyContactInfo extends PdfData {
+  relationship: string;
+  firstName: string;
+  middleName: string;
+  lastName: string;
+  phone: string;
+  streetAddress: string;
+  addressLineOptional: string;
+  city: string;
+  state: string;
+  zip: string;
+}
+
+export interface EmployerInfo extends PdfData {
+  workersCompInsuranceCarrier: string;
+  workersCompMemberId: string;
+  employerName: string;
+  streetAddress: string;
+  addressLineOptional: string;
+  city: string;
+  state: string;
+  zip: string;
+  firstName: string;
+  lastName: string;
+  title: string;
+  email: string;
+  phone: string;
+  fax: string;
+}
+
+/** Mirrors `occupationalMedicineEmployerInformation` in PATIENT_RECORD_CONFIG: only `employerName`. */
+export interface OccupationalMedicineEmployerInfo extends PdfData {
+  employerName: string;
+}
+
+export interface AttorneyInfo extends PdfData {
+  firm: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  mobile: string;
+  fax: string;
+}
+
+export interface consentFormsInfo extends PdfData {
+  isSigned: boolean;
+  signature: string;
+  fullName: string;
+  relationship: string;
+  date: string;
+  consentIsAttested: boolean;
+}
+
+export interface pharmacyInfo extends PdfData {
+  name: string;
+  address: string;
+}
+
+export interface VisitDetailsInput {
+  patient: Patient;
+  encounter: Encounter;
+  appointment: Appointment;
+  location?: Location;
+  timezone: string;
+  physician?: Practitioner;
+  pharmacy?: Organization;
+  coverages: OrderedCoveragesWithSubscribers;
+  insuranceOrgs: Organization[];
+  guarantorResource?: RelatedPerson | Patient;
+  documents: DocumentReference[];
+  emergencyContactResource?: RelatedPerson;
+  attorneyRelatedPerson?: RelatedPerson;
+  employerOrganization?: Organization;
+  occupationalMedicineEmployerOrganization?: Organization;
+  consents: Consent[];
+  questionnaireResponse?: QuestionnaireResponse;
+  payments: PatientPaymentDTO[];
+}
+
+export interface VisitDataInput {
+  appointment: Appointment;
+  location?: Location;
+  timezone: string;
+}
+
+export interface ProgressNoteVisitDataInput {
+  allChartData: AllChartData;
+  appointmentPackage: FullAppointmentResourcePackage;
+}
+
+export interface PatientDataInput {
+  patient: Patient;
+  appointment: Appointment;
+}
+
+export interface ProgressNotePatientDataInput {
+  patient: Patient;
+  questionnaireResponse?: QuestionnaireResponse;
+}
+
+export interface EncounterDataInput {
+  encounter: Encounter;
+}
+
+export interface PatientDetailsInput {
+  patient: Patient;
+}
+
+export interface PrimaryCarePhysicianInput {
+  physician?: Practitioner;
+}
+
+export interface InsuranceDataInput {
+  coverages: OrderedCoveragesWithSubscribers;
+  insuranceOrgs: Organization[];
+}
+
+export interface ResponsiblePartyInput {
+  guarantorResource?: RelatedPerson | Patient;
+}
+
+export interface ConsentsDataInput {
+  encounter: Encounter;
+  consents: Consent[];
+  questionnaireResponse?: QuestionnaireResponse;
+  timezone: string;
+}
+
+export interface EmergencyContactDataInput {
+  emergencyContactResource?: RelatedPerson;
+}
+
+export interface EmployerDataInput {
+  employer?: Organization;
+  /** Workers' comp Coverage from `OrderedCoveragesWithSubscribers.workersComp`. Carrier name resolved via `insuranceOrgs`. */
+  workersCompCoverage?: Coverage;
+  insuranceOrgs?: Organization[];
+}
+
+export interface OccupationalMedicineEmployerDataInput {
+  employer?: Organization;
+}
+
+export interface AttorneyDataInput {
+  attorneyRelatedPerson?: RelatedPerson;
+}
+
+export interface PatientPaymentsDataInput {
+  payments: PatientPaymentDTO[];
+}
+
+export interface UploadMetadata {
+  patientId: string;
+  fileName: string;
+  bucketName: string;
+}
+
+export type PdfResult = {
+  pdfInfo: PdfInfo;
+  attached?: string[];
+};
+
+export interface PatientInfoForDischargeSummary extends PdfData {
+  fullName: string;
+  dob: string;
+  sex: Gender;
+  id: string;
+  phone?: string;
+}
+
+export interface RadiologyData extends PdfData {
+  radiology?: {
+    name: string;
+    result?: string;
+  }[];
+}
+
+export interface ErxMedicationsData extends PdfData {
+  medications: PrescribedMedication[];
+}
+
+export interface PatientInstructionsData extends PdfData {
+  instructions: string[];
+}
+
+export interface EducationDocumentsData extends PdfData {
+  documents: { title: string }[];
+}
+
+export interface DispositionData extends PdfData {
+  label: string;
+  instruction: string;
+  reason?: string;
+  followUpIn?: string;
+  specialty?: string;
+  [NOTHING_TO_EAT_OR_DRINK_FIELD]?: boolean;
+  [REFUSAL_OF_EMS_TRANSPORT_FIELD]?: boolean;
+  labService?: string;
+  virusTest?: string;
+}
+
+export interface PhysicianData extends PdfData {
+  name: string;
+  dischargeDateTime?: string;
+}
+
+export interface UpcomingVisitsData extends PdfData {
+  /** Pre-formatted display rows, e.g. "06/07/2026 11:30 AM  EDT, New York Urgent Care Clinic - Suture / Staple Removal". */
+  rows: string[];
+}
+
+export interface WorkSchoolExcuseData extends PdfData {
+  workSchoolExcuse?: { note: string }[];
+  attachmentDocRefs?: string[];
+}
+
+export interface DiagnosesData extends PdfData {
+  primary: string[];
+  secondary: string[];
+}
+
+export interface VitalsDataInDischargeSummary extends PdfData {
+  vitals: {
+    temp?: string;
+    hr?: string;
+    rr?: string;
+    bp?: string;
+    oxygenSat?: string;
+    weight?: string;
+    height?: string;
+    vision?: string;
+    lastMenstrualPeriod?: string;
+  };
+}
+
+export interface InHouseMedicationsDataForDischargeSummary extends PdfData {
+  inHouseMedications: Medication[];
+}
+
+export interface DischargeSummaryData extends PdfData {
+  patient: PatientInfoForDischargeSummary;
+  visit: VisitInfo;
+  vitals: VitalsDataInDischargeSummary;
+  medications: MedicationsData;
+  allergies: AllergiesData;
+  inHouseLabs?: InHouseLabs;
+  externalLabs?: ExternalLabs;
+  radiology: RadiologyData;
+  inHouseMedications: InHouseMedicationsDataForDischargeSummary;
+  erxMedications?: ErxMedicationsData;
+  diagnoses?: DiagnosesData;
+  patientInstructions?: PatientInstructionsData;
+  educationDocuments?: EducationDocumentsData;
+  disposition: DispositionData;
+  physician: PhysicianData;
+  workSchoolExcuse?: WorkSchoolExcuseData;
+  upcomingVisits: UpcomingVisitsData;
+  documentsAttached?: boolean;
+}
+
+export interface VisitDetailsData extends PdfData {
+  visit: VisitInfo;
+  patient: PatientInfo;
+  contact: ContactInfo;
+  details: PatientDetails;
+  pcp: PrimaryCarePhysician;
+  insurances: InsuranceInfo;
+  responsibleParty: ResponsiblePartyInfo;
+  emergencyContact: EmergencyContactInfo;
+  attorney: AttorneyInfo;
+  employer: EmployerInfo;
+  omEmployer: OccupationalMedicineEmployerInfo;
+  consentForms: consentFormsInfo;
+  documents: Documents;
+  pharmacy: pharmacyInfo;
+  paymentHistory: PatientPaymentsInfo;
+}
+export interface GetPaymentDataResponse {
+  chargeUuid: string;
+  amount: number;
+  currency: string;
+  date: string;
+  card: {
+    brand: string;
+    lastFour: string;
+    expirationMonth: number;
+    expirationYear: number;
+  };
+}
+
+export interface ProgressNoteInput {
+  patient: Patient;
+  encounter: Encounter;
+  allChartData: AllChartData;
+  appointmentPackage: FullAppointmentResourcePackage;
+  questionnaireResponse?: QuestionnaireResponse;
+  upcomingFollowUps: UpcomingFollowUp[];
+}
+
+export interface ProgressNoteData extends PdfData {
+  visit: VisitDetailsForProgressNote;
+  patient: PatientInfoForProgressNote;
+  encounter: EncounterInfo;
+  chiefComplaint: ChiefComplaint;
+  historyOfPresentIllness: HistoryOfPresentIllness;
+  mechanismOfInjury: MechanismOfInjury;
+  reviewOfSystems: ReviewOfSystems;
+  medications: MedicationsData;
+  allergies: AllergiesData;
+  medicalConditions: MedicalConditionsData;
+  surgicalHistory: SurgicalHistoryData;
+  hospitalization: HospitalizationData;
+  inHouseMedications: InHouseMedicationsData;
+  immunizationOrders: ImmunizationOrders;
+  inHouseLabs?: InHouseLabs;
+  externalLabs?: ExternalLabs;
+  screening: AdditionalQuestions;
+  intakeNotes: IntakeNotes;
+  vitals: Vitals;
+  rosObservations: RosObservations;
+  examination: Examination;
+  assessment?: Assessment;
+  medicalDecision: MedicalDecision;
+  emCode: EmCode;
+  cptCodes: CptCodes;
+  procedures: Procedures;
+  prescriptions: Prescriptions;
+  plan: PlanData;
+  followupCompleted: FollowupCompleted;
+  upcomingVisits: UpcomingVisitsData;
+}
+
+export interface DischargeSummaryInput {
+  allChartData: AllChartData;
+  appointmentPackage: FullAppointmentResourcePackage;
+  upcomingFollowUps: UpcomingFollowUp[];
+}
+
+export interface DischargeSummaryData extends PdfData {
+  patient: PatientInfoForDischargeSummary;
+  visit: VisitInfo;
+  vitals: VitalsDataInDischargeSummary;
+  medications: MedicationsData;
+  allergies: AllergiesData;
+  inHouseLabs?: InHouseLabs;
+  externalLabs?: ExternalLabs;
+  radiology: RadiologyData;
+  inHouseMedications: InHouseMedicationsDataForDischargeSummary;
+  erxMedications?: ErxMedicationsData;
+  diagnoses?: DiagnosesData;
+  patientInstructions?: PatientInstructionsData;
+  educationDocuments?: EducationDocumentsData;
+  disposition: DispositionData;
+  physician: PhysicianData;
+  workSchoolExcuse?: WorkSchoolExcuseData;
+  upcomingVisits: UpcomingVisitsData;
+  documentsAttached?: boolean;
+}
+export interface MedicationHistoryInput extends PdfData {
+  patient: PatientInfoForDischargeSummary; // all this is pretty generic actually
+  visit: VisitInfo;
+  medications: MedicationsData;
+}

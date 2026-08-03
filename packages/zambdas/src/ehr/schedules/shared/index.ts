@@ -1,0 +1,255 @@
+import Oystehr from '@oystehr/sdk';
+import { Address, FhirResource, HealthcareService, Location, PractitionerRole } from 'fhir/r4b';
+import { DateTime } from 'luxon';
+import {
+  ClosureType,
+  INVALID_INPUT_ERROR,
+  INVALID_RESOURCE_ID_ERROR,
+  isValidUUID,
+  MISSING_REQUEST_BODY,
+  MISSING_REQUIRED_PARAMETERS,
+  OVERRIDE_DATE_FORMAT,
+  Secrets,
+  TIMEZONES,
+  UpdateScheduleParams,
+} from 'utils';
+import { ZambdaInput } from '../../../shared';
+
+export const addressStringFromAddress = (address: Address): string => {
+  let addressString = '';
+  if (address.line) {
+    addressString += `, ${address.line}`;
+  }
+  if (address.city) {
+    addressString += `, ${address.city}`;
+  }
+  if (address.state) {
+    addressString += `, ${address.state}`;
+  }
+  if (address.postalCode) {
+    addressString += `, ${address.postalCode}`;
+  }
+  // return without trailing comma
+
+  if (addressString !== '') {
+    addressString = addressString.substring(2);
+  }
+  return addressString;
+};
+
+export const getNameForOwner = (owner: FhirResource): string => {
+  let name: string | undefined = '';
+  if (owner.resourceType === 'Location') {
+    name = (owner as Location).name;
+  } else if (owner.resourceType === 'HealthcareService') {
+    name = (owner as HealthcareService).name;
+  }
+  if (name) {
+    return name;
+  }
+  return `${owner.resourceType}/${owner.id}`;
+};
+
+/**
+ * Compose the default *schedule* name for a PractitionerRole owner. Returns
+ * just the Location's name (e.g., "Main Clinic") — the schedule's
+ * disambiguating piece relative to its provider. Surfaces in the SchedulePage
+ * editable name field as a sensible pre-filled default; consumers that need
+ * to identify the provider (group member picker, staff add-visit picker)
+ * compose "Provider Name: Schedule Name" themselves.
+ *
+ * Returns the role's id-fallback if the location reference can't be resolved.
+ */
+export const getNameForPractitionerRole = async (role: PractitionerRole, oystehr: Oystehr): Promise<string> => {
+  const locationId = role.location?.[0]?.reference?.split('/')[1];
+  const location = locationId
+    ? await oystehr.fhir.get<Location>({ resourceType: 'Location', id: locationId }).catch(() => undefined)
+    : undefined;
+  return location?.name ?? `PractitionerRole/${role.id ?? 'unknown'}`;
+};
+
+export interface UpdateScheduleBasicInput extends UpdateScheduleParams {
+  secrets: Secrets | null;
+}
+
+// this lives here because the create schedule zambda uses an input type that extends UpdateScheduleParams,
+// so this can be shared across the update and create zambdas
+export const validateUpdateScheduleParameters = (input: ZambdaInput): UpdateScheduleBasicInput => {
+  if (!input.body) {
+    throw MISSING_REQUEST_BODY;
+  }
+
+  console.log('input', JSON.stringify(input, null, 2));
+  const { secrets } = input;
+  const {
+    scheduleId,
+    timezone,
+    slug,
+    schedule,
+    scheduleOverrides,
+    closures,
+    ownerId,
+    ownerType,
+    isVirtual,
+    stripeAccountId,
+    advapacsLocationId,
+    rooms,
+    name,
+    description,
+    address,
+    telecom,
+    reviewLink,
+  } = JSON.parse(input.body);
+  const createMode = Boolean(ownerId) && Boolean(ownerType);
+
+  if (!scheduleId) {
+    throw MISSING_REQUIRED_PARAMETERS(['scheduleId']);
+  }
+
+  if (isValidUUID(scheduleId) === false && createMode === false) {
+    throw INVALID_RESOURCE_ID_ERROR('scheduleId');
+  }
+
+  if (timezone !== undefined) {
+    if (typeof timezone !== 'string') {
+      throw INVALID_INPUT_ERROR('"timezone" must be a string');
+    }
+    if (TIMEZONES.includes(timezone) === false) {
+      throw INVALID_INPUT_ERROR(`"timezone" must be one of ${TIMEZONES.join(', ')}`);
+    }
+  }
+  // todo: better schema application for these complex structures
+  if (schedule) {
+    if (typeof schedule !== 'object') {
+      throw INVALID_INPUT_ERROR('"schedule" must be an object');
+    }
+  }
+  if (scheduleOverrides) {
+    if (typeof scheduleOverrides !== 'object') {
+      throw INVALID_INPUT_ERROR('"scheduleOverrides" must be an object');
+    }
+  }
+  if (closures) {
+    if (!Array.isArray(closures)) {
+      throw INVALID_INPUT_ERROR('"closures" must be an array');
+    }
+    closures.forEach((closure) => {
+      if (typeof closure !== 'object') {
+        throw INVALID_INPUT_ERROR('"closures" must be an array of objects');
+      }
+      if (!closure.start) {
+        throw INVALID_INPUT_ERROR('"closures" must be an array of objects with start date');
+      } else if (DateTime.fromFormat(closure.start, OVERRIDE_DATE_FORMAT).isValid === false) {
+        throw INVALID_INPUT_ERROR(
+          `"closures" start dates must be valid date strings in ${OVERRIDE_DATE_FORMAT} format`
+        );
+      }
+      if (closure.end && DateTime.fromFormat(closure.end, OVERRIDE_DATE_FORMAT).isValid === false) {
+        throw INVALID_INPUT_ERROR(`"closures" end dates must be valid date strings in ${OVERRIDE_DATE_FORMAT} format`);
+      }
+      if (Object.values(ClosureType).includes(closure.type) === false) {
+        throw INVALID_INPUT_ERROR(
+          `"closures" must be an array of objects with a type of ${Object.values(ClosureType).join(', ')}`
+        );
+      } else if (closure.type === 'period' && !closure.end) {
+        throw INVALID_INPUT_ERROR('"closures" of type "period" must have an end date');
+      } else if (
+        closure.type === 'period' &&
+        DateTime.fromFormat(closure.start, OVERRIDE_DATE_FORMAT) >=
+          DateTime.fromFormat(closure.end, OVERRIDE_DATE_FORMAT)
+      ) {
+        throw INVALID_INPUT_ERROR('"closures" of type "period" must have start date before end date');
+      }
+    });
+  }
+
+  if (slug !== undefined && typeof slug !== 'string') {
+    throw INVALID_INPUT_ERROR('"slug" must be a string');
+  }
+
+  if (isVirtual !== undefined && typeof isVirtual !== 'boolean') {
+    throw INVALID_INPUT_ERROR('"isVirtual" must be a boolean');
+  }
+
+  if (stripeAccountId !== undefined && stripeAccountId !== null && typeof stripeAccountId !== 'string') {
+    throw INVALID_INPUT_ERROR('"stripeAccountId" must be a string or null');
+  }
+
+  if (advapacsLocationId !== undefined && advapacsLocationId !== null && typeof advapacsLocationId !== 'string') {
+    throw INVALID_INPUT_ERROR('"advapacsLocationId" must be a string or null');
+  }
+
+  if (rooms !== undefined) {
+    if (!Array.isArray(rooms) || rooms.some((room) => typeof room !== 'string')) {
+      throw INVALID_INPUT_ERROR('"rooms" must be an array of strings');
+    }
+  }
+
+  if (name !== undefined && typeof name !== 'string') {
+    throw INVALID_INPUT_ERROR('"name" must be a string');
+  }
+
+  if (description !== undefined && description !== null && typeof description !== 'string') {
+    throw INVALID_INPUT_ERROR('"description" must be a string or null');
+  }
+
+  if (address !== undefined && address !== null) {
+    if (typeof address !== 'object' || Array.isArray(address)) {
+      throw INVALID_INPUT_ERROR('"address" must be an object or null');
+    }
+    const { line, city, state, postalCode } = address as Record<string, unknown>;
+    if (line !== undefined && line !== null) {
+      if (!Array.isArray(line) || line.some((segment) => typeof segment !== 'string')) {
+        throw INVALID_INPUT_ERROR('"address.line" must be an array of strings');
+      }
+    }
+    if (city !== undefined && city !== null && typeof city !== 'string') {
+      throw INVALID_INPUT_ERROR('"address.city" must be a string');
+    }
+    if (state !== undefined && state !== null && typeof state !== 'string') {
+      throw INVALID_INPUT_ERROR('"address.state" must be a string');
+    }
+    if (postalCode !== undefined && postalCode !== null && typeof postalCode !== 'string') {
+      throw INVALID_INPUT_ERROR('"address.postalCode" must be a string');
+    }
+  }
+
+  if (reviewLink !== undefined && reviewLink !== null && typeof reviewLink !== 'string') {
+    throw INVALID_INPUT_ERROR('"reviewLink" must be a string or null');
+  }
+
+  if (telecom !== undefined && telecom !== null) {
+    if (typeof telecom !== 'object' || Array.isArray(telecom)) {
+      throw INVALID_INPUT_ERROR('"telecom" must be an object or null');
+    }
+    const { phone, url, fax } = telecom as Record<string, unknown>;
+    if (phone !== undefined && phone !== null && typeof phone !== 'string') {
+      throw INVALID_INPUT_ERROR('"telecom.phone" must be a string');
+    }
+    if (url !== undefined && url !== null && typeof url !== 'string') {
+      throw INVALID_INPUT_ERROR('"telecom.url" must be a string');
+    }
+    if (fax !== undefined && fax !== null && typeof fax !== 'string') {
+      throw INVALID_INPUT_ERROR('"telecom.fax" must be a string');
+    }
+  }
+
+  return {
+    secrets,
+    scheduleId,
+    timezone,
+    schedule,
+    scheduleOverrides,
+    closures,
+    slug,
+    isVirtual,
+    stripeAccountId,
+    advapacsLocationId,
+    rooms,
+    name,
+    description,
+    address,
+    telecom,
+    reviewLink,
+  };
+};

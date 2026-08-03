@@ -1,0 +1,198 @@
+import Oystehr from '@oystehr/sdk';
+import { APIGatewayProxyResult } from 'aws-lambda';
+import { Appointment, Location, Schedule, Slot } from 'fhir/r4b';
+import {
+  FHIR_RESOURCE_NOT_FOUND,
+  getOriginalBookingUrlFromSlot,
+  getServiceModeFromScheduleOwner,
+  getServiceModeFromSlot,
+  GetSlotDetailsParams,
+  GetSlotDetailsResponse,
+  getSlotIsWalkin,
+  getTimezone,
+  INVALID_INPUT_ERROR,
+  isValidUUID,
+  MISSING_REQUEST_BODY,
+  MISSING_REQUIRED_PARAMETERS,
+  SCHEDULE_NOT_FOUND_CUSTOM_ERROR,
+  ScheduleOwnerFhirResource,
+  Secrets,
+  ServiceMode,
+} from 'utils';
+import { getNameForOwner } from '../../../ehr/schedules/shared';
+import {
+  checkOrCreateM2MClientToken,
+  createOystehrClient,
+  resolveBookingLocationId,
+  wrapHandler,
+  ZambdaInput,
+} from '../../../shared';
+
+const ZAMBDA_NAME = 'get-slot-details';
+
+let m2mToken: string;
+
+export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
+  console.group('validateRequestParameters');
+  const validatedParameters = validateRequestParameters(input);
+  console.groupEnd();
+  console.debug('validateRequestParameters success', JSON.stringify(validatedParameters));
+  const { secrets } = validatedParameters;
+  m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
+  const oystehr = createOystehrClient(m2mToken, secrets);
+  const effectInput = await complexValidation(validatedParameters, oystehr);
+
+  const slotDetails = performEffect(effectInput);
+
+  return {
+    statusCode: 200,
+    body: JSON.stringify(slotDetails),
+  };
+});
+
+const performEffect = (input: EffectInput): GetSlotDetailsResponse => {
+  const { slot, schedule, scheduleOwner, bookingLocation, appointmentId, originalBookingUrl } = input;
+
+  const startISO = slot.start;
+  const endISO = slot.end;
+  let serviceMode = getServiceModeFromSlot(slot) ?? getServiceModeFromScheduleOwner(scheduleOwner);
+  if (!serviceMode) {
+    serviceMode = ServiceMode['in-person'];
+  }
+  const ownerType = scheduleOwner.resourceType;
+  const ownerId = scheduleOwner.id!;
+  const isWalkin = getSlotIsWalkin(slot);
+  const ownerName = getNameForOwner(scheduleOwner);
+
+  // how to handle timezone is fairly context/use case specific
+  // here we're defaulting to the schedule's timezone if it exists, else the schedule owner's timezone
+  const timezoneForDisplay = getTimezone(schedule) ?? getTimezone(scheduleOwner);
+
+  return {
+    slotId: slot.id!,
+    status: slot.status,
+    scheduleId: schedule.id!,
+    startISO,
+    endISO,
+    serviceMode,
+    ownerType,
+    ownerId,
+    isWalkin,
+    appointmentId,
+    comment: slot.comment,
+    timezoneForDisplay,
+    ownerName,
+    originalBookingUrl,
+    bookingLocationId: bookingLocation?.id,
+    bookingLocationName: bookingLocation?.name,
+  };
+};
+
+interface BasicInput extends GetSlotDetailsParams {
+  secrets: Secrets | null;
+}
+
+const validateRequestParameters = (input: ZambdaInput): BasicInput => {
+  if (!input.body) {
+    throw MISSING_REQUEST_BODY;
+  }
+
+  const { slotId } = JSON.parse(input.body);
+
+  if (!slotId) {
+    throw MISSING_REQUIRED_PARAMETERS(['slotId']);
+  }
+  if (isValidUUID(slotId) === false) {
+    throw INVALID_INPUT_ERROR('"slotId" must be a valid UUID');
+  }
+  return {
+    secrets: input.secrets,
+    slotId,
+  };
+};
+
+interface EffectInput {
+  slot: Slot;
+  schedule: Schedule;
+  scheduleOwner: ScheduleOwnerFhirResource;
+  /**
+   * The Location resolved for this slot via the same precedence used by
+   * create-appointment. Surfaced separately from scheduleOwner so display
+   * code can show the booking Location's name even when the owner is a
+   * non-Location actor (e.g., a PR-actored slot booked through a group).
+   */
+  bookingLocation?: Location;
+  appointmentId?: string;
+  originalBookingUrl?: string;
+}
+
+const complexValidation = async (input: BasicInput, oystehr: Oystehr): Promise<EffectInput> => {
+  const { slotId } = input;
+  // query up the schedule that owns the slot
+  const slotAndChainedResources = (
+    await oystehr.fhir.search<Slot | Appointment | Schedule | ScheduleOwnerFhirResource>({
+      resourceType: 'Slot',
+      params: [
+        { name: '_id', value: slotId },
+        { name: '_revinclude', value: 'Appointment:slot' },
+        { name: '_include', value: 'Slot:schedule' },
+        { name: '_include:iterate', value: 'Schedule:actor' },
+      ],
+    })
+  ).unbundle();
+  const slot = slotAndChainedResources.find((s): s is Slot => s.resourceType === 'Slot' && s.id === slotId);
+  if (!slot) {
+    throw FHIR_RESOURCE_NOT_FOUND('Slot');
+  }
+  const schedule = slotAndChainedResources.find(
+    (s): s is Schedule => s.resourceType === 'Schedule' && `Schedule/${s.id}` === slot.schedule?.reference
+  );
+  if (!schedule) {
+    throw FHIR_RESOURCE_NOT_FOUND('Schedule');
+  }
+  const [scheduleOwnerType, scheduleOwnerId] = (schedule.actor?.[0]?.reference ?? '').split('/');
+
+  const scheduleOwner = slotAndChainedResources.find(
+    (s): s is ScheduleOwnerFhirResource => s.resourceType === scheduleOwnerType && s.id === scheduleOwnerId
+  );
+  if (!scheduleOwner) {
+    const scheduleOwnerNotFoundError = SCHEDULE_NOT_FOUND_CUSTOM_ERROR(
+      `The schedule resource owning this slot, Schedule/${schedule.id}, could not be connected to any resource referenced by its "actor" field. Please ensure that Schedule.actor[0] references an existing Practitioner, Location, or HealthcareService resource.`
+    );
+    throw scheduleOwnerNotFoundError;
+  }
+  const appointment = slotAndChainedResources.find((s): s is Appointment => s.resourceType === 'Appointment');
+
+  // Ottehr uses the HealthcareService resource https://build.fhir.org/healthcareservice.html
+  // to represent scheduling "groups". if a schedule owner belongs to a single such group, we'll return its identifying
+  // details, which may be useful in directing the user back to the root scheduling page that was originally used
+  // to book the appointment.
+
+  const originalBookingUrl = getOriginalBookingUrlFromSlot(slot);
+
+  // Resolve the booking Location using the same precedence as create-
+  // appointment so display code can show a real Location name (not a
+  // bare actor reference like "PractitionerRole/<id>"). If the resolved
+  // id matches scheduleOwner (Location-actor case), reuse it instead of
+  // a separate fetch.
+  let bookingLocation: Location | undefined;
+  const bookingLocationId = resolveBookingLocationId({ scheduleOwner, slot });
+  if (bookingLocationId) {
+    if (scheduleOwner.resourceType === 'Location' && scheduleOwner.id === bookingLocationId) {
+      bookingLocation = scheduleOwner as Location;
+    } else {
+      bookingLocation = await oystehr.fhir
+        .get<Location>({ resourceType: 'Location', id: bookingLocationId })
+        .catch(() => undefined);
+    }
+  }
+
+  return {
+    slot,
+    schedule,
+    scheduleOwner,
+    bookingLocation,
+    appointmentId: appointment?.id,
+    originalBookingUrl,
+  };
+};

@@ -1,0 +1,305 @@
+import { EditOutlined } from '@mui/icons-material';
+import { IconButton, Table, TableBody, TableCell, TableRow, Tooltip, Typography } from '@mui/material';
+import { DateTime } from 'luxon';
+import { useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { Link, useNavigate, useParams } from 'react-router-dom';
+import { TermsAndConditions } from 'src/components/TermsAndConditions';
+import {
+  APIError,
+  APPOINTMENT_CANT_BE_IN_PAST_ERROR,
+  getReasonForVisitOptionsForServiceCategory,
+  mapBookingQRItemToPatientInfo,
+  normalizeFormDataToQRItems,
+  PatientInfo,
+  ServiceMode,
+  SLOT_UNAVAILABLE_ERROR,
+  VisitType,
+} from 'utils';
+import { safelyCaptureException } from 'utils/lib/frontend/sentry';
+import { dataTestIds } from '../../src/helpers/data-test-ids';
+import { ottehrApi } from '../api';
+import { intakeFlowPageRoute } from '../App';
+import { PageContainer } from '../components';
+import { ErrorDialog, ErrorDialogConfig } from '../components/ErrorDialog';
+import PageForm from '../components/PageForm';
+import { useIntakeCommonStore } from '../features/common';
+import { NO_PATIENT_ERROR, NO_SLOT_ERROR, PAST_APPT_ERROR } from '../helpers';
+import { getLocaleDateTimeString } from '../helpers/dateUtils';
+import { useUCZambdaClient } from '../hooks/useUCZambdaClient';
+import i18n from '../lib/i18n';
+import { PROGRESS_STORAGE_KEY, useBookingContext } from './BookingHome';
+
+interface ReviewItem {
+  name: string;
+  valueString: string | undefined;
+  testId: string;
+  valueTestId?: string;
+  path?: string;
+}
+
+const makeFullName = (patient: PatientInfo | undefined): string | undefined => {
+  if (!patient) {
+    return undefined;
+  }
+  const { firstName, middleName, lastName } = patient;
+  return `${firstName}${middleName ? ` ${middleName}` : ''} ${lastName}`;
+};
+
+const PAGE_ID = 'REVIEW_PAGE';
+
+const Review = (): JSX.Element => {
+  const navigate = useNavigate();
+  const [loading, setLoading] = useState(false);
+  const {
+    visitType,
+    scheduleOwnerName,
+    scheduleOwnerType,
+    scheduleOwnerId,
+    bookingLocationName,
+    timezone,
+    startISO,
+    serviceMode,
+    originalBookingUrl,
+    setPatientInfo,
+    completeBooking,
+  } = useBookingContext();
+  const [errorConfig, setErrorConfig] = useState<ErrorDialogConfig | undefined>(undefined);
+  const { slotId } = useParams<{ slotId: string }>();
+
+  const patientInfo: PatientInfo | undefined = (() => {
+    const storedData = sessionStorage.getItem(PROGRESS_STORAGE_KEY);
+    if (!storedData) return undefined;
+    try {
+      const parsedData = JSON.parse(storedData) as Record<string, Record<string, unknown>>;
+      const storedItems = Object.values(parsedData).flatMap((pageData) => normalizeFormDataToQRItems(pageData));
+      const info = mapBookingQRItemToPatientInfo(storedItems);
+
+      // When reason-for-visit is hidden (single option per category+mode),
+      // the field isn't in the form, so we fill it in from config.
+      if (!info.reasonForVisit) {
+        const serviceCategoryCode = storedItems.find((i) => i.linkId === 'appointment-service-category')?.answer?.[0]
+          ?.valueString;
+        const serviceModeValue = storedItems.find((i) => i.linkId === 'appointment-service-mode')?.answer?.[0]
+          ?.valueString;
+        if (serviceCategoryCode) {
+          const options = getReasonForVisitOptionsForServiceCategory(serviceCategoryCode, serviceModeValue);
+          if (options.length === 1) {
+            info.reasonForVisit = options[0].value;
+          }
+        }
+      }
+
+      return info;
+    } catch (error) {
+      console.error('Error parsing stored patient information:', error);
+    }
+    return undefined;
+  })();
+  const patientFullName = makeFullName(patientInfo);
+
+  const { t } = useTranslation();
+
+  const getNextPath = (appointmentId: string): string => {
+    if (serviceMode === ServiceMode.virtual && visitType === VisitType.WalkIn) {
+      return `/paperwork/${appointmentId}`;
+    } else {
+      return `/visit/${appointmentId}`;
+    }
+  };
+
+  const zambdaClient = useUCZambdaClient({ tokenless: false });
+
+  const onSubmit = async (): Promise<void> => {
+    try {
+      if (!patientInfo) {
+        console.log('no patient info error');
+        safelyCaptureException(new Error('Patient not selected at appointment submit time'));
+        setErrorConfig(NO_PATIENT_ERROR(t));
+        return;
+      }
+      if (!slotId) {
+        console.log('no slotId error');
+        safelyCaptureException(new Error('Slot ID not found'));
+        setErrorConfig(NO_SLOT_ERROR(t));
+        return;
+      }
+      // Validate inputs
+      if (!zambdaClient) {
+        throw new Error('zambdaClient is not defined');
+      }
+      setLoading(true);
+
+      // hotfix for https://github.com/masslight/ottehr/issues/3290
+      // For the case when the time was rescheduled, the payload to the create-appointment zambda
+      // starts including "new-patient" in the id, and that breaks logic in many places
+      // across different zambdas and affects subsequent zambda calls too.
+      // It looks like the working variant is not to send the id for new users, but it looks like
+      // we should handle it in the zambda in a more optimal way.
+      if (patientInfo.newPatient) {
+        patientInfo.id = undefined;
+      }
+
+      // Create the appointment. The slot already carries any location
+      // attribution (via the slot-at-location extension stamped at vending
+      // time), so we don't need to forward an atLocation param here.
+      const res = await ottehrApi.createAppointment(zambdaClient, {
+        slotId,
+        patient: patientInfo,
+        language: 'en', // replace with i18n.language to enable
+      });
+      const fhirAppointmentId = res.appointmentId;
+
+      navigate(getNextPath(fhirAppointmentId));
+      completeBooking();
+    } catch (err) {
+      if ((err as APIError)?.code === APPOINTMENT_CANT_BE_IN_PAST_ERROR.code) {
+        setErrorConfig(PAST_APPT_ERROR(t));
+      } else if ((err as APIError)?.code === SLOT_UNAVAILABLE_ERROR.code) {
+        setErrorConfig({
+          title: 'Sorry, this time slot is no longer available',
+          description:
+            'It looks like someone else booked this time slot just before you. Please go back and select a different time.',
+          closeButtonText: 'Back to scheduling',
+          destinationOnClose: originalBookingUrl ?? intakeFlowPageRoute.PrebookVisit.path,
+        });
+      } else {
+        // Catch validation errors
+        console.error(err);
+        useIntakeCommonStore.setState({ networkError: true });
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const reviewItems: ReviewItem[] = [
+    {
+      name: t('reviewAndSubmit.patient'),
+      valueString: patientFullName ? patientFullName : 'Unknown',
+      testId: 'r&s_Patient',
+      valueTestId: dataTestIds.patientNameReviewScreen,
+    },
+    // Prefer the resolved booking Location when present — it's the
+    // human-readable Location name the patient picked (or the actor's
+    // own Location for Location-actored slots). scheduleOwnerName falls
+    // through only when no Location could be resolved (e.g., a
+    // Practitioner-actored slot without an extension).
+    {
+      name: bookingLocationName ? 'Location' : scheduleOwnerType,
+      valueString: bookingLocationName ?? scheduleOwnerName,
+      testId: 'r&s_ProviderType',
+      valueTestId: dataTestIds.locationNameReviewScreen,
+    },
+  ];
+
+  if (visitType === VisitType.PreBook) {
+    let path = `${intakeFlowPageRoute.PrebookVisit.path}`;
+    if (originalBookingUrl) {
+      const queryChar = originalBookingUrl.includes('?') ? '&' : '?';
+      path = `${originalBookingUrl}${queryChar}slot=${scheduleOwnerId}|${startISO}`;
+    }
+    const selectedSlotTimezoneAdjusted = DateTime.fromISO(startISO).setZone(timezone).setLocale('en-us');
+    reviewItems.push({
+      name: t('reviewAndSubmit.checkInTime'),
+      valueString: getLocaleDateTimeString(selectedSlotTimezoneAdjusted, 'medium', i18n.language),
+      path,
+      testId: 'r&s_checkInTime',
+      valueTestId: dataTestIds.prebookSlotReviewScreen,
+    });
+  } else if (visitType === VisitType.WalkIn) {
+    reviewItems.push({
+      name: t('reviewAndSubmit.walkInTime'),
+      valueString: getLocaleDateTimeString(DateTime.now().setZone(timezone), 'medium', i18n.language),
+      testId: 'r&s_walkInTime',
+      valueTestId: dataTestIds.walkInSlotReviewScreen,
+    });
+  }
+
+  const checkIfNew = (): void => {
+    if (patientInfo?.newPatient) {
+      setPatientInfo({ ...patientInfo, id: 'new-patient' });
+    }
+  };
+
+  return (
+    <PageContainer title={t('reviewAndSubmit.title')} description={t('reviewAndSubmit.subtitle')}>
+      <Typography variant="h3" color="primary.main" marginTop={2} marginBottom={0}>
+        {t('reviewAndSubmit.visitDetails')}
+      </Typography>
+      <Table
+        sx={{
+          marginBottom: 2,
+          tr: {
+            td: {
+              borderBottom: '1px solid #E3E6EF',
+            },
+            '&:last-child': {
+              td: {
+                borderBottom: 'none',
+              },
+            },
+          },
+        }}
+      >
+        <TableBody>
+          {reviewItems.map((item) => (
+            <TableRow key={item.name}>
+              <TableCell sx={{ paddingTop: 2, paddingBottom: 2, paddingLeft: 0, paddingRight: 0 }}>
+                <Typography color="primary.main" data-testid={item.testId}>
+                  {item.name}
+                </Typography>
+              </TableCell>
+              <TableCell padding="none" align="right" data-testid={item.valueTestId}>
+                {item.valueString !== undefined && item.valueString}
+              </TableCell>
+              <TableCell padding="none" sx={{ paddingLeft: 1 }}>
+                {item.path && (
+                  <Tooltip title={t('reviewAndSubmit.edit')} placement="right" className="edit-slot">
+                    <Link to={item.path} state={{ reschedule: true }} onClick={checkIfNew}>
+                      <IconButton aria-label="edit" color="secondary">
+                        <EditOutlined />
+                      </IconButton>
+                    </Link>
+                  </Tooltip>
+                )}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+      <TermsAndConditions pageId={PAGE_ID} />
+      <PageForm
+        controlButtons={useMemo(
+          () => ({
+            submitLabel:
+              visitType === VisitType.PreBook ? t('reviewAndSubmit.reserveButton') : t('reviewAndSubmit.confirmButton'),
+            loading: loading,
+          }),
+          [loading, t, visitType]
+        )}
+        onSubmit={onSubmit}
+      />
+      <ErrorDialog
+        open={errorConfig != undefined}
+        title={errorConfig?.title ?? ''}
+        description={errorConfig?.description ?? ''}
+        closeButtonText={errorConfig?.closeButtonText ?? t('reviewAndSubmit.ok')}
+        handleClose={() => {
+          if (errorConfig?.destinationOnClose) {
+            // Server-persisted entry URL is the canonical "where the user
+            // came from"; falls back to the generic prebook page if the
+            // Slot resource somehow lost its originalBookingUrl. Uses
+            // `replace` so the forward button doesn't bounce the user
+            // back into the errored Review page.
+            navigate(errorConfig.destinationOnClose, { replace: true });
+          } else {
+            setErrorConfig(undefined);
+          }
+        }}
+      />
+    </PageContainer>
+  );
+};
+
+export default Review;
