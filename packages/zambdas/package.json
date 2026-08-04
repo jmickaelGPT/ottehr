@@ -80,7 +80,7 @@
     "xml2js": "^0.6.2"
   },
   "devDependencies": {
-    "@hookform/devtools": "^4.4.0",
+    "@hookform/devtools": "^4.2.0",
     "@langchain/core": "1.2.4",
     "@langchain/langgraph": "1.4.8",
     "@sentry/esbuild-plugin": "^5.4.0",

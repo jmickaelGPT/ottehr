@@ -11,10 +11,12 @@ import { AppTab, useNavStore } from '../../state/nav.store';
 import MobileMenu from './MobileMenu';
 import { UserMenu } from './UserMenu';
 
-const { VITE_APP_ORGANIZATION_NAME_SHORT: ORGANIZATION_NAME_SHORT } = import.meta.env;
-if (ORGANIZATION_NAME_SHORT == null) {
-  throw new Error('Could not load env variable');
-}
+// const { VITE_APP_ORGANIZATION_NAME_SHORT: ORGANIZATION_NAME_SHORT } = import.meta.env;
+// if (ORGANIZATION_NAME_SHORT == null) {
+//   throw new Error('Could not load env variable');
+// }
+
+const ORGANIZATION_NAME_SHORT = import.meta.env.VITE_APP_ORGANIZATION_NAME_SHORT || 'Ottehr';
 
 export type NavbarItems = {
   [key in AppTab]?: { urls: string[] };
