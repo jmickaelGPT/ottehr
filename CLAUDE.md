@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Ottehr is an open-source, production-ready EHR built on the [Oystehr](https://www.oystehr.com) backend platform. It has three main components:
 
 - **`apps/intake`** — Patient-facing portal (React, runs on port 3002)
-- **`apps/ehr`** — Provider-facing EHR (React, runs on port 4002)
+- **`apps/ehr`** — Provider-facing EHR (React, runs on port 5175)
 - **`packages/zambdas`** — Backend endpoints deployed as Oystehr Zambdas (serverless functions), run locally via an Express emulator on port 3000
 
 ## Monorepo Structure

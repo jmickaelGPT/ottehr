@@ -51,7 +51,7 @@ export type PatientDocumentAttachment = {
   presignedUrl?: string;
 };
 
-// http://localhost:4002/patient/104e4c8c-1866-4c96-a436-88080c691614/docs
+// http://localhost:5175/patient/104e4c8c-1866-4c96-a436-88080c691614/docs
 // "date": "2024-09-02T10:22:53.870Z",
 export type PatientDocumentInfo = {
   id: string;

@@ -120,7 +120,7 @@ By default, the Patient app uses passwordless SMS for authentication. On the log
 
 ### Log in and explore the EHR
 
-The EHR app starts up at <http://localhost:4002>
+The EHR app starts up at <http://localhost:5175>
 
 To log into the EHR, check the email address you provided during setup for an invitation to join the EHR application. Click the link, follow the account setup workflow, and then enter your credentials to complete login.
 

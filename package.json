@@ -98,10 +98,11 @@
     "ehr:start:ui": "turbo start --filter=ehr-ui",
     "zambdas:start": "turbo start --filter=zambdas",
     "zambdas:start:iac": "turbo start:iac --filter=zambdas",
-    "apps:start": "npm run apps:start:iac",
-    "apps:start:iac": "npm --prefix deploy run apply-local && turbo start:iac --filter=intake-ui --filter=ehr-ui --filter=zambdas",
-    "apps:start:e2e:iac": "npm --prefix deploy run apply-e2e && cross-env ENV=e2e turbo start:iac --filter=intake-ui --filter=ehr-ui --filter=zambdas",
-    "apps:start:no-apply": "turbo start:iac --filter=intake-ui --filter=ehr-ui --filter=zambdas",
+    "apps:start": "node ./scripts/start-apps.cjs",
+    "apps:start:iac": "npm run dev:ports:clean && npm --prefix deploy run apply-local && turbo start:iac --filter=intake-ui --filter=ehr-ui --filter=zambdas",
+    "apps:start:e2e:iac": "npm run dev:ports:clean && npm --prefix deploy run apply-e2e && cross-env ENV=e2e turbo start:iac --filter=intake-ui --filter=ehr-ui --filter=zambdas",
+    "apps:start:no-apply": "npm run dev:ports:clean && turbo start:iac --filter=intake-ui --filter=ehr-ui --filter=zambdas",
+    "dev:ports:clean": "node ./scripts/clean-dev-ports.cjs",
     "apps:start:labcorp": "cross-env ENV=labcorp-local turbo start --filter=intake-ui --filter=ehr-ui --filter=zambdas",
     "test": "turbo test",
     "prepare": "husky",
@@ -259,6 +260,6 @@
   },
   "optionalDependencies": {
     "@esbuild/linux-x64": "^0.25.10",
-    "@rollup/rollup-linux-x64-gnu": "4.24.0"
+    "@rollup/rollup-linux-x64-gnu": "^4.24.0"
   }
 }

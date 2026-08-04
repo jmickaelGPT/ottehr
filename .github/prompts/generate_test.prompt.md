@@ -10,7 +10,7 @@ Project e2e testing setup:
 - Playwright is set up in the monorepo project.
 - Tests for the EHR app are located in apps/ehr/tests/e2e/specs
 - Tests for the Patient (intake) app are located in apps/intake/tests/specs
-- User runs command `npm run ehr:e2e:local:ui` and resources required for running the tests are created and the EHR app is running at http://localhost:4002 and the patient intake app is running at http://localhost:3002
+- User runs command `npm run ehr:e2e:local:ui` and resources required for running the tests are created and the EHR app is running at http://localhost:5175 and the patient intake app is running at http://localhost:3002
 
 
 Instructions:

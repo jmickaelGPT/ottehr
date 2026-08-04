@@ -23,7 +23,7 @@
     "start": "npm run start:iac",
     "start:iac": "node ../../scripts/run-vite-with-env-mode.cjs --default default --local-alias default",
     "start:labcorp": "cross-env ENV=labcorp-local npm run start",
-    "preview": "vite preview --port 4002",
+    "preview": "vite preview --port 5175",
     "lint": "cross-env NODE_OPTIONS=--max-old-space-size=8192 eslint --ext .ts,.tsx,.js,.jsx --report-unused-disable-directives --max-warnings 0 .",
     "lint:fix": "cross-env NODE_OPTIONS=--max-old-space-size=8192 eslint --ext .ts,.tsx,.js,.jsx --report-unused-disable-directives --max-warnings 0 --fix .",
     "build": "concurrently --kill-others-on-fail \"tsc\" \"vite build --mode default\"",

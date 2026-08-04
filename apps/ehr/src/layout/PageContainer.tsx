@@ -3,10 +3,7 @@ import { ReactElement, useState } from 'react';
 import { CPT_TOOLTIP_PROPS, TooltipWrapper } from 'src/components/WithTooltip';
 import { Sidebar, SidebarItem } from '../components/navigation/Sidebar';
 
-const { VITE_APP_ORGANIZATION_NAME_LONG: ORGANIZATION_NAME_LONG } = import.meta.env;
-if (ORGANIZATION_NAME_LONG == null) {
-  throw new Error('Could not load env variable');
-}
+const ORGANIZATION_NAME_LONG = import.meta.env.VITE_APP_ORGANIZATION_NAME_LONG || 'Ottehr';
 
 interface PageContainerProps {
   sidebarItems?: SidebarItem[][];

@@ -9,6 +9,10 @@ export default (env: any): Record<string, any> => {
   const { mode } = env;
   const envDir = './env';
   const appEnv = loadEnv(mode, path.join(process.cwd(), envDir), '');
+  if (!appEnv.VITE_APP_NAME) {
+    appEnv.VITE_APP_NAME = 'Ottehr Intake';
+    process.env.VITE_APP_NAME = appEnv.VITE_APP_NAME;
+  }
   const defaultThemePath = 'src/themes/ottehr';
   const configuredThemePath = appEnv.THEME_PATH ? appEnv.THEME_PATH.replace(/^[/\\]+/, '') : defaultThemePath;
 
@@ -58,6 +62,8 @@ export default (env: any): Record<string, any> => {
       server: {
         open: !process.env.VITE_NO_OPEN,
         host: '0.0.0.0',
+        port: appEnv.PORT ? parseInt(appEnv.PORT) : 5176,
+        strictPort: true,
         https:
           tlsCertExists && tlsKeyExists
             ? {

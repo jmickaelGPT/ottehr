@@ -12,6 +12,14 @@ export default ({ mode }: { mode: string }): UserConfig => {
 
   const envDir = './env';
   const env = loadEnv(mode, path.join(process.cwd(), envDir), '');
+  if (!env.VITE_APP_IS_LOCAL) {
+    env.VITE_APP_IS_LOCAL = 'true';
+    process.env.VITE_APP_IS_LOCAL = env.VITE_APP_IS_LOCAL;
+  }
+  if (!env.VITE_APP_NAME) {
+    env.VITE_APP_NAME = 'Ottehr EHR';
+    process.env.VITE_APP_NAME = env.VITE_APP_NAME;
+  }
 
   const plugins = [react(), viteTsconfigPaths(), svgr()];
 
@@ -47,7 +55,8 @@ export default ({ mode }: { mode: string }): UserConfig => {
     server: {
       open: !process.env.VITE_NO_OPEN,
       host: '0.0.0.0',
-      port: env.PORT ? parseInt(env.PORT) : undefined,
+      port: env.PORT ? parseInt(env.PORT) : 5175,
+      strictPort: true,
       https:
         tlsCertExists && tlsKeyExists
           ? {

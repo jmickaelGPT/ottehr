@@ -24,10 +24,10 @@ const emptySearchResult: SearchResult = {
   pagination: { next: null, prev: null, totalItems: 0 },
 };
 
-const projectId = import.meta.env.VITE_APP_PROJECT_ID;
+const projectId = import.meta.env.VITE_APP_PROJECT_ID || 'local-dev-project-id';
 
-if (!projectId) {
-  throw new Error('PROJECT_ID is not set');
+if (!import.meta.env.VITE_APP_PROJECT_ID) {
+  console.warn('VITE_APP_PROJECT_ID is missing. Using local development fallback.');
 }
 
 const fetchPatients = async ({

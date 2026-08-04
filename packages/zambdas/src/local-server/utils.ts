@@ -1,6 +1,6 @@
 import { APIGatewayProxyEventHeaders, APIGatewayProxyResult, Callback, Context, Handler } from 'aws-lambda';
 import { Request, Response } from 'express';
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { IncomingHttpHeaders } from 'http2';
 import _ from 'lodash';
 import { resolve } from 'path';
@@ -41,8 +41,14 @@ export const expressLambda = async (
 const secrets: Record<string, string> = {};
 
 function populateSecrets({ pathToSecretsFile }: { pathToSecretsFile: string }): void {
+  const resolvedSecretsPath = resolve(__dirname, `../../${pathToSecretsFile}`);
+  if (!existsSync(resolvedSecretsPath)) {
+    console.warn(`Secrets file not found at ${resolvedSecretsPath}. Continuing with empty secrets.`);
+    return;
+  }
+
   console.log('Populating secrets from', pathToSecretsFile);
-  const configString = readFileSync(resolve(__dirname, `../../${pathToSecretsFile}`), { encoding: 'utf8' });
+  const configString = readFileSync(resolvedSecretsPath, { encoding: 'utf8' });
   const fileContents: Record<string, string> = JSON.parse(configString);
   Object.entries(fileContents).forEach(([key, value]) => {
     secrets[key] = value;

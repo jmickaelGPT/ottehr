@@ -79,6 +79,8 @@ const getSentryPlugins = (isSentryEnabled: boolean): esbuild.Plugin[] => {
 
 const buildZambdaChunk = async (zambdas: ZambdaSpec[], outdir: string, isSentryEnabled: boolean): Promise<void> => {
   try {
+    const external = ['@aws-sdk/*', ...(isSentryEnabled ? [] : ['@sentry/*'])];
+
     await esbuild.build({
       entryPoints: zambdas.map((z) => ({
         in: `${z.src}.ts`,
@@ -88,7 +90,7 @@ const buildZambdaChunk = async (zambdas: ZambdaSpec[], outdir: string, isSentryE
       outdir,
       sourcemap: isSentryEnabled,
       platform: 'node',
-      external: ['@aws-sdk/*'],
+      external,
       treeShaking: true,
       minify: true,
       plugins: getSentryPlugins(isSentryEnabled),

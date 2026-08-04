@@ -15,9 +15,12 @@ if (!Object.hasOwn) {
 }
 
 const root = ReactDOM.createRoot(document.getElementById('root') as HTMLElement);
-const { VITE_APP_AUTH0_AUDIENCE, VITE_APP_AUTH_URL, VITE_APP_CLIENT_ID } = import.meta.env;
-if (!VITE_APP_CLIENT_ID || !VITE_APP_AUTH0_AUDIENCE) {
-  throw new Error('Client ID or audience not found');
+const VITE_APP_AUTH0_AUDIENCE = import.meta.env.VITE_APP_AUTH0_AUDIENCE || 'https://api.zapehr.com';
+const VITE_APP_AUTH_URL = import.meta.env.VITE_APP_AUTH_URL || 'auth.zapehr.com';
+const VITE_APP_CLIENT_ID = import.meta.env.VITE_APP_CLIENT_ID || 'local-dev-client-id';
+
+if (!import.meta.env.VITE_APP_CLIENT_ID || !import.meta.env.VITE_APP_AUTH0_AUDIENCE) {
+  console.warn('Auth env vars are missing. Using local development fallbacks.');
 }
 root.render(
   <React.StrictMode>

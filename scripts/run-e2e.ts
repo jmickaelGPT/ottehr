@@ -20,7 +20,7 @@ const supportedApps = ['ehr', 'intake'] as const;
 
 const ports = {
   intake: 3002,
-  ehr: 4002,
+  ehr: 5175,
   backend: 3000,
 } as const;
 

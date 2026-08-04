@@ -26,7 +26,7 @@ async function createTestAppointment(): Promise<string> {
     console.log(`Appointment Type: ${appointmentType}`);
     console.log(`Appointment ID: ${resourceHandler.appointment.id}`);
     const urlPrefix = appointmentType === 'telemed' ? 'telemed/appointments' : 'in-person';
-    console.log(`URL: http://localhost:4002/${urlPrefix}/${resourceHandler.appointment.id}`);
+    console.log(`URL: http://localhost:5175/${urlPrefix}/${resourceHandler.appointment.id}`);
     console.log(`\nTo cleanup, run:`);
     console.log(`node cleanup-test-appointment.mjs ${resourceHandler.appointment.id}`);
 
