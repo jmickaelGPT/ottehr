@@ -1,6 +1,6 @@
 import { BatchInputPostRequest } from '@oystehr/sdk';
 import { Account, Coverage, Patient, QuestionnaireResponse, QuestionnaireResponseItem, RelatedPerson } from 'fhir/r4b';
-import { uuid } from 'short-uuid';
+import { generate as uuid } from 'short-uuid';
 import { SELF_PAY_OPTION } from 'utils';
 import altGuarantor from '../data/alt-guarantor.json';
 

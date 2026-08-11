@@ -5,7 +5,7 @@ import Oystehr, { BatchInputPostRequest } from '@oystehr/sdk';
 import { captureException } from '@sentry/aws-serverless';
 import { Appointment, Condition, DocumentReference, Encounter, Observation, Patient } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import { uuid } from 'short-uuid';
+import { generate as uuid } from 'short-uuid';
 import {
   AI_OBSERVATION_META_SYSTEM,
   AiObservationField,
@@ -263,11 +263,10 @@ export async function createResourcesFromAiInterview(
   }
 
   if (
-    appointment?.serviceCategory?.find(
-      (serviceCategory) =>
-        serviceCategory.coding?.find(
-          (coding) => coding.system === SERVICE_CATEGORY_SYSTEM && coding.code === 'workers-comp'
-        )
+    appointment?.serviceCategory?.find((serviceCategory) =>
+      serviceCategory.coding?.find(
+        (coding) => coding.system === SERVICE_CATEGORY_SYSTEM && coding.code === 'workers-comp'
+      )
     )
   ) {
     fields = 'mechanism of injury, ' + fields;

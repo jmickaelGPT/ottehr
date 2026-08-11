@@ -19,7 +19,7 @@ import {
   Schedule,
   Slot,
 } from 'fhir/r4b';
-import { uuid } from 'short-uuid';
+import { generate as uuid } from 'short-uuid';
 import {
   BookableScheduleData,
   checkResourceHasSlug,

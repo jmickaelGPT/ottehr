@@ -36,7 +36,7 @@ export async function uploadObjectToZ3(
   });
 
   return new Promise((resolve, reject) => {
-    operation.attempt(async (currentAttempt) => {
+    operation.attempt(async (currentAttempt: number) => {
       try {
         console.log(`uploadObjectToZ3: Attempt ${currentAttempt}/4`);
 

@@ -8,7 +8,8 @@ export class CustomAdapterLuxon extends AdapterLuxon {
   // labels for the top
   public getWeekdays = (): string[] => {
     const { t } = useTranslation();
-    return t('general.weekdays', { returnObjects: true });
+    const weekdays = t('general.weekdays', { returnObjects: true });
+    return Array.isArray(weekdays) ? weekdays.filter((day): day is string => typeof day === 'string') : [];
   };
 
   getWeekArray = (date: DateTime): DateTime[][] => {

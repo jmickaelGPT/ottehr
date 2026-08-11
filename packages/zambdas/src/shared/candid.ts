@@ -1037,15 +1037,13 @@ const fetchFHIRPatientAndAppointmentFromEncounter = async (
   }
 
   const appointment = searchBundleResponse.find((resource) => resource.resourceType === 'Appointment') as
-    | Appointment
-    | undefined;
+    Appointment | undefined;
   if (!appointment) {
     throw new Error(`Appointment not found for encounter ID: ${encounterId}`);
   }
 
   const location = searchBundleResponse.find((resource) => resource.resourceType === 'Location') as
-    | Location
-    | undefined;
+    Location | undefined;
 
   return {
     patient,
@@ -1448,15 +1446,17 @@ export const getCptModifierCodeFromProcedure = (
 };
 
 export function shouldUseCandid(secrets: Secrets): boolean {
+  const billingFlag = secrets.BILLING_INTEGRATION_FEATURE_FLAG;
   return (
-    ['candid', 'all'].includes(secrets.BILLING_INTEGRATION_FEATURE_FLAG) ||
+    (billingFlag !== undefined && ['candid', 'all'].includes(billingFlag)) ||
     // TODO: remove this once secrets migrated
-    !secrets.BILLING_INTEGRATION_FEATURE_FLAG
+    !billingFlag
   );
 }
 
 export function shouldUseOttehrBilling(secrets: Secrets): boolean {
-  return ['ottehr', 'all'].includes(secrets.BILLING_INTEGRATION_FEATURE_FLAG);
+  const billingFlag = secrets.BILLING_INTEGRATION_FEATURE_FLAG;
+  return billingFlag !== undefined && ['ottehr', 'all'].includes(billingFlag);
 }
 
 export function shouldSendClaim(secrets: Secrets, encounter: Encounter): boolean {

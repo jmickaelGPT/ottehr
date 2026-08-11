@@ -21,7 +21,7 @@ import {
   Task,
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import { uuid } from 'short-uuid';
+import { generate as uuid } from 'short-uuid';
 import {
   ACCIDENT_TYPE_SYSTEM,
   CanonicalUrl,
