@@ -105,7 +105,7 @@
     "dev:ports:clean": "node ./scripts/clean-dev-ports.cjs",
     "apps:start:labcorp": "cross-env ENV=labcorp-local turbo start --filter=intake-ui --filter=ehr-ui --filter=zambdas",
     "test": "turbo test",
-    "prepare": "husky",
+    "prepare": "husky", 
     "spellcheck": "cspell .",
     "merge-payer-addresses": "tsx scripts/merge-payer-addresses.ts config/payers.json scripts/data/payers-addresses.csv config/payers-with-addresses.json scripts/data/payers-addresses-unmatched.csv",
     "bump-canonical-version": "tsx scripts/config/bump-canonical-version.ts",

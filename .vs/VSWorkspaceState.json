@@ -2,6 +2,6 @@
   "ExpandedNodes": [
     ""
   ],
-  "SelectedNode": "\\C:\\33Devops",
+  "SelectedNode": "\\%name.PascalCased%.template.sln (node_modules\\aws-cdk\\lib\\init-templates\\sample-app\\fsharp\\src\\%name.PascalCased%.template.sln)",
   "PreviewInSolutionExplorer": false
 }
