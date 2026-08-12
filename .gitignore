@@ -40,3 +40,4 @@ terraform.json
 
 .claude
 scripts/setup/project/setup-progress.json
+.vs/

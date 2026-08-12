@@ -30,7 +30,10 @@ export const SampleCollectionInstructionsCard: React.FC<SampleCollectionInstruct
 
   useEffect(() => {
     if (date.isValid) {
-      setSpecimenData(specimen.id, date.toISO());
+      const isoDate = date.toISO();
+      if (isoDate) {
+        setSpecimenData(specimen.id, isoDate);
+      }
     }
   }, [date, setSpecimenData, specimen.id]);
 

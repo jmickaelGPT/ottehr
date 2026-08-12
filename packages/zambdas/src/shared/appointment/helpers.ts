@@ -2,7 +2,7 @@ import Oystehr, { BatchInputPostRequest, BatchInputRequest } from '@oystehr/sdk'
 import { Operation } from 'fast-json-patch';
 import { Appointment, Encounter, List, Patient } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import { uuid } from 'short-uuid';
+import { generate as uuid } from 'short-uuid';
 import {
   AppointmentInsuranceRelatedResourcesExtension,
   appointmentTypeForAppointment,
@@ -543,13 +543,11 @@ export async function generatePatientRelatedRequests(
     if (createPatientRequest?.fullUrl) {
       const patientLists = createPatientDocumentLists(createPatientRequest.fullUrl);
       listRequests.push(
-        ...patientLists.map(
-          (list): BatchInputPostRequest<List> => ({
-            method: 'POST',
-            url: '/List',
-            resource: list,
-          })
-        )
+        ...patientLists.map((list): BatchInputPostRequest<List> => ({
+          method: 'POST',
+          url: '/List',
+          resource: list,
+        }))
       );
     }
   }

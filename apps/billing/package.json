@@ -21,7 +21,15 @@
   },
   "scripts": {
     "start": "node ../../scripts/run-vite-with-env-mode.cjs --default default --local-alias default",
+    "start:azure:dev": "cross-env ENV=azure-dev npm run start",
+    "start:azure:beta": "cross-env ENV=azure-beta npm run start",
+    "start:azure:production": "cross-env ENV=azure-production npm run start",
     "build": "tsc && vite build --mode default",
+    "build:env": "node ../../scripts/run-npm-script-with-env.cjs --script build-skeleton --env-name ENV --env-from npm_config_env",
+    "build:azure:dev": "cross-env ENV=azure-dev npm run build-skeleton",
+    "build:azure:beta": "cross-env ENV=azure-beta npm run build-skeleton",
+    "build:azure:production": "cross-env ENV=azure-production npm run build-skeleton",
+    "build-skeleton": "node ../../scripts/run-app-build-skeleton.cjs",
     "lint": "eslint --ext .ts,.tsx --max-warnings 0 ."
   },
   "dependencies": {

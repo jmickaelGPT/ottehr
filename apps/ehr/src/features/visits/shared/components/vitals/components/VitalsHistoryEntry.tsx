@@ -69,7 +69,7 @@ export const VitalHistoryElement: React.FC<VitalHistoryElementProps> = ({
                 </Typography>
               );
             } else {
-              return { ...value, key: index };
+              return React.cloneElement(value, { key: index });
             }
           })}
           {historyEntry.alertCriticality === 'critical' && (

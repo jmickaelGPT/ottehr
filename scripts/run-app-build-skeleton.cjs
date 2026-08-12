@@ -1,6 +1,6 @@
 const { execFileSync, spawn } = require('node:child_process');
 const { cpSync, existsSync } = require('node:fs');
-const { join } = require('node:path');
+const { dirname, join } = require('node:path');
 
 const copyRobots = process.argv.includes('--copy-robots');
 
@@ -51,6 +51,22 @@ function resolveVersion() {
 }
 
 const envValue = process.env.ENV || 'default';
+
+function withMaxOldSpaceSize(env, maxOldSpaceSizeMb) {
+  const existingNodeOptions = env.NODE_OPTIONS || '';
+  if (/--max-old-space-size=\d+/i.test(existingNodeOptions)) {
+    return env;
+  }
+
+  const maxOldSpaceOption = `--max-old-space-size=${maxOldSpaceSizeMb}`;
+  const normalizedNodeOptions = existingNodeOptions.trim();
+
+  return {
+    ...env,
+    NODE_OPTIONS: normalizedNodeOptions ? `${normalizedNodeOptions} ${maxOldSpaceOption}` : maxOldSpaceOption,
+  };
+}
+
 const buildEnv = {
   ...process.env,
   VITE_APP_ENV: envValue,
@@ -58,17 +74,26 @@ const buildEnv = {
   VITE_APP_VERSION: resolveVersion(),
 };
 
-const tscBin = process.platform === 'win32' ? 'tsc.cmd' : 'tsc';
-const viteBin = process.platform === 'win32' ? 'vite.cmd' : 'vite';
+const tscEnv = withMaxOldSpaceSize(process.env, 8192);
+const viteBuildEnv = withMaxOldSpaceSize(buildEnv, 8192);
 
-const tscChild = run(tscBin, [], process.env);
+function resolvePackageBin(packageName, relativeBinPath) {
+  const packageJsonPath = require.resolve(`${packageName}/package.json`, { paths: [process.cwd()] });
+  return join(dirname(packageJsonPath), relativeBinPath);
+}
+
+const nodeBin = process.execPath;
+const tscBin = resolvePackageBin('typescript', 'bin/tsc');
+const viteBin = resolvePackageBin('vite', 'bin/vite.js');
+
+const tscChild = run(nodeBin, [tscBin], tscEnv);
 tscChild.on('close', (tscCode) => {
   if (tscCode !== 0) {
     process.exit(tscCode || 1);
     return;
   }
 
-  const viteChild = run(viteBin, ['build', '--mode', envValue], buildEnv);
+  const viteChild = run(nodeBin, [viteBin, 'build', '--mode', envValue], viteBuildEnv);
   viteChild.on('close', (viteCode) => {
     if (viteCode !== 0) {
       process.exit(viteCode || 1);

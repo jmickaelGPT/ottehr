@@ -51,6 +51,10 @@ import {
 
 export const LABS_DATE_STRING_FORMAT = 'MM/dd/yyyy hh:mm a ZZZZ';
 
+function isValidDateTime(date: DateTime<boolean> | undefined): date is DateTime<true> {
+  return !!date && date.isValid;
+}
+
 type LabOrderResourcesExtended = LabOrderResources & {
   accountNumber: string;
   encounter: Encounter;
@@ -120,8 +124,7 @@ export async function getBundledOrderResources(
   const bundledOrders: { [orderNumber: string]: string[] } = {};
   const resourcesByServiceRequest: {
     [serviceRequestID: string]:
-      | Omit<LabOrderResourcesExtended, 'accountNumber' | 'location'>
-      | LabOrderResourcesExtended;
+      Omit<LabOrderResourcesExtended, 'accountNumber' | 'location'> | LabOrderResourcesExtended;
   } = {};
 
   const locationPromises: Array<Promise<{ serviceRequestID: string; location?: Location }>> = [];
@@ -186,7 +189,7 @@ export async function getBundledOrderResources(
     const timezone = result.schedule ? getTimezone(result.schedule) : undefined;
 
     const sampleCollectionDate = getMostRecentCollectionDate(result.specimens)?.setZone(timezone);
-    const sampleCollectionDateFormatted = sampleCollectionDate?.isValid ? sampleCollectionDate : undefined;
+    const sampleCollectionDateFormatted = isValidDateTime(sampleCollectionDate) ? sampleCollectionDate : undefined;
 
     // future TODO: we can move the check that every serviceRequest has a Location here
     resourcesByServiceRequest[serviceRequestID] = {
@@ -477,11 +480,11 @@ function getMostRecentCollectionDate(specimens: Specimen[]): DateTime<true> | un
     .map((specimen) =>
       specimen.collection?.collectedDateTime ? DateTime.fromISO(specimen.collection?.collectedDateTime) : undefined
     )
-    .filter((date) => date !== undefined && date.isValid);
+    .filter(isValidDateTime);
 
   if (sampleCollectionDates.length > 0) {
     const mostRecentDate = DateTime.max(...sampleCollectionDates);
-    if (mostRecentDate) return mostRecentDate;
+    if (isValidDateTime(mostRecentDate)) return mostRecentDate;
   }
 
   return;
