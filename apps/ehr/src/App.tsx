@@ -1,11 +1,11 @@
 import { TabContext } from '@mui/lab';
-import { CssBaseline } from '@mui/material';
+import { Button, CssBaseline } from '@mui/material';
 import { LicenseInfo } from '@mui/x-data-grid-pro';
 import { SnackbarProvider } from 'notistack';
 import { lazy, ReactElement, Suspense, useState } from 'react';
 import { useIdleTimer } from 'react-idle-timer';
 import { BrowserRouter, Navigate, Outlet, Route, Routes } from 'react-router-dom';
-import { parseCommaSeparatedTags, RoleType } from 'utils';
+import { chooseJson, parseCommaSeparatedTags, RoleType } from 'utils';
 import { setupSentry } from 'utils/lib/frontend';
 import Banner from './components/Banner';
 import { CommandPalette } from './components/CommandPalette';
@@ -101,11 +101,49 @@ if (MUI_X_LICENSE_KEY != null) {
 export const showEnvironmentBanner = import.meta.env.VITE_APP_ENV !== 'production';
 
 function App(): ReactElement {
-  useApiClients();
+  const { oystehrZambda } = useApiClients();
   const currentUser = useEvolveUser();
   const currentTab = useNavStore((state) => state.currentTab) || 'Tracking Board';
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [timeLeft, setTimeLeft] = useState(60);
+  const [isRunningTerminologySearch, setIsRunningTerminologySearch] = useState(false);
+
+  const handleRunTerminologySearch = async (): Promise<void> => {
+    if (!oystehrZambda) {
+      window.alert('Zambda client is not initialized yet. Try again in a moment.');
+      return;
+    }
+
+    setIsRunningTerminologySearch(true);
+    try {
+      let response;
+      try {
+        response = await oystehrZambda.zambda.executePublic({
+          id: 'terminology-search',
+          body: JSON.stringify({ search: 'woodworking' }),
+        });
+      } catch {
+        response = await oystehrZambda.zambda.execute({
+          id: 'terminology-search',
+          body: JSON.stringify({ search: 'woodworking' }),
+        });
+      }
+      const parsedResponse = chooseJson<{ codes?: Array<{ code: string; display: string }> }>(response);
+      const firstCode = parsedResponse?.codes?.[0];
+      window.alert(
+        firstCode
+          ? `Found ${parsedResponse.codes?.length ?? 0} codes. First result: ${firstCode.code} - ${firstCode.display}`
+          : 'terminology-search executed successfully, but returned no codes.'
+      );
+    } catch (error) {
+      console.error('Failed to execute terminology-search zambda', error);
+      window.alert(
+        'Failed to run terminology-search zambda. If you see 404, this zambda is not deployed in the current project/environment yet.'
+      );
+    } finally {
+      setIsRunningTerminologySearch(false);
+    }
+  };
 
   const handleOnIdle = (): void => {
     window.location.href = '/logout';
@@ -317,6 +355,17 @@ function App(): ReactElement {
         <CommandPaletteRegistrations />
         <CommandPalette />
         <SnackbarProvider maxSnack={5} autoHideDuration={6000} />
+        {import.meta.env.DEV && (
+          <Button
+            variant="contained"
+            size="small"
+            onClick={handleRunTerminologySearch}
+            disabled={isRunningTerminologySearch}
+            sx={{ position: 'fixed', right: 16, bottom: 16, zIndex: 2000 }}
+          >
+            {isRunningTerminologySearch ? 'Running terminology search...' : 'Run terminology-search zambda'}
+          </Button>
+        )}
       </BrowserRouter>
     </CustomThemeProvider>
   );
