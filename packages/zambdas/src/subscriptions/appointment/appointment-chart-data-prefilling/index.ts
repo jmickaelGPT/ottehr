@@ -1,32 +1,26 @@
 import { BatchInputPostRequest, BatchInputPutRequest, BatchInputRequest } from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Account, Appointment, Encounter, FhirResource, Patient } from 'fhir/r4b';
-import {
-  ChartDataResources,
-  chunkThings,
-  DispositionDTO,
-  FHIR_APPOINTMENT_PREPROCESSED_TAG,
-  getPatchBinary,
-  getPatchOperationForNewMetaTag,
-  isInPersonAppointment,
-  Secrets,
-} from 'utils';
+import { chunkThings } from 'utils/lib/fhir/chat';
+import { FHIR_APPOINTMENT_PREPROCESSED_TAG } from 'utils/lib/fhir/constants';
+import { isInPersonAppointment } from 'utils/lib/fhir/moduleIdentification';
+import { getPatchBinary, getPatchOperationForNewMetaTag } from 'utils/lib/fhir/resourcePatch';
+import { Secrets } from 'utils/lib/secrets';
+import { ChartDataResources, DispositionDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
 import { organizeAccounts } from '../../../ehr/shared/harvest';
 import { makeEncounterAccountPatchOp } from '../../../ehr/shared/harvest';
-import {
-  checkOrCreateM2MClientToken,
-  getProgressNoteConfigPayload,
-  saveResourceRequest,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
 import {
   createDispositionServiceRequest,
   makeClinicalImpressionResource,
   updateEncounterDischargeDisposition,
   updateEncounterPatientInfoConfirmed,
 } from '../../../shared/chart-data';
-import { createOystehrClient, getVideoRoomResourceExtension } from '../../../shared/helpers';
+import { createClinicalOystehrClient, getVideoRoomResourceExtension } from '../../../shared/helpers';
+import { getProgressNoteConfigPayload } from '../../../shared/progress-note-config';
+import { saveResourceRequest } from '../../../shared/resources.helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 const CHUNK_SIZE = 50;
@@ -40,8 +34,6 @@ let oystehrToken: string;
 
 const ZAMBDA_NAME = 'appointment-chart-data-prefilling';
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`Input: ${JSON.stringify(input)}`);
-
   const updateAppointmentRequests: BatchInputRequest<Appointment>[] = [];
   const encounterUpdateRequests: BatchInputRequest<Encounter>[] = [];
   const saveOrUpdateRequests: (
@@ -60,7 +52,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   if (!appointment.id) throw new Error("Appointment FHIR resource doesn't exist.");
 
   oystehrToken = await checkOrCreateM2MClientToken(oystehrToken, secrets);
-  const oystehr = createOystehrClient(oystehrToken, secrets);
+  const oystehr = createClinicalOystehrClient(oystehrToken, secrets);
   console.log('Created zapToken and fhir client');
 
   const resourceBundle = (

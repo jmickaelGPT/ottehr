@@ -16,25 +16,30 @@ import {
   Specimen,
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
+import { isCustomInsuranceOrgReferenceUrl } from 'utils/lib/helpers/helpers';
+import {
+  externalLabOrderUsesFriendlyPatientId,
+  getOrderNumber,
+  getTestDetailsFromActivityDefinition,
+  isPSCOrder,
+  paymentMethodFromCoverage,
+} from 'utils/lib/helpers/labs/helpers';
+import { getPresignedURL } from 'utils/lib/helpers/presigned-file-url/helpers';
+import { Secrets } from 'utils/lib/secrets';
+import {
+  LAB_ACCOUNT_NUMBER_SYSTEM,
+  ORDER_ITEM_UNKNOWN,
+  PROVENANCE_ACTIVITY_CODING_ENTITY,
+} from 'utils/lib/types/data/labs/labs.constants';
 import {
   CoverageAndOrg,
   CoverageOrgRank,
-  EXTERNAL_LAB_ERROR,
-  externalLabOrderUsesFriendlyPatientId,
-  getOrderNumber,
-  getPresignedURL,
-  getTestDetailsFromActivityDefinition,
-  getTimezone,
-  isPSCOrder,
-  LAB_ACCOUNT_NUMBER_SYSTEM,
   LabPaymentMethod,
-  ORDER_ITEM_UNKNOWN,
-  paymentMethodFromCoverage,
   PaymentResources,
-  PROVENANCE_ACTIVITY_CODING_ENTITY,
-  Secrets,
-} from 'utils';
+} from 'utils/lib/types/data/labs/labs.types';
+import { EXTERNAL_LAB_ERROR } from 'utils/lib/types/errors';
 import { validate } from 'uuid';
+import { resolveCustomInsuranceOrgReference } from '../../../../shared/custom-insurance-org-directory';
 import {
   createExternalLabsOrderFormPDF,
   getOrderFormDataConfig,
@@ -42,6 +47,7 @@ import {
 import { addDocsToLabList, getLabListResource } from '../../../../shared/pdf/lab-pdf-utils';
 import { makeLabPdfDocumentReference, makeRelatedForLabsPDFDocRef } from '../../../../shared/pdf/labs-results-form-pdf';
 import { PdfInfo } from '../../../../shared/pdf/pdf-utils';
+import { getTimezoneForLabs } from '../../shared/helpers';
 import {
   AOEDisplayForOrderForm,
   getExternalLabOrderResourcesViaServiceRequest,
@@ -49,17 +55,11 @@ import {
   sortCoveragesByPriority,
 } from '../../shared/labs';
 
-export const LABS_DATE_STRING_FORMAT = 'MM/dd/yyyy hh:mm a ZZZZ';
-
-function isValidDateTime(date: DateTime<boolean> | undefined): date is DateTime<true> {
-  return !!date && date.isValid;
-}
-
 type LabOrderResourcesExtended = LabOrderResources & {
   accountNumber: string;
   encounter: Encounter;
   mostRecentSampleCollectionDate?: DateTime<true>;
-  timezone?: string;
+  timezone: string;
   location: Location;
   coveragesAndOrgs?: CoverageAndOrg[];
   questionsAndAnswers?: AOEDisplayForOrderForm[];
@@ -86,7 +86,7 @@ export type resourcesForOrderForm = {
   labOrganization: Organization;
   provider: Practitioner;
   patient: Patient;
-  timezone: string | undefined;
+  timezone: string;
   encounter: Encounter;
   location?: Location;
   paymentResources: PaymentResources;
@@ -124,7 +124,8 @@ export async function getBundledOrderResources(
   const bundledOrders: { [orderNumber: string]: string[] } = {};
   const resourcesByServiceRequest: {
     [serviceRequestID: string]:
-      Omit<LabOrderResourcesExtended, 'accountNumber' | 'location'> | LabOrderResourcesExtended;
+      | Omit<LabOrderResourcesExtended, 'accountNumber' | 'location'>
+      | LabOrderResourcesExtended;
   } = {};
 
   const locationPromises: Array<Promise<{ serviceRequestID: string; location?: Location }>> = [];
@@ -186,10 +187,10 @@ export async function getBundledOrderResources(
       bundledOrders[orderNumber] = [serviceRequestID];
     }
 
-    const timezone = result.schedule ? getTimezone(result.schedule) : undefined;
+    const timezone = getTimezoneForLabs(result.schedule);
 
     const sampleCollectionDate = getMostRecentCollectionDate(result.specimens)?.setZone(timezone);
-    const sampleCollectionDateFormatted = isValidDateTime(sampleCollectionDate) ? sampleCollectionDate : undefined;
+    const sampleCollectionDateFormatted = sampleCollectionDate?.isValid ? sampleCollectionDate : undefined;
 
     // future TODO: we can move the check that every serviceRequest has a Location here
     resourcesByServiceRequest[serviceRequestID] = {
@@ -333,7 +334,7 @@ function makeLocationPromise(
     .then((location) => ({ serviceRequestID, location }));
 }
 
-async function makeCoveragePromise(
+export async function makeCoveragePromise(
   oystehr: Oystehr,
   serviceRequestID: string,
   patientIDToValidate: string | undefined,
@@ -377,7 +378,18 @@ async function makeCoveragePromise(
       const payorReference = coverage.payor[0]?.reference;
       if (!payorReference) throw EXTERNAL_LAB_ERROR(`No payor reference found for Coverage/${coverage.id}`);
       const payorReferenceMaybeUuid = payorReference.replace('Organization/', '');
-      if (validate(payorReferenceMaybeUuid)) {
+      if (isCustomInsuranceOrgReferenceUrl(payorReference)) {
+        // A billing-app-owned custom insurance org: resolved through the billing zambda door, never
+        // RCM (it isn't in RCM's payer directory) and never a direct FHIR read.
+        try {
+          payorOrg = await resolveCustomInsuranceOrgReference(oystehr, payorReference);
+        } catch (error) {
+          console.error(`Unable to resolve custom insurance org at ${payorReference}. Error: `, error);
+          throw EXTERNAL_LAB_ERROR(
+            `Unable to resolve custom insurance organization ${payorReference} for Coverage/${coverageId}. Ensure the organization exists in billing`
+          );
+        }
+      } else if (validate(payorReferenceMaybeUuid)) {
         payorOrg = unbundledResults.find(
           (res): res is Organization => res.resourceType === 'Organization' && res.id === payorReferenceMaybeUuid
         );
@@ -480,11 +492,11 @@ function getMostRecentCollectionDate(specimens: Specimen[]): DateTime<true> | un
     .map((specimen) =>
       specimen.collection?.collectedDateTime ? DateTime.fromISO(specimen.collection?.collectedDateTime) : undefined
     )
-    .filter(isValidDateTime);
+    .filter((date) => date !== undefined && date.isValid);
 
   if (sampleCollectionDates.length > 0) {
     const mostRecentDate = DateTime.max(...sampleCollectionDates);
-    if (isValidDateTime(mostRecentDate)) return mostRecentDate;
+    if (mostRecentDate) return mostRecentDate;
   }
 
   return;
@@ -628,10 +640,15 @@ export async function makeOrderFormsAndDocRefs(
     { docRefPromises: [], presignedOrderFormURLPromises: [] }
   );
 
-  const [_docRefs, presignedOrderFormURLs] = await Promise.all([
+  const [docRefs, presignedOrderFormURLs] = await Promise.all([
     Promise.all(docRefPromises),
     Promise.all(presignedOrderFormURLPromises),
   ]);
+
+  console.log(
+    'These are the docRefs made for the order forms:',
+    docRefs.map((dr) => `DocumentReference/${dr.id}`)
+  );
 
   return presignedOrderFormURLs;
 }

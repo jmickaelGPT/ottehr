@@ -2,8 +2,9 @@ import Oystehr from '@oystehr/sdk';
 import { Operation } from 'fast-json-patch';
 import { Appointment, Encounter, EncounterStatusHistory, Extension, Location, Reference, Resource } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import { CODE_SYSTEM_ACT_CODE_V3 } from '../helpers';
-import { FhirEncounterStatus, PatientFollowupDetails, ProviderDetails, VisitStatusWithoutUnknown } from '../types';
+import { CODE_SYSTEM_ACT_CODE_V3 } from '../helpers/rcm/constants';
+import { FhirEncounterStatus, VisitStatusWithoutUnknown } from '../types/api/appointment.types';
+import { PatientFollowupDetails, ProviderDetails } from '../types/api/encounter.types';
 import {
   CURRENT_EXAM_MIGRATION_VERSION,
   ENCOUNTER_PAYMENT_VARIANT_EXTENSION_URL,
@@ -65,6 +66,33 @@ export const FOLLOWUP_SYSTEMS = {
     code: '390906007', // Follow-up encounter (procedure)
   },
 };
+
+/**
+ * Builds the `Encounter.type` that marks an encounter as a follow-up of the given subtype.
+ * Shared by every writer so the SNOMED + subtype coding pair stays in one place: annotation
+ * creation (save-followup-encounter), scheduled creation (create-appointment) and in-place
+ * conversion (convert-visit-to-follow-up).
+ */
+export const buildFollowupEncounterType = (
+  subtype: FollowupSubtype,
+  type: FollowupType = FOLLOWUP_TYPES[0]
+): Encounter['type'] => [
+  {
+    coding: [
+      {
+        system: FOLLOWUP_SYSTEMS.type.url,
+        code: FOLLOWUP_SYSTEMS.type.code,
+        display: type,
+      },
+      {
+        system: FOLLOWUP_SUBTYPE_SYSTEM,
+        code: subtype,
+        display: subtype,
+      },
+    ],
+    text: type,
+  },
+];
 
 export const isFollowupEncounter = (encounter: Encounter): boolean => {
   return (
@@ -157,25 +185,6 @@ export const formatFhirEncounterToPatientFollowupDetails = (
   };
 
   return formatted;
-};
-
-export const getEncounterForAppointment = async (appointmentID: string, oystehr: Oystehr): Promise<Encounter> => {
-  const encounterTemp = (
-    await oystehr.fhir.search<Encounter>({
-      resourceType: 'Encounter',
-      params: [
-        {
-          name: 'appointment',
-          value: `Appointment/${appointmentID}`,
-        },
-      ],
-    })
-  ).unbundle();
-  const encounter = encounterTemp[0];
-  if (encounterTemp.length === 0 || !encounter.id) {
-    throw new Error('Error getting appointment encounter');
-  }
-  return encounter;
 };
 
 export const getSpentTime = (history?: EncounterStatusHistory[]): string | undefined => {
@@ -370,13 +379,10 @@ export const getAnnotationFollowupStatusLabel = (encounterStatus: string | undef
  * Determines which encounter should be pre-selected as the "initial visit"
  * when creating a new follow-up from the current visit context.
  * If the current encounter is itself a follow-up child (has partOf), the parent
- * (followUpOriginEncounter) is the initial visit; otherwise the current encounter is.
+ * it is part of is the initial visit; otherwise the current encounter is.
  */
-export const getInitialEncounterIdForFollowUp = (
-  encounter: Encounter | undefined,
-  followUpOriginEncounter: Encounter | undefined
-): string | undefined => {
-  return encounter?.partOf ? followUpOriginEncounter?.id : encounter?.id;
+export const getInitialEncounterIdForFollowUp = (encounter: Encounter | undefined): string | undefined => {
+  return encounter?.partOf ? encounter.partOf.reference?.replace('Encounter/', '') : encounter?.id;
 };
 
 export const getFollowUpProgressNotePathSegment = (

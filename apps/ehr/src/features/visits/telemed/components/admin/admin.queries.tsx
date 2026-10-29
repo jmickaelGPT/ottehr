@@ -1,6 +1,6 @@
 import Oystehr, { RcmListPayersResponse } from '@oystehr/sdk';
 import { useMutation, UseMutationResult, useQuery, useQueryClient, UseQueryResult } from '@tanstack/react-query';
-import { Location, Organization } from 'fhir/r4b';
+import { Organization } from 'fhir/r4b';
 import { enqueueSnackbar } from 'notistack';
 import {
   adminAddInHouseLab,
@@ -11,7 +11,6 @@ import {
   adminUpdateInHouseLab,
   adminUpdateLabelPrintingConfig,
   adminUpdateLabSet,
-  adminUpdateLocationSupportPhones,
   adminUpdateSupportDialog,
   bulkUpdateInsuranceStatus,
   createEmCode,
@@ -22,6 +21,9 @@ import {
   getProcedureQuickPicks,
   getRadiologyQuickPicks,
   getSupportDialog,
+  practiceManagedQuestionnaireCreate,
+  practiceManagedQuestionnaireGet,
+  practiceManagedQuestionnaireUpdate,
   removeQuickPick,
   updateEmCode,
   updateImmunizationQuickPick,
@@ -30,70 +32,52 @@ import {
   updateRadiologyQuickPick,
 } from 'src/api/api';
 import { useApiClients } from 'src/hooks/useAppClients';
+import { safelyCaptureException } from 'utils/lib/frontend/sentry';
+import { getApiError } from 'utils/lib/helpers/oystehrApi';
+import { BulkUpdateInsuranceStatusInput } from 'utils/lib/types/api/bulk-update-insurance-status.types';
 import {
-  AdminAddInHouseLabInput,
-  AdminAddInHouseLabOutput,
-  AdminAddLabSetInput,
-  AdminAddLabSetOutput,
-  AdminGetInHouseLabConfigInput,
-  AdminGetLabSetDetailInput,
-  AdminGetLabSetDetailOutput,
-  AdminGetLabSetListOutput,
-  AdminInHouseLabConfigOutput,
-  AdminListInHouseLabsOutput,
-  AdminUpdateInHouseLabInput,
-  AdminUpdateLabSetInput,
-  AdminUpdateLocationSupportPhonesInput,
-  AdminUpdatePrintingConfigInput,
-  AdminUpdateSupportDialogInput,
-  APIError,
-  BulkUpdateInsuranceStatusInput,
   CreateEmCodeInput,
   DeleteEmCodeInput,
   EmCodeOption,
-  GetLabelPrintingConfigInput,
-  GetLabelPrintingConfigOutput,
-  GetSupportDialogOutput,
+  UpdateEmCodeInput,
+} from 'utils/lib/types/api/config/em-codes';
+import {
   ImmunizationQuickPickData,
   InHouseMedicationQuickPickData,
-  isApiError,
-  isLocationVirtual,
   ProcedureQuickPickData,
   RadiologyQuickPickData,
-  UpdateEmCodeInput,
-} from 'utils';
-import { safelyCaptureException } from 'utils/lib/frontend/sentry';
-
-export const useVirtualLocationsQuery = (): UseQueryResult<Location[], Error> => {
-  const { oystehr } = useApiClients();
-
-  return useQuery({
-    queryKey: ['virtual-locations'],
-
-    queryFn: async () => {
-      const resources = await oystehr!.fhir.search<Location>({
-        resourceType: 'Location',
-        params: [
-          {
-            name: 'address-state:missing',
-            value: 'false',
-          },
-        ],
-      });
-
-      return resources
-        .unbundle()
-        .filter(isLocationVirtual)
-        .sort((a, b) => {
-          const stateA = a.address?.state || '';
-          const stateB = b.address?.state || '';
-          return stateA.localeCompare(stateB);
-        });
-    },
-
-    enabled: !!oystehr,
-  });
-};
+} from 'utils/lib/types/api/quick-picks.types';
+import {
+  AdminAddInHouseLabInput,
+  AdminAddInHouseLabOutput,
+  AdminGetInHouseLabConfigInput,
+  AdminInHouseLabConfigOutput,
+  AdminListInHouseLabsOutput,
+  AdminUpdateInHouseLabInput,
+} from 'utils/lib/types/data/in-house/in-house.types';
+import {
+  AdminAddLabSetInput,
+  AdminAddLabSetOutput,
+  AdminGetLabSetDetailInput,
+  AdminGetLabSetDetailOutput,
+  AdminGetLabSetListOutput,
+  AdminUpdateLabSetInput,
+} from 'utils/lib/types/data/labs/labs.types';
+import {
+  PracticeManagedQuestionnaireCreateInput,
+  PracticeManagedQuestionnaireCreateOutput,
+  PracticeManagedQuestionnaireGetInput,
+  PracticeManagedQuestionnaireGetOutput,
+  PracticeManagedQuestionnaireUpdateInput,
+  PracticeManagedQuestionnaireUpdateOutput,
+} from 'utils/lib/types/data/practice-managed-questionnaires/practice-managed-questionnaire.types';
+import {
+  AdminUpdatePrintingConfigInput,
+  GetLabelPrintingConfigInput,
+  GetLabelPrintingConfigOutput,
+} from 'utils/lib/types/data/printing';
+import { AdminUpdateSupportDialogInput, GetSupportDialogOutput } from 'utils/lib/types/data/support-dialog';
+import { APIError, isApiError } from 'utils/lib/types/errors';
 
 export const useInsurancesQuery = (ids?: string[], enabled?: boolean): UseQueryResult<Organization[], Error> => {
   const { oystehr } = useApiClients();
@@ -558,7 +542,7 @@ export const useAdminUpdateLabSet = (labSetId: string): UseMutationResult<void, 
   return useMutation({
     mutationKey: ['admin-update-lab-set', labSetId],
     mutationFn: async (input: AdminUpdateLabSetInput) => {
-      console.log('mutation for update in house lab called');
+      console.log('mutation for update lab set called');
       if (!oystehrZambda) {
         throw new Error('oystehr client is undefined');
       }
@@ -678,28 +662,79 @@ export const useAdminUpdateSupportDialog = (): UseMutationResult<void, Error, Ad
   });
 };
 
-export const useAdminUpdateLocationSupportPhones = (): UseMutationResult<
-  void,
+export const usePracticeManagedQuestionnaireCreate = (): UseMutationResult<
+  PracticeManagedQuestionnaireCreateOutput,
   Error,
-  AdminUpdateLocationSupportPhonesInput
+  PracticeManagedQuestionnaireCreateInput
 > => {
   const { oystehrZambda } = useApiClients();
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationKey: ['admin-update-location-support-phones'],
-    mutationFn: async (input: AdminUpdateLocationSupportPhonesInput) => {
-      if (!oystehrZambda) throw new Error('oystehr client is undefined');
-      await adminUpdateLocationSupportPhones(oystehrZambda, input);
+    mutationKey: ['practice-managed-questionnaire-create'],
+    mutationFn: async (input: PracticeManagedQuestionnaireCreateInput) => {
+      if (!oystehrZambda) {
+        throw new Error('oystehr client is undefined');
+      }
+      return practiceManagedQuestionnaireCreate(oystehrZambda!, input);
     },
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['schedule-list'] });
-      enqueueSnackbar('Support phone numbers updated', { variant: 'success' });
+    onSuccess: async (_data, _variables) => {
+      await queryClient.invalidateQueries({
+        queryKey: ['practice-managed-questionnaire-list'],
+      });
     },
     onError: (error: any) => {
+      // send to sentry
       safelyCaptureException(error);
-      let message = 'Failed to update support phone numbers.';
-      if (isApiError(error)) message = (error as APIError).message;
+      const message = getApiError({ error, defaultError: 'Failed to create this Questionnaire.' });
+      enqueueSnackbar(message, { variant: 'error' });
+    },
+  });
+};
+
+export const useGetPracticeManagedQuestionnaireGet = (
+  input: PracticeManagedQuestionnaireGetInput
+): UseQueryResult<PracticeManagedQuestionnaireGetOutput, Error> => {
+  const { oystehrZambda } = useApiClients();
+
+  return useQuery({
+    queryKey: ['practice-managed-questionnaire-get', input.questionnaireId],
+    queryFn: async () => {
+      return practiceManagedQuestionnaireGet(oystehrZambda!, input);
+    },
+    enabled: !!oystehrZambda,
+    staleTime: 30_000, // 30 sec
+  });
+};
+
+export const usePracticeManagedQuestionnaireUpdate = (
+  questionnaireId?: string
+): UseMutationResult<PracticeManagedQuestionnaireUpdateOutput, Error, PracticeManagedQuestionnaireUpdateInput> => {
+  const { oystehrZambda } = useApiClients();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationKey: ['practice-managed-questionnaire-update', questionnaireId],
+    mutationFn: async (input: PracticeManagedQuestionnaireUpdateInput) => {
+      if (!oystehrZambda) {
+        throw new Error('oystehr client is undefined');
+      }
+      return practiceManagedQuestionnaireUpdate(oystehrZambda!, input);
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ['practice-managed-questionnaire-list'],
+        }),
+      ]);
+    },
+    onError: (error: any) => {
+      // send to sentry
+      safelyCaptureException(error);
+      let message = 'Failed to update questionnaire.';
+      if (isApiError(error)) {
+        message = (error as APIError).message;
+      }
       enqueueSnackbar(message, { variant: 'error' });
     },
   });

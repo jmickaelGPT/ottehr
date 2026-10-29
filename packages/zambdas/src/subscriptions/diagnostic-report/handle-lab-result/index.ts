@@ -1,26 +1,26 @@
 import { BatchInputRequest } from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { DiagnosticReport, Task, TaskInput as FhirTaskInput } from 'fhir/r4b';
-import {
-  getCoding,
-  getFullestAvailableName,
-  getTestNameOrCodeFromDr,
-  LAB_DR_TYPE_TAG,
-  LAB_ORDER_TASK,
-  LabType,
-  NonNormalResult,
-  Secrets,
-  TaskAlertCode,
-} from 'utils';
+import { getCoding } from 'utils/lib/fhir/helpers';
+import { getFullestAvailableName } from 'utils/lib/fhir/patient';
+import { getTestNameOrCodeFromDr } from 'utils/lib/helpers/labs/helpers';
+import { Secrets } from 'utils/lib/secrets';
+import { NonNormalResult } from 'utils/lib/types/api/lab';
+import { LAB_DR_TYPE_TAG, LAB_ORDER_TASK } from 'utils/lib/types/data/labs/labs.constants';
+import { LabType } from 'utils/lib/types/data/labs/labs.types';
+import { TaskAlertCode } from 'utils/lib/types/data/tasks/types';
 import { getContainedPatientFromDiagnosticReport } from '../../../ehr/lab/shared/helpers';
 import { diagnosticReportSpecificResultType, nonNonNormalTagsContained } from '../../../ehr/lab/shared/labs';
-import { createOystehrClient, getAuth0Token, wrapHandler, ZambdaInput } from '../../../shared';
+import { getAuth0Token } from '../../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
 import { addDocsToLabList, getLabListResource } from '../../../shared/pdf/lab-pdf-utils';
 import {
   createExternalLabResultPDF,
   createExternalLabResultPDFBasedOnDr,
 } from '../../../shared/pdf/labs-results-form-pdf';
-import { createTask, getTaskLocation, TaskInput } from '../../../shared/tasks';
+import { wrapHandler } from '../../../shared/sentry';
+import { createTask, TaskInput } from '../../../shared/tasks';
+import { ZambdaInput } from '../../../shared/types/common';
 import { fetchRelatedResources, getCodeForNewTask } from './helpers';
 import { validateRequestParameters } from './validateRequestParameters';
 
@@ -35,8 +35,6 @@ export interface ReviewLabResultSubscriptionInput {
 let oystehrToken: string;
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`Input: ${JSON.stringify(input, undefined, 2)}`);
-
   const { diagnosticReport, secrets } = validateRequestParameters(input);
 
   if (!oystehrToken) {
@@ -64,8 +62,12 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     throw new Error('ServiceRequest id is not found');
   }
 
-  const oystehr = createOystehrClient(oystehrToken, secrets);
-  const { tasks, patient, labOrg, encounter, attachments } = await fetchRelatedResources(diagnosticReport, oystehr);
+  const oystehr = createClinicalOystehrClient(oystehrToken, secrets);
+  const { tasks, patient, labOrg, encounter, attachments, location } = await fetchRelatedResources(
+    diagnosticReport,
+    { drType: specificDrTypeFromTag, isUnsolicited, isUnsolicitedAndMatched },
+    oystehr
+  );
 
   const requests: BatchInputRequest<Task>[] = [];
 
@@ -194,12 +196,12 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
         system: LAB_ORDER_TASK.system,
         code,
       },
-      encounterId: preSubmissionTask?.encounter?.reference?.split('/')[1] ?? '',
+      encounterId: encounter?.id ?? '', // only unsolicited results might not have an encounter (if not matched to an existing order)
       basedOn: [
         `DiagnosticReport/${diagnosticReport.id}`,
         ...(serviceRequestId ? [`ServiceRequest/${serviceRequestId}`] : []),
       ],
-      location: preSubmissionTask ? getTaskLocation(preSubmissionTask) : undefined,
+      location: location && location.id ? { id: location.id, name: location.name } : undefined,
       input: taskInput,
     },
     showTaskOnBoard

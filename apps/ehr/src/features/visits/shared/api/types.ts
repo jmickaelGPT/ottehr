@@ -1,9 +1,13 @@
 export type GetOystehrTelemedAPIParams = {
   isAppLocal?: 'true' | 'false';
   initTelemedSessionZambdaID?: string;
-  getChartDataZambdaID?: string;
+  getChartSectionZambdaID?: string;
+  getVisitNoteZambdaID?: string;
   saveChartDataZambdaID?: string;
   deleteChartDataZambdaID?: string;
+  easyChartPlanZambdaID?: string;
+  easyChartNarrativeZambdaID?: string;
+  easyChartSaveTranscriptZambdaID?: string;
   changeInPersonVisitStatusZambdaID?: string;
   assignPractitionerZambdaID?: string;
   unassignPractitionerZambdaID?: string;
@@ -14,7 +18,6 @@ export type GetOystehrTelemedAPIParams = {
   savePatientInstructionZambdaID?: string;
   deletePatientInstructionZambdaID?: string;
   savePatientFollowupZambdaID?: string;
-  icdSearchZambdaId?: string;
   aiSuggestionNotesZambdaID?: string;
   recommendBillingSuggestionsZambdaID?: string;
   recommendBillingCodesZambdaID?: string;
@@ -24,7 +27,9 @@ export type GetOystehrTelemedAPIParams = {
   updatePatientAccountZambdaID?: string;
   removePatientCoverageZambdaID?: string;
   mergePatientsZambdaID?: string;
-  sendFaxZambdaID?: string;
+  sendFaxPacketZambdaID?: string;
+  getFaxPacketPreviewZambdaID?: string;
+  getFaxPacketStatusZambdaID?: string;
   externalLabResourceSearchID?: string;
   getUnsolicitedResultsResourcesID?: string;
   updateLabOrderResourcesID?: string;
@@ -38,5 +43,3 @@ export type GetOystehrTelemedAPIParams = {
   deleteApprovedPatientEducationZambdaID?: string;
   updateApprovedPatientEducationCodesZambdaID?: string;
 };
-
-export type { PromiseReturnType } from 'utils';

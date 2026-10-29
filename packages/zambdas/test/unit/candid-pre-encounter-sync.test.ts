@@ -1,3 +1,5 @@
+import { ENCOUNTER_PAYMENT_VARIANT_EXTENSION_URL, SERVICE_CATEGORY_SYSTEM } from 'utils/lib/fhir/constants';
+import { PaymentVariant } from 'utils/lib/fhir/encounter';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ── Mocks (hoisted before imports) ─────────────────────────────────────────────
@@ -14,7 +16,11 @@ vi.mock('../../src/shared/chart-data', () => ({
 
 // ── Imports ────────────────────────────────────────────────────────────────────
 
-import { performCandidPreEncounterSync } from '../../src/shared/candid';
+import { getNioReferenceUrl } from 'utils/lib/helpers/helpers';
+import {
+  CANDID_NON_INSURANCE_PAYER_ID_IDENTIFIER_SYSTEM,
+  performCandidPreEncounterSync,
+} from '../../src/shared/candid';
 
 // ── Mock helpers ───────────────────────────────────────────────────────────────
 
@@ -23,7 +29,15 @@ const ENCOUNTER_ID = 'encounter-123';
 const CANDID_PATIENT_ID = 'candid-patient-xyz';
 const CANDID_APPOINTMENT_ID = 'candid-appt-456';
 
-function makeMockOystehr(): any {
+function makeMockOystehr(options?: { paymentVariant?: PaymentVariant; serviceCategory?: string }): any {
+  const encounterExtensions = options?.paymentVariant
+    ? [{ url: ENCOUNTER_PAYMENT_VARIANT_EXTENSION_URL, valueString: options.paymentVariant }]
+    : undefined;
+
+  const appointmentServiceCategory = options?.serviceCategory
+    ? [{ coding: [{ system: SERVICE_CATEGORY_SYSTEM, code: options.serviceCategory }] }]
+    : undefined;
+
   return {
     fhir: {
       search: vi.fn().mockReturnValue({
@@ -51,10 +65,23 @@ function makeMockOystehr(): any {
             status: 'fulfilled',
             start: '2026-04-22T10:00:00Z',
             participant: [],
+            serviceCategory: appointmentServiceCategory,
+          },
+          {
+            resourceType: 'Encounter',
+            id: ENCOUNTER_ID,
+            status: 'finished',
+            extension: encounterExtensions,
           },
         ],
       }),
       patch: vi.fn(),
+      get: vi.fn().mockResolvedValue({
+        resourceType: 'Organization',
+        id: 'legacy-employer-1',
+        name: 'Legacy Employer',
+        identifier: [{ system: CANDID_NON_INSURANCE_PAYER_ID_IDENTIFIER_SYSTEM, value: 'candid-nip-1' }],
+      }),
     },
   };
 }
@@ -100,7 +127,10 @@ function makeMockCandidApiClient(): any {
       },
       coverages: {
         v1: {
-          create: vi.fn(),
+          create: vi.fn().mockResolvedValue({
+            ok: true,
+            body: { id: 'coverage-1' },
+          }),
         },
       },
     },
@@ -204,5 +234,149 @@ describe('performCandidPreEncounterSync – amountCents guard (real implementati
     expect(createCall.allocations).toHaveLength(1);
     expect(createCall.allocations[0].amountCents).toBe(5000);
     expect(createCall.allocations[0].target.type).toBe('appointment_by_id_and_patient_external_id');
+  });
+
+  it('creates only one Cash Pay coverage for self-pay encounters even when insurance coverages are present', async () => {
+    mockOystehr = makeMockOystehr({ paymentVariant: PaymentVariant.selfPay });
+    mockGetAccountAndCoverageResourcesForPatient.mockResolvedValue({
+      coverages: {
+        primary: {
+          payor: [{ reference: 'Organization/org-1' }],
+        },
+        primarySubscriber: {
+          resourceType: 'RelatedPerson',
+          id: 'subscriber-1',
+        },
+      },
+      insuranceOrgs: [
+        {
+          resourceType: 'Organization',
+          id: 'org-1',
+          name: 'Acme Insurance',
+          identifier: [
+            {
+              system: 'https://identifiers.fhir.oystehr.com/rcm-payer-id',
+              value: 'payer-1',
+            },
+          ],
+        },
+      ],
+      occupationalMedicineAccount: undefined,
+    });
+
+    await performCandidPreEncounterSync({
+      encounterId: ENCOUNTER_ID,
+      oystehr: mockOystehr,
+      candidApiClient: mockCandidApiClient,
+    });
+
+    expect(mockCandidApiClient.preEncounter.coverages.v1.create).toHaveBeenCalledTimes(1);
+    expect(mockCandidApiClient.preEncounter.coverages.v1.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        insurancePlan: expect.objectContaining({
+          payerName: 'Cash Pay',
+          payerId: 'Cash Pay',
+        }),
+      })
+    );
+  });
+
+  it('syncs WC insurance (not Cash Pay) for workers-comp visit even when payment variant is selfPay', async () => {
+    mockOystehr = makeMockOystehr({ paymentVariant: PaymentVariant.selfPay, serviceCategory: 'workers-comp' });
+    mockGetAccountAndCoverageResourcesForPatient.mockResolvedValue({
+      coverages: {
+        workersComp: {
+          payor: [{ reference: 'Organization/wc-org-1' }],
+          subscriberId: 'WC-MEMBER-001',
+          relationship: { coding: [{ code: 'other' }] },
+        },
+      },
+      insuranceOrgs: [
+        {
+          resourceType: 'Organization',
+          id: 'wc-org-1',
+          name: 'Workers Comp Insurer',
+          type: [{ coding: [{ system: 'http://terminology.hl7.org/CodeSystem/organization-type', code: 'pay' }] }],
+          identifier: [
+            {
+              system: 'https://identifiers.fhir.oystehr.com/rcm-payer-id',
+              value: 'wc-payer-1',
+            },
+          ],
+        },
+      ],
+      occupationalMedicineAccount: undefined,
+    });
+
+    await performCandidPreEncounterSync({
+      encounterId: ENCOUNTER_ID,
+      oystehr: mockOystehr,
+      candidApiClient: mockCandidApiClient,
+    });
+
+    expect(mockCandidApiClient.preEncounter.coverages.v1.create).toHaveBeenCalledTimes(1);
+    expect(mockCandidApiClient.preEncounter.coverages.v1.create).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        insurancePlan: expect.objectContaining({ payerName: 'Cash Pay' }),
+      })
+    );
+    expect(mockCandidApiClient.preEncounter.coverages.v1.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        insurancePlan: expect.objectContaining({ payerName: 'Workers Comp Insurer' }),
+      })
+    );
+  });
+});
+
+// ── Occ-med employer resolution (NIO vs legacy) ────────────────────────────────
+
+describe('performCandidPreEncounterSync – occ-med employer resolution', () => {
+  let mockOystehr: ReturnType<typeof makeMockOystehr>;
+  let mockCandidApiClient: ReturnType<typeof makeMockCandidApiClient>;
+
+  const occMedAccount = (ownerReference: string): any => ({
+    resourceType: 'Account',
+    id: 'occ-med-account-1',
+    status: 'active',
+    owner: { reference: ownerReference },
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockOystehr = makeMockOystehr();
+    mockCandidApiClient = makeMockCandidApiClient();
+  });
+
+  it('never FHIR-reads a billing-app NIO employer — the Candid claim goes out without a non-insurance payer', async () => {
+    mockGetAccountAndCoverageResourcesForPatient.mockResolvedValue({
+      coverages: {},
+      insuranceOrgs: [],
+      occupationalMedicineAccount: occMedAccount(getNioReferenceUrl('11111111-1111-4111-8111-111111111111')),
+    });
+
+    await performCandidPreEncounterSync({
+      encounterId: ENCOUNTER_ID,
+      oystehr: mockOystehr,
+      candidApiClient: mockCandidApiClient,
+    });
+
+    expect(mockOystehr.fhir.get).not.toHaveBeenCalled();
+    expect(mockCandidApiClient.preEncounter.appointments.v1.create).toHaveBeenCalled();
+  });
+
+  it('still resolves a legacy employer Organization for the Candid non-insurance payer', async () => {
+    mockGetAccountAndCoverageResourcesForPatient.mockResolvedValue({
+      coverages: {},
+      insuranceOrgs: [],
+      occupationalMedicineAccount: occMedAccount('Organization/legacy-employer-1'),
+    });
+
+    await performCandidPreEncounterSync({
+      encounterId: ENCOUNTER_ID,
+      oystehr: mockOystehr,
+      candidApiClient: mockCandidApiClient,
+    });
+
+    expect(mockOystehr.fhir.get).toHaveBeenCalledWith({ resourceType: 'Organization', id: 'legacy-employer-1' });
   });
 });

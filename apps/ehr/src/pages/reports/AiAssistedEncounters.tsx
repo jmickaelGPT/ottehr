@@ -28,10 +28,12 @@ import { DateTime } from 'luxon';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ROUTER_PATH } from 'src/features/visits/in-person/routing/routesInPerson';
-import { DEFAULT_BATCH_DAYS, splitDateRangeIntoBatches, VisitStatusLabel } from 'utils';
+import { DEFAULT_BATCH_DAYS, splitDateRangeIntoBatches } from 'utils/lib/helpers/reports';
+import { VisitStatusLabel } from 'utils/lib/types/api/appointment.types';
 import { getAiAssistedEncountersReport } from '../../api/api';
 import { useApiClients } from '../../hooks/useAppClients';
 import PageContainer from '../../layout/PageContainer';
+import { buildTrackingBoardPath } from './trackingBoardLink';
 
 interface AiAssistedEncounterRow {
   id: string;
@@ -119,7 +121,7 @@ const useAiAssistedEncounters = (
         // Transform the response to match our display requirements
         const processedEncounters: AiAssistedEncounterRow[] = response.encounters.map((encounter) => {
           const appointmentTime = encounter.appointmentStart
-            ? DateTime.fromISO(encounter.appointmentStart).toFormat('MM/dd/yyyy HH:mm a')
+            ? DateTime.fromISO(encounter.appointmentStart).toFormat('MM/dd/yyyy hh:mm a')
             : 'Unknown';
 
           return {
@@ -172,7 +174,7 @@ const useAiAssistedEncounters = (
       // Transform the combined response to match our display requirements
       const processedEncounters: AiAssistedEncounterRow[] = allEncounters.map((encounter) => {
         const appointmentTime = encounter.appointmentStart
-          ? DateTime.fromISO(encounter.appointmentStart).toFormat('MM/dd/yyyy HH:mm a')
+          ? DateTime.fromISO(encounter.appointmentStart).toFormat('MM/dd/yyyy hh:mm a')
           : 'Unknown';
 
         return {
@@ -426,17 +428,12 @@ export default function AiAssistedEncounters(): React.ReactElement {
           const visitType = params.row.visitType;
           const locationId = params.row.locationId;
           const appointmentTime = params.value;
-
-          // Extract date from appointment start for the search date parameter
           const appointmentStart = params.row.appointmentStart;
-          const searchDate = appointmentStart
-            ? DateTime.fromISO(appointmentStart).toFormat('yyyy-MM-dd')
-            : DateTime.now().toFormat('yyyy-MM-dd');
+          const visitStatus = params.row.visitStatus as VisitStatusLabel | undefined;
 
           // Handle different visit types
           if (visitType === 'In-Person' && locationId) {
-            // cSpell:disable-next %2C
-            const trackingBoardPath = `/visits?locationID=${locationId}&visitType=walk-in%2Cpre-booked%2Cpost-telemed&groups=&searchDate=${searchDate}`;
+            const trackingBoardPath = buildTrackingBoardPath({ appointmentStart, locationId, visitStatus });
 
             return (
               <Link

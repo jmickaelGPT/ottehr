@@ -1,12 +1,11 @@
+import { Secrets } from 'utils/lib/secrets';
 import {
   AdminUpdateSupportDialogInput,
   AdminUpdateSupportDialogInputSchema,
-  INVALID_INPUT_ERROR,
-  MISSING_AUTH_TOKEN,
-  MISSING_REQUEST_BODY,
-  Secrets,
-} from 'utils';
-import { ZambdaInput } from '../../../shared';
+} from 'utils/lib/types/data/support-dialog';
+import { INVALID_INPUT_ERROR, MISSING_AUTH_TOKEN, MISSING_REQUEST_BODY } from 'utils/lib/types/errors';
+import { ZambdaInput } from '../../../shared/types/common';
+import { safeJsonParse } from '../../../shared/validation';
 
 export function validateRequestParameters(
   input: ZambdaInput
@@ -22,7 +21,7 @@ export function validateRequestParameters(
 
   let params: unknown;
   try {
-    params = JSON.parse(input.body);
+    params = safeJsonParse(input.body);
   } catch {
     throw INVALID_INPUT_ERROR('Unable to parse request body. Invalid JSON.');
   }

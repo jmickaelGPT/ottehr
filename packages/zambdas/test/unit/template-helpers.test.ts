@@ -1,5 +1,6 @@
 import { Condition, Observation, Procedure } from 'fhir/r4b';
-import { chartDataTagSystem, ICD_10_CODE_SYSTEM } from 'utils';
+import { chartDataTagSystem } from 'utils/lib/fhir/constants';
+import { CODE_SYSTEM_ICD_10 } from 'utils/lib/helpers/rcm/constants';
 import { describe, expect, test } from 'vitest';
 import { hasTemplateRelevantTag, isDiagnosisCondition } from '../../src/ehr/shared/template-helpers';
 
@@ -9,7 +10,7 @@ const taggedCondition = (tagField: string, opts: { withIcd10?: boolean } = {}): 
   encounter: { reference: 'Encounter/e1' },
   meta: { tag: [{ system: chartDataTagSystem(tagField), code: tagField }] },
   code: opts.withIcd10
-    ? { coding: [{ system: ICD_10_CODE_SYSTEM, code: 'J45.909', display: 'Unspecified asthma, uncomplicated' }] }
+    ? { coding: [{ system: CODE_SYSTEM_ICD_10, code: 'J45.909', display: 'Unspecified asthma, uncomplicated' }] }
     : undefined,
 });
 
@@ -32,7 +33,7 @@ describe('isDiagnosisCondition', () => {
     const cond: Condition = {
       resourceType: 'Condition',
       subject: { reference: 'Patient/p1' },
-      code: { coding: [{ system: ICD_10_CODE_SYSTEM, code: 'J45.909' }] },
+      code: { coding: [{ system: CODE_SYSTEM_ICD_10, code: 'J45.909' }] },
     };
     expect(isDiagnosisCondition(cond)).toBe(false);
   });

@@ -7,6 +7,7 @@ import {
   BundleEntry,
   Coding,
   Communication,
+  Coverage,
   DiagnosticReport,
   DocumentReference,
   Encounter,
@@ -26,30 +27,43 @@ import {
   Specimen,
   Task,
 } from 'fhir/r4b';
+import { getFullestAvailableName } from 'utils/lib/fhir/patient';
 import {
-  compareDates,
-  DEFAULT_LABS_ITEMS_PER_PAGE,
-  DiagnosisDTO,
-  DiagnosticReportDrivenResultDTO,
   docRefIsAbnAndCurrent,
   docRefIsOrderPDFAndCurrent,
-  EMPTY_PAGINATION,
-  EXTERNAL_LAB_ERROR,
-  ExternalLabCommunications,
-  ExternalLabDocuments,
   externalLabOrderIsManual,
-  ExternalLabsStatus,
-  GENERIC_LAB_ORDER_TAG,
   getAccountNumberFromLocationAndOrganization,
   getAdditionalPlacerId,
-  getFullestAvailableName,
   getOrderNumber,
   getOrderNumberFromDr,
-  isPositiveNumberOrZero,
+  labOrderHasCptCodes,
+  parseLabInfoFromServiceRequest,
+  paymentMethodFromCoverage,
+} from 'utils/lib/helpers/labs/helpers';
+import { DiagnosisDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
+import {
+  DEFAULT_LABS_ITEMS_PER_PAGE,
+  EMPTY_PAGINATION,
+  GENERIC_LAB_ORDER_TAG,
   LAB_DR_TYPE_TAG,
   LAB_ORDER_CLINICAL_INFO_COMM_CATEGORY,
   LAB_ORDER_LEVEL_NOTE_CATEGORY,
   LAB_ORDER_TASK,
+  LABS_COMMUNICATION_CATEGORY_SYSTEM,
+  OYSTEHR_LAB_OI_CODE_SYSTEM,
+  OYSTEHR_LAB_ORDER_PLACER_ID_SYSTEM,
+  PROVENANCE_ACTIVITY_CODES,
+  PROVENANCE_ACTIVITY_CODING_ENTITY,
+  PROVENANCE_ACTIVITY_TYPE_SYSTEM,
+  PSC_HOLD_CONFIG,
+  RELATED_SPECIMEN_DEFINITION_SYSTEM,
+  SPECIMEN_CODING_CONFIG,
+} from 'utils/lib/types/data/labs/labs.constants';
+import {
+  DiagnosticReportDrivenResultDTO,
+  ExternalLabCommunications,
+  ExternalLabDocuments,
+  ExternalLabsStatus,
   LabDocumentRelatedToDiagnosticReport,
   LabDrTypeTagCode,
   LabOrderDetailedPageDTO,
@@ -59,32 +73,34 @@ import {
   LabOrderResultDetails,
   LabOrdersSearchBy,
   LabOrderUnreceivedHistoryRow,
-  LABS_COMMUNICATION_CATEGORY_SYSTEM,
+  LabPaymentMethod,
   LabType,
-  OYSTEHR_LAB_OI_CODE_SYSTEM,
-  OYSTEHR_LAB_ORDER_PLACER_ID_SYSTEM,
-  Pagination,
-  parseLabInfoFromServiceRequest,
   PatientLabItem,
-  PROVENANCE_ACTIVITY_CODES,
-  PROVENANCE_ACTIVITY_CODING_ENTITY,
-  PROVENANCE_ACTIVITY_TYPE_SYSTEM,
-  PSC_HOLD_CONFIG,
   QuestionnaireData,
   ReflexLabDTO,
-  RELATED_SPECIMEN_DEFINITION_SYSTEM,
   sampleDTO,
-  SPECIMEN_CODING_CONFIG,
-} from 'utils';
-import { sendErrors } from '../../../../shared';
+} from 'utils/lib/types/data/labs/labs.types';
+import { Pagination } from 'utils/lib/types/data/pagination.types';
+import { EXTERNAL_LAB_ERROR } from 'utils/lib/types/errors';
+import { compareDates } from 'utils/lib/utils/dateUtils';
+import { isPositiveNumberOrZero } from 'utils/lib/validation/helper';
+import { sendErrors } from '../../../../shared/errors';
 import {
   configAllExternalLabDocuments,
   diagnosticReportIsReflex,
   diagnosticReportSpecificResultType,
+  filterResourcesBasedOnDiagnosticReports,
+  filterResourcesBasedOnServiceRequest,
   formatResourcesIntoDiagnosticReportLabDTO,
   groupResourcesByDr,
+  isTaskCancelledResult,
+  isTaskCorrected,
+  isTaskFinal,
+  isTaskPrelim,
+  isTaskPST,
   parseAccessionNumberFromDr,
   parseAppointmentIdForServiceRequest,
+  parseTaskPST,
   parseTimezoneForAppointmentSchedule,
   ResourcesByDr,
   srHasRejectedAbnExt,
@@ -97,25 +113,43 @@ type Cache = {
   parsedTasks?: ReturnType<typeof parseTasks>;
 };
 
-export const mapResourcesToLabOrderDTOs = <SearchBy extends LabOrdersSearchBy>(
-  searchBy: SearchBy,
-  serviceRequests: ServiceRequest[],
-  tasks: Task[],
-  results: DiagnosticReport[],
-  practitioners: Practitioner[],
-  encounters: Encounter[],
-  locations: Location[],
-  appointments: Appointment[],
-  provenances: Provenance[],
-  organizations: Organization[],
-  questionnaires: QuestionnaireData[],
-  labDocuments: ExternalLabDocuments | undefined,
-  specimens: Specimen[],
-  appointmentScheduleMap: Record<string, Schedule>,
-  communications: ExternalLabCommunications | undefined,
-  ENVIRONMENT: string
-): LabOrderDTO<SearchBy>[] => {
+type LabOrderResources = {
+  tasks: Task[];
+  results: DiagnosticReport[];
+  practitioners: Practitioner[];
+  encounters: Encounter[];
+  locations: Location[];
+  appointments: Appointment[];
+  provenances: Provenance[];
+  organizations: Organization[];
+  questionnaires: QuestionnaireData[];
+  labDocuments: ExternalLabDocuments | undefined;
+  specimens: Specimen[];
+  appointmentScheduleMap: Record<string, Schedule>;
+  communications: ExternalLabCommunications | undefined;
+  coverages: Coverage[];
+};
+
+export type MapResourcesToLabOrderDTOsInput<SearchBy extends LabOrdersSearchBy> = LabOrderResources & {
+  searchBy: SearchBy;
+  serviceRequests: ServiceRequest[];
+  environment: string;
+};
+
+type ParseOrderDataInput<SearchBy extends LabOrdersSearchBy> = LabOrderResources & {
+  searchBy: SearchBy;
+  serviceRequest: ServiceRequest;
+  cache?: Cache;
+};
+
+export const mapResourcesToLabOrderDTOs = <SearchBy extends LabOrdersSearchBy>({
+  searchBy,
+  serviceRequests,
+  environment,
+  ...resources
+}: MapResourcesToLabOrderDTOsInput<SearchBy>): LabOrderDTO<SearchBy>[] => {
   console.log('mapResourcesToLabOrderDTOs');
+  const { tasks, results } = resources;
   const result: LabOrderDTO<SearchBy>[] = [];
 
   for (const serviceRequest of serviceRequests) {
@@ -131,27 +165,15 @@ export const mapResourcesToLabOrderDTOs = <SearchBy extends LabOrdersSearchBy>(
 
       result.push(
         parseOrderData({
+          ...resources,
           searchBy,
-          tasks,
           serviceRequest,
-          results,
-          appointments,
-          encounters,
-          locations,
-          practitioners,
-          provenances,
-          organizations,
-          questionnaires,
-          labDocuments,
-          specimens,
-          appointmentScheduleMap,
-          communications,
           cache,
         })
       );
     } catch (error) {
       console.error(`Error parsing service request ${serviceRequest.id}:`, error);
-      void sendErrors(error, ENVIRONMENT);
+      void sendErrors(error, environment);
     }
   }
   return result;
@@ -199,25 +221,9 @@ export const parseOrderData = <SearchBy extends LabOrdersSearchBy>({
   specimens,
   appointmentScheduleMap,
   communications,
+  coverages,
   cache,
-}: {
-  searchBy: SearchBy;
-  serviceRequest: ServiceRequest;
-  tasks: Task[];
-  results: DiagnosticReport[];
-  appointments: Appointment[];
-  encounters: Encounter[];
-  locations: Location[];
-  practitioners: Practitioner[];
-  provenances: Provenance[];
-  organizations: Organization[];
-  questionnaires: QuestionnaireData[];
-  labDocuments: ExternalLabDocuments | undefined;
-  specimens: Specimen[];
-  appointmentScheduleMap: Record<string, Schedule>;
-  communications: ExternalLabCommunications | undefined;
-  cache?: Cache;
-}): LabOrderDTO<SearchBy> => {
+}: ParseOrderDataInput<SearchBy>): LabOrderDTO<SearchBy> => {
   console.log('parsing external lab order data');
   if (!serviceRequest.id) {
     throw new Error('ServiceRequest ID is required');
@@ -245,6 +251,8 @@ export const parseOrderData = <SearchBy extends LabOrdersSearchBy>({
     serviceRequest
   );
 
+  const coveragesForServiceRequest = parseCoveragesForServiceRequest(coverages, serviceRequest);
+
   const listPageDTO: LabOrderListPageDTO = {
     appointmentId,
     testItem: testName,
@@ -268,6 +276,10 @@ export const parseOrderData = <SearchBy extends LabOrdersSearchBy>({
     location: parseLocation(serviceRequest, locations),
     orderLevelNoteByUser,
     clinicalInfoNoteByUser,
+    hasCptCodes: labOrderHasCptCodes(serviceRequest),
+    billingType: coveragesForServiceRequest.length
+      ? paymentMethodFromCoverage(coveragesForServiceRequest[0]) // doesn't matter which Coverage we pick, should all be the same type on an SR
+      : LabPaymentMethod.SelfPay, // only insurance and client bill actually put Coverage on the SR
   };
 
   if (searchBy.searchBy.field === 'serviceRequestId') {
@@ -525,6 +537,7 @@ export const getLabResources = async (
   patientLabItems: PatientLabItem[];
   appointmentScheduleMap: Record<string, Schedule>;
   communications: ExternalLabCommunications | undefined;
+  coverages: Coverage[];
 }> => {
   // does not include the location on the SR
   const labServiceRequestSearchParams = createLabServiceRequestSearchParams(params);
@@ -570,7 +583,8 @@ export const getLabResources = async (
           | Schedule
           | Slot
           | Specimen
-          | Communication => Boolean(res)
+          | Communication
+          | Coverage => Boolean(res)
       ) || [];
 
   const {
@@ -588,6 +602,7 @@ export const getLabResources = async (
     appointments,
     appointmentScheduleMap,
     communications,
+    coverages,
   } = extractLabResources(labResources);
 
   // todo labs team
@@ -674,6 +689,7 @@ export const getLabResources = async (
     patientLabItems,
     appointmentScheduleMap,
     communications,
+    coverages,
   };
 };
 
@@ -718,6 +734,16 @@ export const createLabServiceRequestSearchParams = (params: GetZambdaLabOrdersPa
     {
       name: '_revinclude',
       value: 'DiagnosticReport:based-on',
+    },
+
+    // grab the coverage via patient
+    {
+      name: '_include',
+      value: 'ServiceRequest:patient',
+    },
+    {
+      name: '_revinclude:iterate',
+      value: 'Coverage:patient',
     },
 
     // include Observations
@@ -862,6 +888,7 @@ export const extractLabResources = (
     | Schedule
     | Slot
     | Communication
+    | Coverage
   )[]
 ): {
   serviceRequests: ServiceRequest[];
@@ -878,6 +905,7 @@ export const extractLabResources = (
   appointments: Appointment[];
   appointmentScheduleMap: Record<string, Schedule>;
   communications: ExternalLabCommunications | undefined;
+  coverages: Coverage[];
 } => {
   console.log('extracting lab resources');
   console.log(`${resources.length} resources total`);
@@ -899,6 +927,7 @@ export const extractLabResources = (
   const appointmentScheduleMap: Record<string, Schedule> = {};
   const orderLevelNotesByUser: Communication[] = [];
   const clinicalInfoNotesByUser: Communication[] = [];
+  const coverages: Coverage[] = [];
 
   for (const resource of resources) {
     if (resource.resourceType === 'ServiceRequest') {
@@ -942,6 +971,8 @@ export const extractLabResources = (
       const labCommType = labOrderCommunicationType(resource);
       if (labCommType === 'order-level-note') orderLevelNotesByUser.push(resource);
       if (labCommType === 'clinical-info-note') clinicalInfoNotesByUser.push(resource);
+    } else if (resource.resourceType === 'Coverage') {
+      coverages.push(resource);
     }
   }
 
@@ -982,6 +1013,7 @@ export const extractLabResources = (
     appointments,
     appointmentScheduleMap,
     communications,
+    coverages,
   };
 };
 
@@ -1146,6 +1178,15 @@ export const fetchFinalAndPrelimAndCorrectedTasks = async (
     })
   ).unbundle();
 
+  return filterFinalAndPrelimAndCorrectedTasks(tasksResponse);
+};
+
+/**
+ * The pure half of fetchFinalAndPrelimAndCorrectedTasks: given the Tasks based on a set of DiagnosticReports,
+ * keeps the ones the order list needs. Shared with the tracking board, which gets these Tasks back in the same
+ * batch as the ServiceRequests instead of a second search.
+ */
+export const filterFinalAndPrelimAndCorrectedTasks = (tasksResponse: Task[]): Task[] => {
   const getDrIdFromTask = (task: Task): string | undefined => {
     return task.basedOn
       ?.find((ref): ref is Reference => ref.reference?.startsWith('DiagnosticReport/') ?? false)
@@ -1251,6 +1292,10 @@ export const fetchQuestionnaireForServiceRequests = async (
           Authorization: `Bearer ${m2mToken}`,
         },
       });
+
+      if (!questionnaireRequest.ok) {
+        throw new Error(`Failed to fetch Questionnaire at ${result.questionnaireUrl}: ${questionnaireRequest.status}`);
+      }
 
       const { questionnaireResponse, serviceRequestId } = result;
 
@@ -2159,115 +2204,11 @@ export const parseResultDetails = (
   return details;
 };
 
-export const parseTaskPST = (tasks: Task[], serviceRequestId: string): Task | null => {
-  const relatedTasks = filterResourcesBasedOnServiceRequest(tasks, serviceRequestId);
-
-  for (const task of relatedTasks) {
-    if (isTaskPST(task)) {
-      return task;
-    }
-  }
-
-  return null;
-};
-
-export const isTaskPST = (task: Task): boolean => {
-  return (
-    task.code?.coding?.some(
-      (coding) => coding.system === LAB_ORDER_TASK.system && coding.code === LAB_ORDER_TASK.code.preSubmission
-    ) || false
-  );
-};
-
-export const isTaskFinal = (task: Task): boolean => {
-  return (
-    task.code?.coding?.some(
-      (coding) => coding.system === LAB_ORDER_TASK.system && coding.code === LAB_ORDER_TASK.code.reviewFinalResult
-    ) || false
-  );
-};
-
-export const isTaskPrelim = (task: Task): boolean => {
-  return (
-    task.code?.coding?.some(
-      (coding) => coding.system === LAB_ORDER_TASK.system && coding.code === LAB_ORDER_TASK.code.reviewPreliminaryResult
-    ) || false
-  );
-};
-
-export const isTaskCorrected = (task: Task): boolean => {
-  return (
-    task.code?.coding?.some(
-      (coding) => coding.system === LAB_ORDER_TASK.system && coding.code === LAB_ORDER_TASK.code.reviewCorrectedResult
-    ) || false
-  );
-};
-
-const isTaskCancelledResult = (task: Task): boolean => {
-  return (
-    task.code?.coding?.some(
-      (coding) => coding.system === LAB_ORDER_TASK.system && coding.code === LAB_ORDER_TASK.code.reviewCancelledResult
-    ) || false
-  );
-};
-
 export const mapResourcesFromBundleEntry = <T = Resource>(bundleEntry: BundleEntry<T>[] | undefined): T[] => {
   return (bundleEntry || ([] as BundleEntry<T>[]))
     .filter((entry) => entry.response?.status?.startsWith('2')) // todo: should we filter out failed responses like this?
     .map((entry) => entry.resource)
     .filter(Boolean) as T[];
-};
-
-export const filterResourcesBasedOnTargetResource = <T extends Resource & { basedOn?: Reference[] }>({
-  resources,
-  targetResourceId,
-  targetResourceType,
-}: {
-  resources: T[];
-  targetResourceId: string;
-  targetResourceType: string;
-}): T[] => {
-  return resources.filter(
-    (resource) => resource.basedOn?.some((basedOn) => basedOn.reference === `${targetResourceType}/${targetResourceId}`)
-  );
-};
-
-export const filterResourcesBasedOnServiceRequest = <T extends Resource & { basedOn?: Reference[] }>(
-  resources: T[],
-  serviceRequestId: string
-): T[] => {
-  return filterResourcesBasedOnTargetResource({
-    resources,
-    targetResourceId: serviceRequestId,
-    targetResourceType: 'ServiceRequest',
-  });
-};
-
-export const filterResourcesBasedOnDiagnosticReports = <T extends Resource & { basedOn?: Reference[] }>(
-  resources: T[],
-  results: DiagnosticReport[]
-): T[] => {
-  const resultsIds: string[] = results
-    .map((result) => result.id)
-    .filter((id): id is string => typeof id === 'string' && id.length > 0);
-
-  if (!resultsIds.length) {
-    return [];
-  }
-
-  const result: T[] = [];
-
-  for (const resultId of resultsIds) {
-    const relatedResources = filterResourcesBasedOnTargetResource<T>({
-      resources,
-      targetResourceId: resultId,
-      targetResourceType: 'DiagnosticReport',
-    });
-
-    result.push(...relatedResources);
-  }
-
-  return result;
 };
 
 export const filterFinalTasks = (tasks: Task[], results: DiagnosticReport[]): Task[] => {
@@ -2677,4 +2618,12 @@ const isGenericOrder = (serviceRequest: ServiceRequest): boolean => {
     ) ?? false;
   console.log(`ServiceRequest/${serviceRequest.id} isGeneric: ${isGeneric}`);
   return isGeneric;
+};
+
+const parseCoveragesForServiceRequest = (coverages: Coverage[], serviceRequest: ServiceRequest): Coverage[] => {
+  const srCoverageSet = new Set(
+    serviceRequest.insurance?.map((covRef) => covRef.reference).filter((ref) => ref !== undefined) ?? []
+  );
+
+  return coverages.filter((cov) => srCoverageSet.has(`Coverage/${cov.id}`));
 };

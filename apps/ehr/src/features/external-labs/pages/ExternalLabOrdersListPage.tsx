@@ -3,15 +3,19 @@ import React, { useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { dataTestIds } from 'src/constants/data-test-ids';
 import AiSuggestion from 'src/features/visits/in-person/components/AiSuggestion';
+import { useChartData } from 'src/features/visits/shared/hooks/useChartData';
 import { useGetAppointmentAccessibility } from 'src/features/visits/shared/hooks/useGetAppointmentAccessibility';
-import { useAppointmentData, useChartData } from 'src/features/visits/shared/stores/appointment/appointment.store';
-import { AiObservationField, LabsTableColumn, ObservationTextFieldDTO } from 'utils';
+import { useAppointmentData } from 'src/features/visits/shared/stores/appointment/appointment.store';
+import { AiObservationField } from 'utils/lib/types/api/chart-data/chart-data.constants';
+import { LabsTableColumn } from 'utils/lib/types/data/labs/labs.types';
+import { ObservationTextFieldDTO } from 'utils/lib/types/data/screening-questions/types';
 import ListViewContainer from '../../common/ListViewContainer';
 import { ButtonRounded } from '../../visits/in-person/components/RoundedButton';
 import { PageTitle } from '../../visits/shared/components/PageTitle';
 import { LabsTablePatientChart } from '../components/labs-orders/LabsTablePatientChart';
+import { useLabOrderRowNavigation } from '../components/labs-orders/useLabOrderRowNavigation';
 
-const externalLabsColumns: LabsTableColumn[] = [
+export const externalLabsColumns: LabsTableColumn[] = [
   'testType',
   'dx',
   'ordered',
@@ -22,6 +26,7 @@ const externalLabsColumns: LabsTableColumn[] = [
 ];
 
 export const ExternalLabOrdersListPage: React.FC = () => {
+  const { openOrder, openDrDrivenResult } = useLabOrderRowNavigation();
   const navigate = useNavigate();
   const { encounter } = useAppointmentData();
   const encounterId = encounter?.id;
@@ -80,6 +85,8 @@ export const ExternalLabOrdersListPage: React.FC = () => {
           allowDelete={!isReadOnly}
           allowSubmit={!isReadOnly}
           onCreateOrder={!isReadOnly ? handleCreateOrder : undefined}
+          onRowClick={openOrder}
+          onDrDrivenRowClick={openDrDrivenResult}
         />
       </Box>
     </ListViewContainer>

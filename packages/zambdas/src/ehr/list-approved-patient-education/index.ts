@@ -1,22 +1,22 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { DocumentReference, List } from 'fhir/r4b';
+import { getPresignedURL } from 'utils/lib/helpers/presigned-file-url/helpers';
+import { getSecret, SecretsKeys } from 'utils/lib/secrets';
 import {
   ApprovedPatientEducationItem,
-  getPresignedURL,
-  getSecret,
   ListApprovedPatientEducationOutput,
+} from 'utils/lib/types/api/approved-patient-education.types';
+import {
   PATIENT_EDUCATION_APPROVED_DOC_TYPE_CODE,
   PATIENT_EDUCATION_APPROVED_LIST_IDENTIFIER,
-  SecretsKeys,
-} from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  topLevelCatch,
-  wrapHandler,
-  ZambdaInput,
-} from '../../shared';
+} from 'utils/lib/types/data/paperwork/paperwork.constants';
+import { normalizePatientEducationLanguage } from 'utils/lib/types/data/patient-education.types';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { topLevelCatch } from '../../shared/lambda';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import { extractApprovedEducationIcdCodes } from '../shared/approved-patient-education-helpers';
 import { validateRequestParameters } from './validateRequestParameters';
 
@@ -28,7 +28,7 @@ export const index = wrapHandler(
     try {
       const validatedInput = validateRequestParameters(input);
       m2mToken = await checkOrCreateM2MClientToken(m2mToken, validatedInput.secrets);
-      const oystehr = createOystehrClient(m2mToken, validatedInput.secrets);
+      const oystehr = createClinicalOystehrClient(m2mToken, validatedInput.secrets);
 
       const result = await performEffect(oystehr, m2mToken);
       return {
@@ -78,6 +78,7 @@ const performEffect = async (oystehr: Oystehr, token: string): Promise<ListAppro
         title: docRef.content?.[0]?.attachment?.title ?? docRef.description ?? '',
         icdCodes: extractApprovedEducationIcdCodes(docRef),
         pdfPresignedUrl: presignedUrl,
+        language: normalizePatientEducationLanguage(docRef.content?.[0]?.attachment?.language),
       };
     })
   );

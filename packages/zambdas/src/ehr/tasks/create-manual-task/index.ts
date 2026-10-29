@@ -1,16 +1,16 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Practitioner } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import { CreateManualTaskRequest, getFullName, MANUAL_TASK, TASK_ASSIGNED_DATE_TIME_EXTENSION_URL } from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  getMyPractitionerId,
-  validateJsonBody,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+import { TASK_ASSIGNED_DATE_TIME_EXTENSION_URL } from 'utils/lib/fhir/constants';
+import { getFullName } from 'utils/lib/fhir/patient';
+import { CreateManualTaskRequest, MANUAL_TASK } from 'utils/lib/types/data/tasks/types';
+import { INVALID_INPUT_ERROR } from 'utils/lib/types/errors';
+import { checkOrCreateM2MClientToken, getM2MClientId, isM2MClient } from '../../../shared/auth';
+import { createClinicalOystehrClient, validateJsonBody } from '../../../shared/helpers';
+import { getMyPractitionerId } from '../../../shared/practitioners';
+import { wrapHandler } from '../../../shared/sentry';
 import { createTask } from '../../../shared/tasks';
+import { ZambdaInput } from '../../../shared/types/common';
 
 let m2mToken: string;
 
@@ -19,13 +19,20 @@ const ZAMBDA_NAME = 'create-manual-task';
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
   const params = validateRequestParameters(input);
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, params.secrets);
-  const oystehr = createOystehrClient(m2mToken, params.secrets);
-  const userToken = input.headers.Authorization.replace('Bearer ', '');
-  const userPractitionerId = await getMyPractitionerId(userToken, params.secrets);
-  const currentUserPractitioner = await oystehr.fhir.get<Practitioner>({
-    resourceType: 'Practitioner',
-    id: userPractitionerId,
-  });
+  const oystehr = createClinicalOystehrClient(m2mToken, params.secrets);
+  const token = input.headers.Authorization.replace('Bearer ', '');
+  const isM2M = isM2MClient(token);
+  let createdBy: string;
+  if (isM2M) {
+    createdBy = params.createdBy ?? `M2M Client ${getM2MClientId(token)}`;
+  } else {
+    const userPractitionerId = await getMyPractitionerId(token, params.secrets);
+    const currentUserPractitioner = await oystehr.fhir.get<Practitioner>({
+      resourceType: 'Practitioner',
+      id: userPractitionerId,
+    });
+    createdBy = getFullName(currentUserPractitioner);
+  }
 
   const taskBasedOn =
     params.category === MANUAL_TASK.category.radiology && params.orderId
@@ -51,7 +58,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
       },
       {
         type: MANUAL_TASK.input.providerName,
-        valueString: getFullName(currentUserPractitioner),
+        valueString: createdBy,
       },
       {
         type: MANUAL_TASK.input.appointmentId,
@@ -101,8 +108,18 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
 });
 
 export function validateRequestParameters(input: ZambdaInput): CreateManualTaskRequest & Pick<ZambdaInput, 'secrets'> {
-  const { category, appointmentId, orderId, encounterId, taskTitle, taskDetails, assignee, location, patient } =
-    validateJsonBody(input);
+  const {
+    category,
+    appointmentId,
+    orderId,
+    encounterId,
+    taskTitle,
+    taskDetails,
+    assignee,
+    location,
+    patient,
+    createdBy,
+  } = validateJsonBody(input);
 
   const missingFields: string[] = [];
   if (!category) missingFields.push('category');
@@ -120,6 +137,7 @@ export function validateRequestParameters(input: ZambdaInput): CreateManualTaskR
     if (!patient.id) missingFields.push('patient.id');
     if (!patient.name) missingFields.push('patient.name');
   }
+  if (createdBy !== undefined && typeof createdBy !== 'string') throw INVALID_INPUT_ERROR('createdBy must be a string');
   if (missingFields.length > 0) throw new Error(`Missing required fields [${missingFields.join(', ')}]`);
 
   return {
@@ -132,6 +150,7 @@ export function validateRequestParameters(input: ZambdaInput): CreateManualTaskR
     assignee,
     location,
     patient,
+    createdBy: createdBy?.trim() || undefined,
     secrets: input.secrets,
   };
 }

@@ -1,14 +1,13 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { getSecret, GetSupportDialogOutput, SecretsKeys } from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  getSupportDialogPayload,
-  topLevelCatch,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+import { getSecret, SecretsKeys } from 'utils/lib/secrets';
+import { GetSupportDialogOutput } from 'utils/lib/types/data/support-dialog';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { topLevelCatch } from '../../../shared/lambda';
+import { wrapHandler } from '../../../shared/sentry';
+import { getSupportDialogPayload } from '../../../shared/support-dialog';
+import { ZambdaInput } from '../../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 let m2mToken: string;
@@ -19,7 +18,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   try {
     const { secrets } = validateRequestParameters(input);
     m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-    const oystehr = createOystehrClient(m2mToken, secrets);
+    const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
     const response = await performEffect(oystehr);
     return { statusCode: 200, body: JSON.stringify(response) };

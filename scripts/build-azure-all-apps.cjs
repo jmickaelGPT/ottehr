@@ -6,18 +6,15 @@ if (!envMode) {
   process.exit(1);
 }
 
-const includeBillingApp = String(process.env.INCLUDE_BILLING_APP || '').toLowerCase() === 'true';
+const billingOnly = String(process.env.BILLING_ONLY || '').toLowerCase() === 'true';
 
-const apps = [
-  { name: 'ehr', dir: 'apps/ehr', script: 'build-skeleton' },
-  { name: 'intake', dir: 'apps/intake', script: 'build-skeleton' },
-];
-
-if (includeBillingApp) {
-  apps.push({ name: 'billing', dir: 'apps/billing', script: 'build-skeleton' });
-} else {
-  console.log('Skipping billing build (set INCLUDE_BILLING_APP=true to include it).');
-}
+const apps = billingOnly
+  ? [{ name: 'billing', dir: 'apps/billing', script: 'build-skeleton' }]
+  : [
+      { name: 'ehr', dir: 'apps/ehr', script: 'build-skeleton' },
+      { name: 'intake', dir: 'apps/intake', script: 'build-skeleton' },
+      { name: 'billing', dir: 'apps/billing', script: 'build-skeleton' },
+    ];
 
 for (const app of apps) {
   console.log(`Building ${app.name} with mode ${envMode}`);

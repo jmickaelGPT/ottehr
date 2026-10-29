@@ -1,8 +1,8 @@
 import { DateTime } from 'luxon';
-import { vitalsConfig } from '../../ottehr-config';
+import { VitalFieldNames } from '../../types/api/chart-data/chart-data.constants';
 import {
-  VitalFieldNames,
   VitalsBloodPressureObservationDTO,
+  VitalsBMIObservationDTO,
   VitalsHeartbeatObservationDTO,
   VitalsHeightObservationDTO,
   VitalsLastMenstrualPeriodObservationDTO,
@@ -12,16 +12,15 @@ import {
   VitalsTemperatureObservationDTO,
   VitalsVisionObservationDTO,
   VitalsWeightObservationDTO,
-} from '../../types';
-import { formatDateTimeToZone } from '../../utils';
-import {
-  celsiusToFahrenheit,
-  formatHeightObservationValue,
-  formatWeightKg,
-  formatWeightLbs,
-  getVisionExtraOptionsFormattedString,
-  VitalsVisitNoteData,
-} from '../vitals';
+} from '../../types/api/chart-data/chart-data.types';
+import { formatDateTimeToZone } from '../../utils/date';
+import { vitalsConfig } from '../vitals/config-schema';
+import { formatBMIWithUnit } from '../vitals/vitals-bmi.helper';
+import { formatHeightObservationValue } from '../vitals/vitals-height.helper';
+import { celsiusToFahrenheit } from '../vitals/vitals-temperature.helper';
+import { getDotVisionScreeningLines, getVisionExtraOptionsFormattedString } from '../vitals/vitals-vision.helper';
+import { VitalsVisitNoteData } from '../vitals/vitals-visit-note-data.types';
+import { formatWeightKg, formatWeightLbs } from '../vitals/vitals-weight.helper';
 
 export const mapVitalsToDisplay = (
   vitalsObservations: VitalsObservationDTO[],
@@ -80,8 +79,18 @@ export const mapVitalsToDisplay = (
         parsed = observation as VitalsHeightObservationDTO;
         text = formatHeightObservationValue(parsed.value);
         break;
+      case VitalFieldNames.VitalBMI:
+        parsed = observation as VitalsBMIObservationDTO;
+        text = formatBMIWithUnit(parsed.value);
+        break;
       case VitalFieldNames.VitalVision: {
         parsed = observation as VitalsVisionObservationDTO;
+        const dotLines = getDotVisionScreeningLines(parsed.dotVisionScreening, { includeDocument: true });
+        if (dotLines.length > 0) {
+          // DOT screening entries are stored as their own observation; render the MCSA-5875 layout.
+          text = dotLines.join('\n');
+          break;
+        }
         const visionParts: string[] = [];
         if (parsed.leftEyeVisionText) visionParts.push(`Left eye: ${parsed.leftEyeVisionText}`);
         if (parsed.rightEyeVisionText) visionParts.push(`Right eye: ${parsed.rightEyeVisionText}`);

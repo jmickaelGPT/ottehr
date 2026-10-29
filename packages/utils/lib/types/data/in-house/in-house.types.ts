@@ -1,14 +1,9 @@
 import { ProcedureModifier } from 'candidhealth/api/index.js';
 import { Account, Coverage, Encounter, Location, Patient } from 'fhir/r4b';
-import {
-  CPTCodeDTO,
-  DiagnosisDTO,
-  InHouseLabSetDTO,
-  LabSetDTO,
-  OBSERVATION_CODES,
-  Pagination,
-  REFLEX_TEST_CONDITION_LANGUAGES,
-} from 'utils';
+import { CPTCodeDTO, DiagnosisDTO } from '../../api/chart-data/chart-data.types';
+import { InHouseLabSetDTO, LabSetDTO } from '../labs/lab-set.schema';
+import { Pagination } from '../pagination.types';
+import { OBSERVATION_CODES, REFLEX_TEST_CONDITION_LANGUAGES } from './in-house.constants';
 
 export const EntryMode = {
   Initial: 'initial',
@@ -121,6 +116,7 @@ export type InHouseOrderListPageItemDTO = {
   timezone: string | undefined;
   orderAddedDate: string;
   orderingPhysicianFullName: string;
+  labDetails: DataEntryTestItem; // for showing results in the list page table
 };
 
 export type InHouseOrderDetailPageItemDTO = InHouseOrderListPageItemDTO & {
@@ -128,7 +124,6 @@ export type InHouseOrderDetailPageItemDTO = InHouseOrderListPageItemDTO & {
   currentUserId: string;
   currentUserFullName: string;
   resultsPDFUrl: string | undefined;
-  labDetails: DataEntryTestItem;
   orderHistory: {
     status: TestStatus;
     statusSubtitle: string | undefined;

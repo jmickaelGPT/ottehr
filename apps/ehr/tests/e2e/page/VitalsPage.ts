@@ -4,8 +4,9 @@ import {
   clickAndWaitForChartDataDeletion,
   clickAndWaitForSaveChartData,
   waitForSaveChartDataResponse,
-} from 'test-utils';
-import { PROVIDER_CONFIG, VitalFieldNames } from 'utils';
+} from 'test-utils/lib/e2e/response-utils';
+import { PROVIDER_CONFIG } from 'utils/lib/ottehr-config/provider';
+import { VitalFieldNames } from 'utils/lib/types/api/chart-data/chart-data.constants';
 import { EditNoteDialog, expectEditNoteDialog } from './in-person/EditNoteDialog';
 import { Dialog, expectDialog } from './patient-information/Dialog';
 
@@ -105,6 +106,31 @@ export class VitalsPage {
     const header = this.#page.getByTestId(dataTestIds.vitalsPage.bloodPressureHeader);
     await expect(header).toContainText(systolic);
     await expect(header).toContainText(diastolic);
+  }
+
+  async expectInvalidBloodPressureError(
+    systolic: string,
+    diastolic: string,
+    expectedError: string | RegExp
+  ): Promise<void> {
+    const systolicInput = this.#page.getByTestId(dataTestIds.vitalsPage.bloodPressureSystolicInput).locator('input');
+    await systolicInput.fill(systolic);
+
+    const diastolicInput = this.#page.getByTestId(dataTestIds.vitalsPage.bloodPressureDiastolicInput).locator('input');
+    await diastolicInput.fill(diastolic);
+
+    // Clicking Add should NOT trigger a save: the relationship validation surfaces an error snackbar instead.
+    await this.#page.getByTestId(dataTestIds.vitalsPage.bloodPressureAddButton).click();
+    await expect(this.#page.locator('.notistack-SnackbarContainer').getByText(expectedError)).toBeVisible();
+
+    // No history entry should be created for the rejected pair.
+    await expect(
+      this.#page.getByTestId(dataTestIds.vitalsPage.bloodPressureItem).filter({ hasText: `${systolic}/${diastolic}` })
+    ).toHaveCount(0);
+
+    // Reset the form so subsequent steps start clean.
+    await systolicInput.fill('');
+    await diastolicInput.fill('');
   }
 
   async removeBloodPressureObservationFromHistory(systolic: string, diastolic: string): Promise<void> {
@@ -316,7 +342,7 @@ export class VitalsPage {
   async addVitalsNote(note: string): Promise<void> {
     await this.#page
       .getByTestId(dataTestIds.screeningPage.screeningNoteField)
-      .locator('input')
+      .locator('textarea')
       .locator('visible=true')
       .fill(note);
     await this.#page.getByTestId(dataTestIds.vitalsPage.addNoteButton).click();

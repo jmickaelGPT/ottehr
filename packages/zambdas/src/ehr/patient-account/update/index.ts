@@ -3,36 +3,31 @@ import { APIGatewayProxyResult } from 'aws-lambda';
 import type { Account, Encounter, Patient, Questionnaire } from 'fhir/r4b';
 import { AuditEvent, Bundle, QuestionnaireResponse, QuestionnaireResponseItem } from 'fhir/r4b';
 import { DateTime } from 'luxon';
+import { userMe } from 'utils/lib/auth/user-me.helper';
+import { AUDIT_EVENT_OUTCOME_CODE, PARTICIPATION_CODE_SYSTEM } from 'utils/lib/fhir/constants';
+import { checkBundleOutcomeOk, getVersionedReferencesFromBundleResources } from 'utils/lib/fhir/helpers';
+import { mapQuestionnaireAndValueSetsToItemsList } from 'utils/lib/helpers/paperwork/paperwork';
+import { makeValidationSchema } from 'utils/lib/helpers/paperwork/validation';
+import { PATIENT_RECORD_QUESTIONNAIRE } from 'utils/lib/ottehr-config/patient-record';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { UpdatePatientAccountResponse } from 'utils/lib/types/api/patient-account';
+import { flattenQuestionnaireAnswers } from 'utils/lib/types/data/paperwork/paperwork.types';
 import {
-  AUDIT_EVENT_OUTCOME_CODE,
-  checkBundleOutcomeOk,
-  flattenQuestionnaireAnswers,
-  getSecret,
-  getVersionedReferencesFromBundleResources,
-  isValidUUID,
-  makeValidationSchema,
-  mapQuestionnaireAndValueSetsToItemsList,
   MISSING_REQUEST_BODY,
   MISSING_REQUIRED_PARAMETERS,
   NOT_AUTHORIZED,
-  PARTICIPATION_CODE_SYSTEM,
-  PATIENT_RECORD_QUESTIONNAIRE,
   QUESTIONNAIRE_RESPONSE_INVALID_CUSTOM_ERROR,
   QUESTIONNAIRE_RESPONSE_INVALID_ERROR,
-  Secrets,
-  SecretsKeys,
-  UpdatePatientAccountResponse,
-  userMe,
-} from 'utils';
+} from 'utils/lib/types/errors';
+import { isValidUUID } from 'utils/lib/validation/helper';
 import { ValidationError } from 'yup';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  getStripeClient,
-  sendErrors,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { sendErrors } from '../../../shared/errors';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { getStripeClient } from '../../../shared/stripeIntegration';
+import { ZambdaInput } from '../../../shared/types/common';
+import { safeJsonParse } from '../../../shared/validation';
 import {
   createMasterRecordPatchOperations,
   createUpdatePharmacyPatchOps,
@@ -53,7 +48,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   console.debug('validateRequestParameters success');
   const { secrets } = validatedParameters;
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
   console.log('complexly validating request parameters');
   const effectInput = await complexValidation(validatedParameters);
   console.log('complex validation successful');
@@ -308,6 +303,7 @@ interface BasicInput {
   userToken: string;
   patientId: string;
   questionnaireResponse: QuestionnaireResponse;
+  onlyValidateProvidedFields: boolean;
   secrets: Secrets | null;
 }
 
@@ -323,9 +319,12 @@ const validateRequestParameters = (input: ZambdaInput): BasicInput => {
   }
 
   const { secrets } = input;
-  const { questionnaireResponse } = JSON.parse(input.body);
+  const { questionnaireResponse, onlyValidateProvidedFields } = safeJsonParse(input.body);
   if (questionnaireResponse === undefined) {
     throw MISSING_REQUIRED_PARAMETERS(['questionnaireResponse']);
+  }
+  if (onlyValidateProvidedFields !== undefined && typeof onlyValidateProvidedFields !== 'boolean') {
+    throw QUESTIONNAIRE_RESPONSE_INVALID_CUSTOM_ERROR('onlyValidateProvidedFields must be a boolean when provided');
   }
   if (questionnaireResponse.resourceType !== 'QuestionnaireResponse') {
     throw QUESTIONNAIRE_RESPONSE_INVALID_CUSTOM_ERROR('questionnaireResponse must be of type QuestionnaireResponse');
@@ -358,6 +357,7 @@ const validateRequestParameters = (input: ZambdaInput): BasicInput => {
 
   return {
     questionnaireResponse,
+    onlyValidateProvidedFields: onlyValidateProvidedFields ?? false,
     secrets,
     userToken,
     patientId,
@@ -372,7 +372,7 @@ interface FinishedInput extends BasicInput {
 }
 
 const complexValidation = async (input: BasicInput): Promise<FinishedInput> => {
-  const { secrets, userToken, questionnaireResponse } = input;
+  const { secrets, userToken, questionnaireResponse, onlyValidateProvidedFields } = input;
   console.log('questionnaireResponse', JSON.stringify(questionnaireResponse));
   const user = await userMe(userToken, secrets);
   if (!user) {
@@ -390,7 +390,15 @@ const complexValidation = async (input: BasicInput): Promise<FinishedInput> => {
   console.log('preserveOmittedCoverages', preserveOmittedCoverages);
 
   const questionnaireItems = mapQuestionnaireAndValueSetsToItemsList(questionnaire.item ?? [], []);
-  const validationSchema = makeValidationSchema(questionnaireItems, undefined);
+  // By default we validate each submitted section in full — some sections (e.g.
+  // insurance/coverage) can't be safely processed field-by-field and must be
+  // validated as an atomic unit. Callers making a single-field edit (e.g. the EHR
+  // Medicaid toggle) opt into `onlyValidateProvidedFields` so an unrelated required
+  // sibling in the same section — like ethnicity/race in
+  // `patient-additional-details-section` — doesn't reject the update.
+  const validationSchema = makeValidationSchema(questionnaireItems, undefined, undefined, {
+    onlyValidateProvidedFields,
+  });
   // when a coverage is added via the add coverage modal, a single item with the data for the added coverage is sent to
   // this endpoint. passing this allows us to refrain from removing any existing coverages from the account when a new one is added.
   try {

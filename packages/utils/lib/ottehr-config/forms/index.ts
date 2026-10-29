@@ -1,6 +1,4 @@
-import type { FormsConfig } from 'config-types';
-
-const FORMS_DATA: FormsConfig = {
+const FORMS_DATA = {
   forms: [
     {
       title: 'Texas Workers Compensation Form DWC073',

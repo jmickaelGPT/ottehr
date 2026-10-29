@@ -31,7 +31,7 @@
 // are intentionally not duplicated here.
 
 import { CodeableConcept, Coding, HealthcareService, Location, PractitionerRole, Resource, Schedule } from 'fhir/r4b';
-import { ServiceMode, ServiceVisitType } from '../types';
+import { ServiceMode, ServiceVisitType } from '../types/common';
 import {
   GROUP_ALL_LOCATIONS_SYSTEM,
   GROUP_ASSIGNMENT_MODE_SYSTEM,
@@ -110,6 +110,28 @@ export function parseReasonsForVisit(hs: HealthcareService): Array<{ label: stri
       typeof (r as { label?: unknown }).label === 'string' &&
       typeof (r as { value?: unknown }).value === 'string'
   );
+}
+
+/**
+ * Read the admin-defined short abbreviation from the JSON-blob extension at
+ * SERVICE_CATEGORY_CONFIG_EXTENSION_URL (stored alongside reasonsForVisit).
+ * Returns undefined when absent, empty, or unparseable.
+ */
+export function parseServiceCategoryAbbreviation(hs: HealthcareService): string | undefined {
+  const ext = hs.extension?.find((e) => e.url === SERVICE_CATEGORY_CONFIG_EXTENSION_URL);
+  const raw = ext?.valueString;
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== 'object') return undefined;
+  const abbreviation = (parsed as { abbreviation?: unknown }).abbreviation;
+  if (typeof abbreviation !== 'string') return undefined;
+  const trimmed = abbreviation.trim();
+  return trimmed || undefined;
 }
 
 // ── Group readers ───────────────────────────────────────────────────────────

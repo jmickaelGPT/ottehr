@@ -1,22 +1,16 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult, Handler } from 'aws-lambda';
 import { RelatedPerson, Task } from 'fhir/r4b';
-import {
-  createOystehrClient as createOystehrClientUtils,
-  getSecret,
-  getSMSNumberForIndividual,
-  Secrets,
-  SecretsKeys,
-  TaskStatus,
-} from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  sendSmsToRelatedPersons,
-  topLevelCatch,
-  wrapHandler,
-  ZambdaInput,
-} from '../../shared';
+import { getSMSNumberForIndividual } from 'utils/lib/fhir/patient';
+import { createOystehrClient as createOystehrClientUtils } from 'utils/lib/helpers/helpers';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { TaskStatus } from 'utils/lib/types/common';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { sendSmsToRelatedPersons } from '../../shared/communication';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { topLevelCatch } from '../../shared/lambda';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import { patchTaskStatus } from '../helpers';
 import { TaskSubscriptionInput, validateRequestParameters } from './validateRequestParameters';
 
@@ -91,7 +85,6 @@ export const sendText = async (
 
 // Lifting up value to outside of the handler allows it to stay in memory across warm lambda invocations
 let oystehrToken: string;
-let oystehr: Oystehr;
 
 export function wrapTaskHandler(
   zambdaName: string,
@@ -99,9 +92,13 @@ export function wrapTaskHandler(
     input: { task: Task; secrets: Secrets },
     oystehr: Oystehr
   ) => Promise<{ taskStatus: Task['status']; statusReason?: string }>,
-  options: { retry: boolean } = { retry: false }
+  options: {
+    retry?: boolean;
+    createClient?: (token: string, secrets: Secrets) => Oystehr;
+  } = { retry: false }
 ): Handler<ZambdaInput, APIGatewayProxyResult> {
   return wrapHandler(zambdaName, async (input: ZambdaInput) => {
+    let oystehr: Oystehr;
     let params: TaskSubscriptionInput;
     let taskId: string;
     let ENVIRONMENT: string;
@@ -114,7 +111,7 @@ export function wrapTaskHandler(
       taskId = taskIdParam;
       ENVIRONMENT = getSecret(SecretsKeys.ENVIRONMENT, input.secrets);
       oystehrToken = await checkOrCreateM2MClientToken(oystehrToken, input.secrets);
-      oystehr = createOystehrClient(oystehrToken, input.secrets);
+      oystehr = (options.createClient ?? createClinicalOystehrClient)(oystehrToken, params.secrets);
     } catch (error) {
       console.log('Error validating request parameters:', error);
       return topLevelCatch(zambdaName, error, getSecret(SecretsKeys.ENVIRONMENT, input.secrets));

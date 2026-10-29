@@ -1,20 +1,17 @@
-import CheckBoxIcon from '@mui/icons-material/CheckBox';
-import CheckBoxOutlineBlankIcon from '@mui/icons-material/CheckBoxOutlineBlank';
-import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import DriveFileRenameOutlineIcon from '@mui/icons-material/DriveFileRenameOutline';
+import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
 import {
-  Autocomplete,
   Box,
   Button,
-  Checkbox,
   CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
   DialogContentText,
   DialogTitle,
-  FormControlLabel,
   IconButton,
   Paper,
+  Switch,
   Table,
   TableBody,
   TableCell,
@@ -27,17 +24,21 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Location, PractitionerRole, Schedule } from 'fhir/r4b';
 import { enqueueSnackbar } from 'notistack';
-import { ReactElement, useEffect, useState } from 'react';
+import { ReactElement, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { createPractitionerRole, deletePractitionerRole, listServiceCategories } from 'src/api/api';
-import { getPractitionerRoleAllCategories, SCHEDULE_DISPLAY_NAME_EXTENSION_URL, TIMEZONES } from 'utils';
+import {
+  createPractitionerRole,
+  listServiceCategories,
+  setPractitionerRoleActive,
+  updatePractitionerRole,
+} from 'src/api/api';
+import { SCHEDULE_DISPLAY_NAME_EXTENSION_URL } from 'utils/lib/fhir/constants';
+import { getPractitionerRoleAllCategories } from 'utils/lib/fhir/healthcareService';
+import { TIMEZONES } from 'utils/lib/types/constants';
 import { useApiClients } from '../../hooks/useAppClients';
 
 interface PractitionerRoleListProps {
   practitionerId: string;
-  /** Display name of the provider — used to seed the default schedule name
-   *  in the create-schedule dialog ("<Provider Name> @ <Location>"). */
-  practitionerName: string;
 }
 
 interface ScheduleRow {
@@ -47,6 +48,9 @@ interface ScheduleRow {
   categoryLabels: string[];
   /** User-facing label, e.g. "Intake — Main Clinic" or "Main Clinic". */
   displayLabel: string;
+  /** PractitionerRole.active — `false` means soft-deleted; the row is kept in
+   *  the list so an admin can reactivate without recreating from scratch. */
+  active: boolean;
 }
 
 // Default label when an admin hasn't set a custom Name. Just the Location —
@@ -57,20 +61,26 @@ function deriveDisplayLabel(locationName: string | undefined): string {
   return locationName || 'Unnamed location';
 }
 
-export default function PractitionerRoleList({
-  practitionerId,
-  practitionerName,
-}: PractitionerRoleListProps): ReactElement {
+export default function PractitionerRoleList({ practitionerId }: PractitionerRoleListProps): ReactElement {
   const { oystehr, oystehrZambda } = useApiClients();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [pendingDelete, setPendingDelete] = useState<ScheduleRow | null>(null);
+  const [pendingDeactivate, setPendingDeactivate] = useState<ScheduleRow | null>(null);
+  // Rename edits only the schedule's display name. Location/services are set at
+  // create time and intentionally not editable here — changing them mid-life
+  // muddles the role's identity, so a different config means a new schedule.
+  const [renameRow, setRenameRow] = useState<ScheduleRow | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+
+  const listQueryKey = ['practitioner-role-list', practitionerId];
 
   const { data, isLoading } = useQuery({
-    queryKey: ['practitioner-role-list', practitionerId],
+    queryKey: listQueryKey,
     queryFn: async (): Promise<{ rows: ScheduleRow[]; activeLocations: Location[] }> => {
+      // Both guards are belt-and-suspenders given `enabled` below — keep them
+      // so the queryFn types narrow cleanly without non-null assertions.
       if (!oystehr) throw new Error('oystehr client not ready');
+      if (!oystehrZambda) throw new Error('zambda client not ready');
       const [roleBundle, locationBundle] = await Promise.all([
         oystehr.fhir.search<PractitionerRole | Location | Schedule>({
           resourceType: 'PractitionerRole',
@@ -89,20 +99,17 @@ export default function PractitionerRoleList({
       // PRs without a Location reference are group-membership records (linking
       // a practitioner to a Group HealthcareService), not schedule-bearing PRs.
       // Skip those — they belong to the Group admin flow, not scheduling.
-      // Also skip soft-deleted PRs (active=false from a previous "Delete schedule").
+      // Inactive PRs (previously soft-deleted) are kept so an admin can flip
+      // the row's status toggle back on instead of recreating from scratch.
       const roles = resources.filter(
         (r): r is PractitionerRole =>
-          r.resourceType === 'PractitionerRole' &&
-          !!(r as PractitionerRole).location?.[0]?.reference &&
-          (r as PractitionerRole).active !== false
+          r.resourceType === 'PractitionerRole' && !!(r as PractitionerRole).location?.[0]?.reference
       );
       const includedLocations = resources.filter((r): r is Location => r.resourceType === 'Location');
-      const schedules = resources.filter((r): r is Schedule => r.resourceType === 'Schedule' && r.active !== false);
+      const schedules = resources.filter((r): r is Schedule => r.resourceType === 'Schedule');
 
       // Resolve category labels once.
-      const categoriesResp = oystehrZambda
-        ? await listServiceCategories(oystehrZambda).catch(() => ({ serviceCategories: [] }))
-        : { serviceCategories: [] };
+      const categoriesResp = await listServiceCategories(oystehrZambda).catch(() => ({ serviceCategories: [] }));
       const categoriesById = new Map<string, { code: string; name: string }>();
       for (const sc of categoriesResp.serviceCategories || []) {
         if ((sc as any).id) {
@@ -140,12 +147,20 @@ export default function PractitionerRoleList({
           schedule,
           categoryLabels,
           displayLabel: explicitName || deriveDisplayLabel(location?.name),
+          // A schedule counts as active only if BOTH the role and the Schedule
+          // resource are active. The row toggle sets both together, but the
+          // schedule page can deactivate the Schedule alone — reflecting that
+          // here keeps this list honest instead of showing a green row for a
+          // schedule that's actually out of booking circulation.
+          active: role.active !== false && schedule?.active !== false,
         };
       });
 
       return { rows, activeLocations: locationBundle.unbundle() };
     },
-    enabled: !!oystehr,
+    // Wait for both clients before running so category labels resolve on the
+    // first paint instead of rendering as empty until oystehrZambda catches up.
+    enabled: !!oystehr && !!oystehrZambda,
   });
 
   const createRole = useMutation({
@@ -167,8 +182,7 @@ export default function PractitionerRoleList({
       });
     },
     onSuccess: ({ schedule }) => {
-      void queryClient.invalidateQueries({ queryKey: ['practitioner-role-list', practitionerId] });
-      setDialogOpen(false);
+      void queryClient.invalidateQueries({ queryKey: listQueryKey });
       // Drop the admin straight into the editor for the new schedule — no
       // separate "ok now configure it" step.
       if (schedule.id) {
@@ -187,21 +201,83 @@ export default function PractitionerRoleList({
     },
   });
 
-  const deleteRole = useMutation({
-    mutationFn: async (roleId: string) => {
+  const renameRole = useMutation({
+    mutationFn: async ({ roleId, displayName }: { roleId: string; displayName: string }) => {
       if (!oystehrZambda) throw new Error('zambda client not ready');
-      return deletePractitionerRole(oystehrZambda, { roleId });
+      return updatePractitionerRole(oystehrZambda, { roleId, displayName });
     },
     onSuccess: () => {
-      enqueueSnackbar('Schedule deleted.', { variant: 'success' });
-      setPendingDelete(null);
-      void queryClient.invalidateQueries({ queryKey: ['practitioner-role-list', practitionerId] });
+      void queryClient.invalidateQueries({ queryKey: listQueryKey });
+      enqueueSnackbar('Schedule renamed.', { variant: 'success' });
+      setRenameRow(null);
     },
     onError: (err) => {
       console.error(err);
-      enqueueSnackbar('Failed to delete schedule.', { variant: 'error' });
+      const message =
+        err && typeof err === 'object' && 'message' in err && typeof (err as any).message === 'string'
+          ? (err as any).message
+          : 'Failed to rename schedule.';
+      enqueueSnackbar(message, { variant: 'error' });
     },
   });
+
+  type ListQueryData = { rows: ScheduleRow[]; activeLocations: Location[] };
+
+  const setActive = useMutation({
+    mutationFn: async ({ roleId, active }: { roleId: string; active: boolean }) => {
+      if (!oystehrZambda) throw new Error('zambda client not ready');
+      return setPractitionerRoleActive(oystehrZambda, { roleId, active });
+    },
+    // Optimistically flip the row's active state in the cache so the Switch
+    // updates the instant the user clicks. If the request fails, onError
+    // rolls back to the snapshot we take here.
+    onMutate: async ({ roleId, active }) => {
+      await queryClient.cancelQueries({ queryKey: listQueryKey });
+      const snapshot = queryClient.getQueryData<ListQueryData>(listQueryKey);
+      if (snapshot) {
+        queryClient.setQueryData<ListQueryData>(listQueryKey, {
+          ...snapshot,
+          rows: snapshot.rows.map((r) => (r.role.id === roleId ? { ...r, active } : r)),
+        });
+      }
+      return { snapshot };
+    },
+    onSuccess: (_data, variables) => {
+      enqueueSnackbar(variables.active ? 'Schedule activated.' : 'Schedule deactivated.', { variant: 'success' });
+      setPendingDeactivate(null);
+    },
+    onError: (err, variables, context) => {
+      console.error(err);
+      if (context?.snapshot) {
+        queryClient.setQueryData(listQueryKey, context.snapshot);
+      }
+      // Surface the zambda's own message when present (e.g. the
+      // PRACTITIONER_SCHEDULE_CONFLICT_ERROR text the admin needs to see to
+      // reconcile against). Fall back to a generic message otherwise.
+      const fallback = variables.active ? 'Failed to activate schedule.' : 'Failed to deactivate schedule.';
+      const message =
+        err && typeof err === 'object' && 'message' in err && typeof (err as any).message === 'string'
+          ? (err as any).message
+          : fallback;
+      enqueueSnackbar(message, { variant: 'error' });
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: listQueryKey });
+    },
+  });
+
+  // Activation is cheap and fully reversible, so it fires straight from the
+  // switch. Deactivation goes through the confirmation dialog below — it's
+  // soft, but it pulls a schedule out of bookable circulation immediately and
+  // we want an explicit "are you sure" before that happens.
+  const handleToggleActive = (row: ScheduleRow, nextActive: boolean): void => {
+    if (!row.role.id) return;
+    if (nextActive) {
+      setActive.mutate({ roleId: row.role.id, active: true });
+    } else {
+      setPendingDeactivate(row);
+    }
+  };
 
   if (isLoading || !data) {
     return (
@@ -213,7 +289,6 @@ export default function PractitionerRoleList({
 
   const rows = data.rows;
   const activeLocations = data.activeLocations;
-  const isMulti = rows.length >= 2;
   const headerLabel = rows.length === 1 ? 'Schedule' : 'Schedules';
 
   // Single-Location org + zero schedules → one-click setup. The admin doesn't
@@ -232,7 +307,9 @@ export default function PractitionerRoleList({
         allCategories: true,
       });
     } else {
-      setDialogOpen(true);
+      // Multiple locations to choose from → the full create-schedule page,
+      // pre-filled with this provider.
+      navigate(`/admin/schedule/add?provider=${practitionerId}`);
     }
   };
 
@@ -247,7 +324,7 @@ export default function PractitionerRoleList({
             Set up scheduling
           </Button>
         ) : (
-          <Button variant="outlined" onClick={() => setDialogOpen(true)}>
+          <Button variant="outlined" onClick={() => navigate(`/admin/schedule/add?provider=${practitionerId}`)}>
             Add another schedule
           </Button>
         )}
@@ -259,60 +336,57 @@ export default function PractitionerRoleList({
         </Typography>
       )}
 
-      {rows.length === 1 && (
-        <Box sx={{ mt: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <Box>
-            <Typography variant="body1">{rows[0].displayLabel}</Typography>
-            <Typography variant="body2" color="text.secondary">
-              Services: {rows[0].categoryLabels.join(', ')}
-            </Typography>
-          </Box>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            {rows[0].schedule?.id ? (
-              <Link to={`/admin/schedule/id/${rows[0].schedule.id}`}>
-                <Button variant="contained">Edit</Button>
-              </Link>
-            ) : (
-              <Typography variant="caption" color="error">
-                Schedule resource missing
-              </Typography>
-            )}
-            <Tooltip title="Delete schedule">
-              <IconButton size="small" onClick={() => setPendingDelete(rows[0])}>
-                <DeleteOutlineIcon fontSize="small" />
-              </IconButton>
-            </Tooltip>
-          </Box>
-        </Box>
-      )}
-
-      {isMulti && (
+      {rows.length > 0 && (
         <Table size="small" sx={{ mt: 2 }}>
           <TableHead>
             <TableRow>
               <TableCell sx={{ fontWeight: 'bold' }}>Schedule</TableCell>
               <TableCell sx={{ fontWeight: 'bold' }}>Services</TableCell>
-              <TableCell sx={{ fontWeight: 'bold', width: '20%' }} />
+              <TableCell sx={{ fontWeight: 'bold', width: '12%' }}>Active</TableCell>
+              <TableCell sx={{ fontWeight: 'bold', width: '12%' }} align="right">
+                Actions
+              </TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
             {rows.map((row) => (
-              <TableRow key={row.role.id}>
-                <TableCell>{row.displayLabel}</TableCell>
-                <TableCell>{row.categoryLabels.join(', ')}</TableCell>
-                <TableCell>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, justifyContent: 'flex-end' }}>
-                    {row.schedule?.id ? (
-                      <Link to={`/admin/schedule/id/${row.schedule.id}`}>Edit</Link>
-                    ) : (
-                      <em>missing</em>
-                    )}
-                    <Tooltip title="Delete schedule">
-                      <IconButton size="small" onClick={() => setPendingDelete(row)}>
-                        <DeleteOutlineIcon fontSize="small" />
+              <TableRow key={row.role.id} sx={{ opacity: row.active ? 1 : 0.6 }}>
+                <TableCell sx={{ color: row.active ? 'text.primary' : 'text.disabled' }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                    {row.displayLabel}
+                    <Tooltip title="Rename schedule">
+                      <IconButton
+                        size="small"
+                        onClick={() => {
+                          setRenameRow(row);
+                          setRenameValue(row.displayLabel);
+                        }}
+                      >
+                        <DriveFileRenameOutlineIcon fontSize="small" />
                       </IconButton>
                     </Tooltip>
                   </Box>
+                </TableCell>
+                <TableCell>{row.categoryLabels.join(', ')}</TableCell>
+                <TableCell>
+                  <ScheduleStatusToggle
+                    row={row}
+                    onToggle={handleToggleActive}
+                    disabled={setActive.isPending && setActive.variables?.roleId === row.role.id}
+                  />
+                </TableCell>
+                <TableCell align="right">
+                  {row.schedule?.id ? (
+                    <Tooltip title="Edit schedule">
+                      <IconButton size="small" component={Link} to={`/admin/schedule/id/${row.schedule.id}`}>
+                        <EditOutlinedIcon fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                  ) : (
+                    <Typography variant="caption" color="error">
+                      missing
+                    </Typography>
+                  )}
                 </TableCell>
               </TableRow>
             ))}
@@ -320,46 +394,65 @@ export default function PractitionerRoleList({
         </Table>
       )}
 
-      <AddScheduleDialog
-        open={dialogOpen}
-        onClose={() => setDialogOpen(false)}
-        onCreate={(loc, categoryIds, tz, name, allCategories) =>
-          createRole.mutate({
-            locationId: loc,
-            categoryHealthcareServiceIds: categoryIds,
-            timezone: tz,
-            displayName: name,
-            allCategories,
-          })
-        }
-        isSubmitting={createRole.isPending}
-        practitionerName={practitionerName}
-      />
+      <Dialog open={!!renameRow} onClose={() => !renameRole.isPending && setRenameRow(null)} fullWidth maxWidth="xs">
+        <DialogTitle>Rename schedule</DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            fullWidth
+            label="Name"
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            sx={{ mt: 1 }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && renameValue.trim() && renameRow?.role.id) {
+                renameRole.mutate({ roleId: renameRow.role.id, displayName: renameValue.trim() });
+              }
+            }}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setRenameRow(null)} disabled={renameRole.isPending}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            disabled={renameRole.isPending || !renameValue.trim()}
+            onClick={() =>
+              renameRow?.role.id && renameRole.mutate({ roleId: renameRow.role.id, displayName: renameValue.trim() })
+            }
+          >
+            Save
+          </Button>
+        </DialogActions>
+      </Dialog>
 
-      <Dialog open={!!pendingDelete} onClose={() => !deleteRole.isPending && setPendingDelete(null)}>
-        <DialogTitle>Delete schedule?</DialogTitle>
+      <Dialog open={!!pendingDeactivate} onClose={() => !setActive.isPending && setPendingDeactivate(null)}>
+        <DialogTitle>Deactivate schedule?</DialogTitle>
         <DialogContent>
           <DialogContentText>
             This will deactivate{' '}
             <strong>
-              {pendingDelete?.location?.name || 'this schedule'}
-              {pendingDelete?.categoryLabels.length ? ` (${pendingDelete.categoryLabels.join(', ')})` : ''}
+              {pendingDeactivate?.location?.name || 'this schedule'}
+              {pendingDeactivate?.categoryLabels.length ? ` (${pendingDeactivate.categoryLabels.join(', ')})` : ''}
             </strong>
             . Past appointments and encounters that referenced this schedule are preserved; it just stops appearing as a
-            bookable option going forward.
+            bookable option going forward. You can switch it back on at any time.
           </DialogContentText>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setPendingDelete(null)} disabled={deleteRole.isPending}>
+          <Button onClick={() => setPendingDeactivate(null)} disabled={setActive.isPending}>
             Cancel
           </Button>
           <Button
             color="error"
             variant="contained"
-            disabled={deleteRole.isPending}
-            onClick={() => pendingDelete?.role.id && deleteRole.mutate(pendingDelete.role.id)}
+            disabled={setActive.isPending}
+            onClick={() =>
+              pendingDeactivate?.role.id && setActive.mutate({ roleId: pendingDeactivate.role.id, active: false })
+            }
           >
-            Delete
+            Deactivate
           </Button>
         </DialogActions>
       </Dialog>
@@ -367,178 +460,22 @@ export default function PractitionerRoleList({
   );
 }
 
-interface AddScheduleDialogProps {
-  open: boolean;
-  onClose: () => void;
-  onCreate: (
-    locationId: string,
-    categoryHealthcareServiceIds: string[],
-    timezone: string,
-    displayName: string,
-    allCategories: boolean
-  ) => void;
-  isSubmitting: boolean;
-  practitionerName: string;
+interface ScheduleStatusToggleProps {
+  row: ScheduleRow;
+  onToggle: (row: ScheduleRow, nextActive: boolean) => void;
+  disabled: boolean;
 }
 
-function AddScheduleDialog({
-  open,
-  onClose,
-  onCreate,
-  isSubmitting,
-  practitionerName,
-}: AddScheduleDialogProps): ReactElement {
-  const { oystehr, oystehrZambda } = useApiClients();
-  const [location, setLocation] = useState<Location | null>(null);
-  const [categoryHsIds, setCategoryHsIds] = useState<string[]>([]);
-  const [allCategories, setAllCategories] = useState<boolean>(false);
-  const [timezone, setTimezone] = useState<string>(TIMEZONES[0]);
-  const [scheduleName, setScheduleName] = useState<string>('');
-  // Track whether the admin has manually typed in the Name field. While
-  // false, Name auto-fills from the practitioner + selected location so the
-  // admin sees a sensible default. As soon as they type, the auto-fill
-  // backs off and respects their edit.
-  const [nameEditedManually, setNameEditedManually] = useState<boolean>(false);
-
-  // Reset fields when the dialog reopens so prior selections don't leak.
-  useEffect(() => {
-    if (open) {
-      setLocation(null);
-      setCategoryHsIds([]);
-      setAllCategories(false);
-      setTimezone(TIMEZONES[0]);
-      setScheduleName(`${practitionerName} Schedule`);
-      setNameEditedManually(false);
-    }
-  }, [open, practitionerName]);
-
-  // Live-update the default name as the location changes, until the admin
-  // edits the field manually.
-  useEffect(() => {
-    if (!open || nameEditedManually) return;
-    setScheduleName(location?.name ? `${practitionerName} @ ${location.name}` : `${practitionerName} Schedule`);
-  }, [location, practitionerName, open, nameEditedManually]);
-
-  const { data: locations } = useQuery({
-    queryKey: ['add-schedule-locations'],
-    queryFn: async (): Promise<Location[]> => {
-      if (!oystehr) return [];
-      const bundle = await oystehr.fhir.search<Location>({
-        resourceType: 'Location',
-        params: [{ name: 'status', value: 'active' }],
-      });
-      return bundle.unbundle();
-    },
-    enabled: open && !!oystehr,
-  });
-
-  const { data: categories } = useQuery({
-    queryKey: ['add-schedule-categories'],
-    queryFn: async () => {
-      if (!oystehrZambda) return { serviceCategories: [] };
-      try {
-        return await listServiceCategories(oystehrZambda);
-      } catch {
-        return { serviceCategories: [] };
-      }
-    },
-    enabled: open && !!oystehrZambda,
-  });
-
-  const categoryOptions = (categories?.serviceCategories || []).filter((sc: any) => sc.id);
-
-  const handleCreate = (): void => {
-    if (!location?.id) return;
-    // When the "Offers all services" toggle is on, send an empty
-    // categoryHealthcareServiceIds list — the toggle alone qualifies the role
-    // for every service, and there's no reason to also pin specific HS refs.
-    onCreate(location.id, allCategories ? [] : categoryHsIds, timezone, scheduleName, allCategories);
-  };
-
+function ScheduleStatusToggle({ row, onToggle, disabled }: ScheduleStatusToggleProps): ReactElement {
   return (
-    <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
-      <DialogTitle>Add another schedule</DialogTitle>
-      <DialogContent>
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 1 }}>
-          <Autocomplete
-            options={locations ?? []}
-            getOptionLabel={(opt) => opt.name || 'Unnamed'}
-            isOptionEqualToValue={(a, b) => a.id === b.id}
-            renderOption={(props, opt) => (
-              <li {...props} key={opt.id}>
-                {opt.name || 'Unnamed'}
-              </li>
-            )}
-            value={location}
-            onChange={(_e, v) => setLocation(v)}
-            renderInput={(params) => <TextField {...params} label="Location" required />}
-          />
-          <TextField
-            label="Name"
-            required
-            value={scheduleName}
-            onChange={(e) => {
-              setScheduleName(e.target.value);
-              setNameEditedManually(true);
-            }}
-          />
-          <FormControlLabel
-            control={<Checkbox checked={allCategories} onChange={(e) => setAllCategories(e.target.checked)} />}
-            label="Offers all services"
-            sx={{ alignSelf: 'flex-start' }}
-          />
-          <Autocomplete
-            multiple
-            disableCloseOnSelect
-            disabled={allCategories}
-            options={categoryOptions.map((c: any) => c.id as string)}
-            value={allCategories ? [] : categoryHsIds}
-            onChange={(_e, v) => setCategoryHsIds(v)}
-            getOptionLabel={(id) => {
-              const hit = categoryOptions.find((c: any) => c.id === id);
-              return hit ? `${hit.name} — ${hit.config.durationMinutes} min` : id;
-            }}
-            renderOption={(props, id) => {
-              const selected = categoryHsIds.includes(id);
-              const hit = categoryOptions.find((c: any) => c.id === id);
-              return (
-                <li {...props} key={id}>
-                  <Checkbox
-                    icon={<CheckBoxOutlineBlankIcon fontSize="small" />}
-                    checkedIcon={<CheckBoxIcon fontSize="small" />}
-                    style={{ marginRight: 8 }}
-                    checked={selected}
-                  />
-                  {hit ? `${hit.name} — ${hit.config.durationMinutes} min` : id}
-                </li>
-              );
-            }}
-            renderInput={(params) => (
-              <TextField
-                {...params}
-                label="Services"
-                helperText={
-                  allCategories
-                    ? 'Toggle off "Offers all services" to choose specific services'
-                    : 'Pick the specific services this role offers'
-                }
-              />
-            )}
-          />
-          <Autocomplete
-            options={TIMEZONES as unknown as string[]}
-            value={timezone}
-            onChange={(_e, v) => v && setTimezone(v)}
-            renderInput={(params) => <TextField {...params} label="Timezone" />}
-          />
-        </Box>
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" disabled={!location || !scheduleName.trim() || isSubmitting} onClick={handleCreate}>
-          Create
-        </Button>
-      </DialogActions>
-    </Dialog>
+    <Tooltip title={row.active ? 'Deactivate schedule' : 'Activate schedule'}>
+      <Switch
+        size="small"
+        checked={row.active}
+        onChange={(e) => onToggle(row, e.target.checked)}
+        disabled={disabled}
+        inputProps={{ 'aria-label': row.active ? 'Deactivate schedule' : 'Activate schedule' }}
+      />
+    </Tooltip>
   );
 }

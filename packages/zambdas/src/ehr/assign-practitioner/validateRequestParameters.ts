@@ -1,6 +1,8 @@
-import { AssignPractitionerInputValidated, MISSING_REQUEST_BODY, MISSING_REQUEST_SECRETS, NOT_AUTHORIZED } from 'utils';
+import { AssignPractitionerInputValidated } from 'utils/lib/types/api/assign-practitioner/assign-practitioner.types';
+import { MISSING_REQUEST_BODY, MISSING_REQUEST_SECRETS, NOT_AUTHORIZED } from 'utils/lib/types/errors';
 import { z } from 'zod';
-import { safeValidate, ZambdaInput } from '../../shared';
+import { ZambdaInput } from '../../shared/types/common';
+import { safeJsonParse, safeValidate } from '../../shared/validation';
 
 const CodingSchema = z
   .object({
@@ -31,7 +33,7 @@ export function validateRequestParameters(input: ZambdaInput): AssignPractitione
     throw MISSING_REQUEST_BODY;
   }
 
-  const parsedJSON = JSON.parse(input.body);
+  const parsedJSON = safeJsonParse(input.body);
 
   const { encounterId, practitionerId, userRole } = safeValidate(AssignPractitionerSchema, parsedJSON);
 

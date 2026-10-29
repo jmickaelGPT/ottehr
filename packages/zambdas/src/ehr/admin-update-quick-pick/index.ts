@@ -1,15 +1,11 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { ActivityDefinition } from 'fhir/r4b';
-import { INVALID_INPUT_ERROR, Secrets } from 'utils';
-import {
-  assertDefined,
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  validateJsonBody,
-  validateString,
-  wrapHandler,
-  ZambdaInput,
-} from '../../shared';
+import { Secrets } from 'utils/lib/secrets';
+import { INVALID_INPUT_ERROR } from 'utils/lib/types/errors';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { assertDefined, createClinicalOystehrClient, validateJsonBody, validateString } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import { CATEGORY_CONFIG_MAP } from '../admin-create-quick-pick';
 import { activityDefinitionToQuickPick, quickPickToActivityDefinition } from '../shared/quick-pick-helpers';
 
@@ -28,7 +24,7 @@ export const index = wrapHandler(
     const { secrets, quickPickId, quickPick, category } = validateInput(input);
 
     m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-    const oystehr = createOystehrClient(m2mToken, secrets);
+    const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
     const config = CATEGORY_CONFIG_MAP[category];
     if (config.validator) {

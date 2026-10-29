@@ -1,15 +1,13 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { ActivityDefinition } from 'fhir/r4b';
-import { QuickPickRemoveInput, Secrets, validateDefined } from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  validateJsonBody,
-  validateString,
-  wrapHandler,
-  ZambdaInput,
-} from '../../shared';
+import { validateDefined } from 'utils/lib/helpers/helpers';
+import { Secrets } from 'utils/lib/secrets';
+import { QuickPickRemoveInput } from 'utils/lib/types/api/quick-picks.types';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient, validateJsonBody, validateString } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import { QUICK_PICK_TAG_SYSTEM } from '../shared/quick-pick-helpers';
 
 interface QuickPickRemoveInputValidated extends QuickPickRemoveInput {
@@ -23,7 +21,7 @@ export const index = wrapHandler(
   async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
     const { secrets, quickPickId } = validateRequestParameters(input);
     m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-    const oystehr = createOystehrClient(m2mToken, secrets);
+    const oystehr = createClinicalOystehrClient(m2mToken, secrets);
     await removeQuickPick(quickPickId, oystehr);
     return {
       statusCode: 200,

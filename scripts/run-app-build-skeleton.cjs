@@ -1,5 +1,5 @@
 const { execFileSync, spawn } = require('node:child_process');
-const { cpSync, existsSync } = require('node:fs');
+const { cpSync, existsSync, readFileSync } = require('node:fs');
 const { dirname, join } = require('node:path');
 
 const copyRobots = process.argv.includes('--copy-robots');
@@ -51,6 +51,29 @@ function resolveVersion() {
 }
 
 const envValue = process.env.ENV || 'default';
+
+function validateAzureEnvironment() {
+  if (!envValue.startsWith('azure-')) {
+    return;
+  }
+
+  const envPath = join(process.cwd(), 'env', `.env.${envValue}`);
+  if (!existsSync(envPath)) {
+    console.error(`Azure environment file not found: ${envPath}`);
+    process.exit(1);
+  }
+
+  const placeholders = [...new Set(readFileSync(envPath, 'utf8').match(/__[A-Z0-9_]+__/g) || [])];
+  if (placeholders.length > 0) {
+    console.error(`Azure environment file contains unresolved placeholders: ${envPath}`);
+    for (const placeholder of placeholders) {
+      console.error(`  - ${placeholder}`);
+    }
+    process.exit(1);
+  }
+}
+
+validateAzureEnvironment();
 
 function withMaxOldSpaceSize(env, maxOldSpaceSizeMb) {
   const existingNodeOptions = env.NODE_OPTIONS || '';

@@ -1,39 +1,36 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { ActivityDefinition, ServiceRequest } from 'fhir/r4b';
+import { repeatTestErrorMessage } from 'utils/lib/helpers/in-house-labs';
+import { Secrets } from 'utils/lib/secrets';
 import {
-  APIError,
-  CreateInHouseLabEnconuterResource,
-  CreateInHouseLabOrderParameters,
-  IN_HOUSE_LAB_ERROR,
   IN_HOUSE_LAB_LATEST_TAG_DEFINITION,
   IN_HOUSE_TEST_CODE_SYSTEM,
-  isApiError,
   REFLEX_ARTIFACT_DISPLAY,
-  repeatTestErrorMessage,
-  Secrets,
   SERVICE_REQUEST_REFLEX_TRIGGERED_TAG_CODES,
   SERVICE_REQUEST_REFLEX_TRIGGERED_TAG_SYSTEM,
-} from 'utils';
+} from 'utils/lib/types/data/in-house/in-house.constants';
 import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  parseCreatedResourcesBundle,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../../shared';
+  CreateInHouseLabEnconuterResource,
+  CreateInHouseLabOrderParameters,
+} from 'utils/lib/types/data/in-house/in-house.types';
+import { APIError, IN_HOUSE_LAB_ERROR, isApiError } from 'utils/lib/types/errors';
+import { checkOrCreateM2MClientToken } from '../../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../../shared/helpers';
 import {
   makeRequestsForCreateInHouseLabs,
   TestItemRequestData,
   TestItemResources,
 } from '../../../../shared/in-house-lab/build-order';
 import { gatherInHouseLabOrderContext } from '../../../../shared/in-house-lab/gather-context';
+import { parseCreatedResourcesBundle } from '../../../../shared/resources.helpers';
+import { wrapHandler } from '../../../../shared/sentry';
+import { ZambdaInput } from '../../../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 let m2mToken: string;
 const ZAMBDA_NAME = 'create-in-house-lab-order';
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
   try {
-    console.log(`create-in-house-lab-order started, input: ${JSON.stringify(input)}`);
     let secrets = input.secrets;
     let validatedParameters: CreateInHouseLabOrderParameters & { secrets: Secrets | null; userToken: string };
 
@@ -53,7 +50,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     console.log('validateRequestParameters success');
 
     m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-    const oystehr = createOystehrClient(m2mToken, secrets);
+    const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
     const { encounterId, testItems, diagnosesAll, diagnosesNew, notes } = validatedParameters;
     console.log('This is testItems in create-in-house-lab-order', JSON.stringify(testItems, undefined, 2));
@@ -257,7 +254,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     }
 
     // save chart data requires user token
-    const oystehrCurrentUser = createOystehrClient(validatedParameters.userToken, validatedParameters.secrets);
+    const oystehrCurrentUser = createClinicalOystehrClient(validatedParameters.userToken, validatedParameters.secrets);
     const saveChartDataResponse = diagnosesNew.length
       ? await oystehrCurrentUser.zambda.execute({
           id: 'save-chart-data',

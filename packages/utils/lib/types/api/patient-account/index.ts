@@ -1,5 +1,6 @@
 import { Organization, Practitioner, QuestionnaireResponse } from 'fhir/r4b';
-import { InsuranceCheckStatusWithDate, PatientAccountAndCoverageResources } from '../../data';
+import { PatientAccountAndCoverageResources } from '../../data/account';
+import { InsuranceCheckStatusWithDate } from '../../data/telemed/eligibility.types';
 
 export interface GetPatientAccountZambdaInput {
   patientId: string;
@@ -22,6 +23,8 @@ export interface CoverageCheckCoverageDetails {
 
 export type CoverageCheckWithDetails = InsuranceCheckStatusWithDate & CoverageCheckCoverageDetails;
 
+export const PATIENT_ACCOUNT_ELIGIBILITY_CHECK_COUNT = 10;
+
 export interface PatientAccountResponse extends PatientAccountAndCoverageResources {
   primaryCarePhysician?: Practitioner;
   coverageChecks: CoverageCheckWithDetails[];
@@ -30,6 +33,13 @@ export interface PatientAccountResponse extends PatientAccountAndCoverageResourc
 
 export interface UpdatePatientAccountInput {
   questionnaireResponse: QuestionnaireResponse;
+  // Opt into validating only the fields present in the submission rather than
+  // each submitted section in full. Use for single-field edits (e.g. the EHR
+  // Medicaid toggle) where enforcing required siblings the caller never touched
+  // would wrongly reject the update. Leave unset for section saves that must be
+  // validated as an atomic unit — insurance/coverage sections in particular
+  // can't be safely processed field-by-field.
+  onlyValidateProvidedFields?: boolean;
 }
 
 export interface UpdatePatientAccountResponse {

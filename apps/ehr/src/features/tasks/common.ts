@@ -1,20 +1,16 @@
 import { Patient } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import {
-  DOB_DATE_FORMAT,
-  ERX_TASK,
-  getFullName,
-  IN_HOUSE_LAB_TASK,
-  LAB_ORDER_TASK,
-  MANUAL_TASK,
-  RADIOLOGY_TASK,
-} from 'utils';
+import { getFullName } from 'utils/lib/fhir/patient';
+import { IN_HOUSE_LAB_TASK } from 'utils/lib/types/data/in-house/in-house.constants';
+import { LAB_ORDER_TASK } from 'utils/lib/types/data/labs/labs.constants';
+import { ERX_TASK, FAX_TASK, MANUAL_TASK, RADIOLOGY_TASK } from 'utils/lib/types/data/tasks/types';
+import { DOB_DATE_FORMAT } from 'utils/lib/utils/date';
 import { usePatientLabOrders } from '../external-labs/components/labs-orders/usePatientLabOrders';
 import { useInHouseLabOrders } from '../in-house-labs/components/orders/useInHouseLabOrders';
 import { useGetNursingOrders } from '../nursing-orders/components/orders/useNursingOrders';
 import { usePatientRadiologyOrders } from '../radiology/components/usePatientRadiologyOrders';
+import { useChartData } from '../visits/shared/hooks/useChartData';
 import { useGetMedicationOrders } from '../visits/shared/stores/appointment/appointment.queries';
-import { useChartData } from '../visits/shared/stores/appointment/appointment.store';
 
 export const TASK_CATEGORY_LABEL: Record<string, string> = {
   [LAB_ORDER_TASK.category]: 'External Lab',
@@ -32,6 +28,7 @@ export const TASK_CATEGORY_LABEL: Record<string, string> = {
   [MANUAL_TASK.category.charting]: 'Charting',
   [MANUAL_TASK.category.coding]: 'Coding',
   [MANUAL_TASK.category.billing]: 'Billing',
+  [FAX_TASK.category]: 'Fax',
   [MANUAL_TASK.category.other]: 'Other',
 };
 

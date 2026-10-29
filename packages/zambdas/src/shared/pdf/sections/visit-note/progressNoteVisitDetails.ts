@@ -1,19 +1,17 @@
 import { Encounter } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import {
-  formatDateTimeToZone,
-  formatFhirEncounterToPatientFollowupDetails,
-  getAdmitterPractitionerId,
-  getAppointmentServiceCategoryAbbreviation,
-  getAttendingPractitionerId,
-  getProviderNameWithProfession,
-  getQuestionnaireResponseByLinkId,
-  isAnnotationFollowupEncounter,
-  isInPersonAppointment,
-  Timezone,
-} from 'utils';
+import { SERVICE_CATEGORY_SYSTEM } from 'utils/lib/fhir/constants';
+import { formatFhirEncounterToPatientFollowupDetails, isAnnotationFollowupEncounter } from 'utils/lib/fhir/encounter';
+import { getCoding, getProviderNameWithProfession } from 'utils/lib/fhir/helpers';
+import { isInPersonAppointment } from 'utils/lib/fhir/moduleIdentification';
+import { getAdmitterPractitionerId, getAttendingPractitionerId } from 'utils/lib/fhir/practitioners';
+import { resolveServiceCategoryAbbreviation } from 'utils/lib/helpers/helpers';
+import { getQuestionnaireResponseByLinkId } from 'utils/lib/helpers/paperwork/paperwork-response';
+import { Timezone } from 'utils/lib/types/common';
+import { formatDateTimeToZone } from 'utils/lib/utils/date';
 import { getPatientLastFirstName } from '../../../patients';
-import { drawFieldLine, drawRegularText } from '../../helpers/render';
+import { drawFieldLine } from '../../helpers/render/drawFieldLine';
+import { drawRegularText } from '../../helpers/render/regularText';
 import { createConfiguredSection, DataComposer } from '../../pdf-common';
 import { PdfSection, ProgressNoteVisitDataInput, VisitDetailsForProgressNote } from '../../types';
 import { getBookingTypeForPdf, getVisitTypeForPdf } from '../visitInfo';
@@ -35,6 +33,7 @@ function getStatusRelatedDates(
 export const composeProgressNoteVisitDetails: DataComposer<ProgressNoteVisitDataInput, VisitDetailsForProgressNote> = ({
   allChartData,
   appointmentPackage,
+  serviceCategories,
 }) => {
   const { additionalChartData } = allChartData;
   const { patient, encounter, mainEncounter, appointment, location, questionnaireResponse, practitioners, timezone } =
@@ -67,7 +66,11 @@ export const composeProgressNoteVisitDetails: DataComposer<ProgressNoteVisitData
   } else {
     const { dateOfService, signedOnDate } = getStatusRelatedDates(mainEncounter ?? encounter, timezone);
     const type = getVisitTypeForPdf(appointment);
-    const serviceCategory = getAppointmentServiceCategoryAbbreviation(appointment);
+    const serviceCategoryCoding = getCoding(appointment?.serviceCategory, SERVICE_CATEGORY_SYSTEM);
+    const serviceCategory = resolveServiceCategoryAbbreviation(
+      serviceCategoryCoding?.code ?? serviceCategoryCoding?.display,
+      serviceCategories
+    );
     const bookingType = getBookingTypeForPdf(appointment);
     const reasonForVisit = appointment?.description ?? '';
     let providerName: string;
@@ -146,7 +149,7 @@ export const createProgressNoteVisitDetailsSection = <
           drawFieldLine(client, styles, { label: 'Type & Service Category', value: typeAndServiceCategory });
         }
         drawFieldLine(client, styles, { label: 'Date of Service', value: data.dateOfService });
-        drawFieldLine(client, styles, { label: 'Reason for Visit', value: data.reasonForVisit });
+        drawFieldLine(client, styles, { label: "Reason for today's visit", value: data.reasonForVisit });
         drawFieldLine(client, styles, { label: 'Provider', value: data.provider });
         if (data.intakePerson) {
           drawFieldLine(client, styles, { label: 'Intake completed by', value: data.intakePerson });

@@ -1,10 +1,12 @@
-import { DeleteChartDataRequest } from 'utils';
+import { DeleteChartDataRequest } from 'utils/lib/types/api/chart-data/delete-chart-data.types';
 import { z } from 'zod';
-import { safeValidate, ZambdaInput } from '../../shared';
+import { ZambdaInput } from '../../shared/types/common';
+import { safeJsonParse, safeValidate } from '../../shared/validation';
 
 const DeleteChartDataBodySchema = z
   .object({
     encounterId: z.string(),
+    cleanupProcedureDiagnoses: z.boolean().optional(),
   })
   .passthrough();
 
@@ -13,7 +15,7 @@ export function validateRequestParameters(input: ZambdaInput): DeleteChartDataRe
     throw new Error('No request body provided');
   }
 
-  const data = safeValidate(DeleteChartDataBodySchema, JSON.parse(input.body));
+  const data = safeValidate(DeleteChartDataBodySchema, safeJsonParse(input.body));
 
   return {
     ...(data as DeleteChartDataRequest),

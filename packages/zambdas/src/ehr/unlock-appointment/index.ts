@@ -1,16 +1,24 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { Appointment, Coding } from 'fhir/r4b';
+import { Operation } from 'fast-json-patch';
+import { Appointment, Coding, Encounter } from 'fhir/r4b';
+import { userMe } from 'utils/lib/auth/user-me.helper';
+import { isFollowupEncounter } from 'utils/lib/fhir/encounter';
 import {
   createCriticalUpdateTag,
   getAppointmentLockMetaTagOperations,
-  getPatchBinary,
+  getEncounterLockMetaTagOperations,
+} from 'utils/lib/fhir/helpers';
+import { getPatchBinary } from 'utils/lib/fhir/resourcePatch';
+import {
   UnlockAppointmentZambdaInputValidated,
   UnlockAppointmentZambdaOutput,
-  userMe,
-} from 'utils';
-import { checkOrCreateM2MClientToken, wrapHandler, ZambdaInput } from '../../shared';
-import { createOystehrClient } from '../../shared/helpers';
+} from 'utils/lib/types/api/unlock-appointment/unlock-appointment.types';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { getSignatureProvenanceDeleteRequests } from '../../shared/deleteSignatureProvenances';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 const ZAMBDA_NAME = 'unlock-appointment';
@@ -22,7 +30,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, validatedParameters.secrets);
 
-  const oystehr = createOystehrClient(m2mToken, validatedParameters.secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, validatedParameters.secrets);
   console.log('Created Oystehr client');
 
   const response = await performEffect(oystehr, validatedParameters);
@@ -36,7 +44,49 @@ export const performEffect = async (
   oystehr: Oystehr,
   params: UnlockAppointmentZambdaInputValidated
 ): Promise<UnlockAppointmentZambdaOutput> => {
-  const { appointmentId, userToken, secrets } = params;
+  const { appointmentId, encounterId, userToken, secrets } = params;
+
+  // Get the current user for tracking who unlocked the chart
+  const user = await userMe(userToken, secrets);
+  const unlockedByText = `Staff ${user?.email || `(${user?.id})`}`;
+
+  // Annotation follow-ups have no own Appointment, so their lock lives on the Encounter.
+  if (encounterId) {
+    const encounter = await oystehr.fhir.get<Encounter>({
+      resourceType: 'Encounter',
+      id: encounterId,
+    });
+
+    if (!encounter) {
+      throw new Error(`Encounter with ID ${encounterId} not found`);
+    }
+
+    // Generate unlock operation (removes ENCOUNTER_LOCKED tag and replaces /meta/tag array)
+    const [unlockOp] = getEncounterLockMetaTagOperations(encounter, false);
+    applyCriticalUpdateTag(unlockOp, unlockedByText);
+
+    const patchRequest = getPatchBinary({
+      resourceType: 'Encounter',
+      resourceId: encounterId,
+      patchOperations: [unlockOp],
+    });
+
+    // Unlocking voids the recorded signature, so drop its Provenances; a re-sign then records a
+    // fresh signing time instead of surfacing the stale one on the regenerated visit note.
+    const provenanceDeleteRequests = await getSignatureProvenanceDeleteRequests(oystehr, [encounterId]);
+
+    await oystehr.fhir.batch({
+      requests: [patchRequest, ...provenanceDeleteRequests],
+    });
+
+    return {
+      message: 'Follow-up unlocked successfully.',
+    };
+  }
+
+  if (!appointmentId) {
+    throw new Error('Either appointmentId or encounterId is required');
+  }
 
   const appointment = await oystehr.fhir.get<Appointment>({
     resourceType: 'Appointment',
@@ -47,27 +97,9 @@ export const performEffect = async (
     throw new Error(`Appointment with ID ${appointmentId} not found`);
   }
 
-  // Get the current user for tracking who unlocked the appointment
-  const user = await userMe(userToken, secrets);
-
   // Generate unlock operation (removes APPOINTMENT_LOCKED tag and replaces /meta/tag array)
   const [unlockOp] = getAppointmentLockMetaTagOperations(appointment, false);
-
-  if (!('value' in unlockOp) || !Array.isArray(unlockOp.value)) {
-    throw new Error('Unexpected unlock operation structure');
-  }
-
-  const tagsAfterUnlock = unlockOp.value as Coding[];
-
-  // Create and add/update critical update tag
-  const criticalUpdateTag = createCriticalUpdateTag(`Staff ${user?.email || `(${user?.id})`}`);
-  const criticalTagIndex = tagsAfterUnlock.findIndex((tag) => tag.system === criticalUpdateTag.system);
-
-  if (criticalTagIndex >= 0) {
-    tagsAfterUnlock[criticalTagIndex] = criticalUpdateTag;
-  } else {
-    tagsAfterUnlock.push(criticalUpdateTag);
-  }
+  applyCriticalUpdateTag(unlockOp, unlockedByText);
 
   // Execute patch with single operation that unlocks and updates critical tag
   const patchRequest = getPatchBinary({
@@ -76,12 +108,52 @@ export const performEffect = async (
     patchOperations: [unlockOp],
   });
 
+  // Unlocking voids the recorded signature, so drop its Provenances (on the visit encounter, not any
+  // follow-up encounters); a re-sign then records a fresh signing time instead of surfacing the stale
+  // one on the regenerated visit note.
+  const encounters = (
+    await oystehr.fhir.search<Encounter>({
+      resourceType: 'Encounter',
+      params: [{ name: 'appointment', value: `Appointment/${appointmentId}` }],
+    })
+  ).unbundle();
+  const visitEncounterIds = encounters.filter((enc) => enc.id && !isFollowupEncounter(enc)).map((enc) => enc.id!);
+  const provenanceDeleteRequests = await getSignatureProvenanceDeleteRequests(oystehr, visitEncounterIds);
+
   // Execute the patch
   await oystehr.fhir.batch({
-    requests: [patchRequest],
+    requests: [patchRequest, ...provenanceDeleteRequests],
   });
 
   return {
     message: 'Appointment unlocked successfully.',
   };
+};
+
+// Mutates the unlock operation in place to add/update a critical-update tag recording who unlocked the chart.
+// Depending on the resource's existing shape, the unlock op may replace /meta/tag, add /meta/tag, or add /meta.
+const applyCriticalUpdateTag = (unlockOp: Operation, updatedByText: string): void => {
+  if (!('value' in unlockOp)) {
+    throw new Error('Unexpected unlock operation structure');
+  }
+
+  const value: any = unlockOp.value;
+  let tagsAfterUnlock: Coding[] | undefined;
+
+  if (Array.isArray(value)) {
+    tagsAfterUnlock = value as Coding[];
+  } else if (value && typeof value === 'object' && Array.isArray(value.tag)) {
+    tagsAfterUnlock = value.tag as Coding[];
+  } else {
+    throw new Error('Unexpected unlock operation structure');
+  }
+
+  const criticalUpdateTag = createCriticalUpdateTag(updatedByText);
+  const criticalTagIndex = tagsAfterUnlock.findIndex((tag) => tag.system === criticalUpdateTag.system);
+
+  if (criticalTagIndex >= 0) {
+    tagsAfterUnlock[criticalTagIndex] = criticalUpdateTag;
+  } else {
+    tagsAfterUnlock.push(criticalUpdateTag);
+  }
 };

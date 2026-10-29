@@ -1,16 +1,25 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Basic, Claim } from 'fhir/r4b';
-import { FHIR_RESOURCE_NOT_FOUND, getPatchBinary, INVALID_INPUT_ERROR } from 'utils';
-import { checkOrCreateM2MClientToken, fetchAllPages, wrapHandler, ZambdaInput } from '../../shared';
-import { CLAIM_TAG_SYSTEM, createBillingClient, TAG_CODE_SYSTEM, TAG_DESCRIPTION_URL } from '../shared';
-import { SaveBillingTagParams, validateRequestParameters } from './validateRequestParameters';
+import { getPatchBinary } from 'utils/lib/fhir/resourcePatch';
+import { CLAIM_TAG_SYSTEM } from 'utils/lib/types/data/billing/billing.constants';
+import { SaveBillingTagInputSchema } from 'utils/lib/types/data/billing/billing.schemas';
+import { collidingSystemManagedTagName } from 'utils/lib/types/data/billing/system-tags';
+import { INVALID_INPUT_ERROR } from 'utils/lib/types/errors';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { fetchAllPages } from '../../shared/fhir';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { ValidatedZambdaInput, validateWithSchema } from '../../shared/validation';
+import { createBillingClient, fetchById, isSystemTag, TAG_CODE_SYSTEM, TAG_DESCRIPTION_URL } from '../shared';
+
+export type SaveBillingTagParams = ValidatedZambdaInput<typeof SaveBillingTagInputSchema>;
 
 let m2mToken: string;
 const ZAMBDA_NAME = 'save-billing-tag';
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  const params = validateRequestParameters(input);
+  const params = validateWithSchema(SaveBillingTagInputSchema, input);
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, params.secrets);
   const oystehr = createBillingClient(m2mToken, params.secrets);
 
@@ -19,16 +28,20 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   return { statusCode: 200, body: JSON.stringify(response) };
 });
 
-// When updating, load the tag being edited and confirm it exists. No-op for create.
-async function complexValidation(oystehr: Oystehr, params: SaveBillingTagParams): Promise<Basic | undefined> {
+// System-managed tag names are reserved (case-insensitively, so a "hold" can't masquerade as
+// Hold): a tag can neither be created with one nor renamed onto one. When updating, additionally
+// load the tag being edited and confirm it exists and isn't itself system-managed.
+export async function complexValidation(oystehr: Oystehr, params: SaveBillingTagParams): Promise<Basic | undefined> {
+  const collision = collidingSystemManagedTagName(params.name);
+  if (collision) {
+    throw INVALID_INPUT_ERROR(`"${collision}" is a system-managed tag name — pick a different name`);
+  }
   if (!params.tagId) return undefined;
-  const bundle = await oystehr.fhir.search<Basic>({
-    resourceType: 'Basic',
-    params: [{ name: '_id', value: params.tagId }],
-  });
-  const existing = bundle.unbundle()[0];
-  if (!existing) throw FHIR_RESOURCE_NOT_FOUND('Basic');
-  return existing;
+  const tag = await fetchById<Basic>(oystehr, 'Basic', params.tagId);
+  if (isSystemTag(tag)) {
+    throw INVALID_INPUT_ERROR('Cannot edit system-level tags');
+  }
+  return tag;
 }
 
 async function performEffect(

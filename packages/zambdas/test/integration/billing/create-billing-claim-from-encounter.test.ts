@@ -1,5 +1,5 @@
 import Oystehr from '@oystehr/sdk';
-import { M2MClientMockType } from 'utils';
+import { M2MClientMockType } from 'utils/lib/auth/user-me.helper';
 import { setupIntegrationTest } from '../../helpers/integration-test-seed-data-setup';
 
 describe('create-billing-claim-from-encounter', () => {
@@ -23,7 +23,7 @@ describe('create-billing-claim-from-encounter', () => {
   describe('validation', () => {
     it('throws validation error on no encounterId parameter', async () => {
       await expect(async () => oystehr.zambda.execute({ id: 'create-billing-claim-from-encounter' })).rejects.toThrow(
-        'encounterId: Required'
+        'Validation error: Required at "encounterId"'
       );
     });
   });

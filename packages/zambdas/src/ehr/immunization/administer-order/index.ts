@@ -12,21 +12,16 @@ import {
   RelatedPerson,
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
+import { codeableConcept, createReference } from 'utils/lib/fhir/helpers';
 import {
-  AdministerImmunizationOrderRequest,
-  CODE_SYSTEM_CPT,
-  CODE_SYSTEM_NDC,
-  codeableConcept,
-  createReference,
-  CreateUpdateImmunizationOrderResponse,
-  CVX_CODE_SYSTEM_URL,
-  EMERGENCY_CONTACT_RELATIONSHIPS,
-  getFullName,
   getMedicationName,
-  ImmunizationEmergencyContact,
-  INVALID_INPUT_ERROR,
   mapFhirToOrderStatus,
   mapOrderStatusToFhir,
+} from 'utils/lib/fhir/medication-administration';
+import { getFullName } from 'utils/lib/fhir/patient';
+import { CODE_SYSTEM_CPT, CODE_SYSTEM_NDC } from 'utils/lib/helpers/rcm/constants';
+import {
+  CVX_CODE_SYSTEM_URL,
   MEDICATION_ADMINISTRATION_PERFORMER_TYPE_SYSTEM,
   MEDICATION_ADMINISTRATION_REASON_CODE,
   MEDICATION_DISPENSABLE_DRUG_ID,
@@ -34,16 +29,19 @@ import {
   PRACTITIONER_ADMINISTERED_MEDICATION_CODE,
   VACCINE_ADMINISTRATION_CODES_EXTENSION_URL,
   VACCINE_ADMINISTRATION_VIS_DATE_EXTENSION_URL,
-} from 'utils';
+} from 'utils/lib/types/api/medication-administration.constants';
+import { EMERGENCY_CONTACT_RELATIONSHIPS } from 'utils/lib/types/api/medication-administration.types';
 import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  fillMeta,
-  getMyPractitionerId,
-  validateJsonBody,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+  AdministerImmunizationOrderRequest,
+  CreateUpdateImmunizationOrderResponse,
+  ImmunizationEmergencyContact,
+} from 'utils/lib/types/data/immunization/types';
+import { INVALID_INPUT_ERROR } from 'utils/lib/types/errors';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient, fillMeta, validateJsonBody } from '../../../shared/helpers';
+import { getMyPractitionerId } from '../../../shared/practitioners';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import {
   CONTAINED_EMERGENCY_CONTACT_ID,
   CONTAINED_MANUFACTURER_ORG_ID,
@@ -60,7 +58,7 @@ const ZAMBDA_NAME = 'administer-immunization-order';
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
   const validatedParameters = validateRequestParameters(input);
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, validatedParameters.secrets);
-  const oystehr = createOystehrClient(m2mToken, validatedParameters.secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, validatedParameters.secrets);
   const userToken = input.headers.Authorization.replace('Bearer ', '');
   const userPractitionerId = await getMyPractitionerId(userToken, validatedParameters.secrets);
   const userPractitioner = await oystehr.fhir.get<Practitioner>({
@@ -85,7 +83,7 @@ async function administerImmunizationOrder(
     id: orderId,
   });
 
-  const allowedStatuses = ['in-progress', 'completed', 'stopped', 'on-hold', 'not-done'];
+  const allowedStatuses = ['in-progress', 'completed', 'on-hold', 'not-done'];
   if (!allowedStatuses.includes(medicationAdministration.status)) {
     const currentStatus = mapFhirToOrderStatus(medicationAdministration);
     throw new Error(`Can't administer order in "${currentStatus}" status`);
@@ -121,14 +119,19 @@ async function administerImmunizationOrder(
   });
 
   if (administrationDetails.emergencyContact) {
-    medicationAdministration.contained?.push(
-      createEmergencyContactRelatedPerson(medicationAdministration.subject, administrationDetails.emergencyContact)
+    const emergencyContactRelatedPerson = createEmergencyContactRelatedPerson(
+      medicationAdministration.subject,
+      administrationDetails.emergencyContact
     );
-    medicationAdministration.supportingInformation = [
-      {
-        reference: '#' + CONTAINED_EMERGENCY_CONTACT_ID,
-      },
-    ];
+
+    if (emergencyContactRelatedPerson) {
+      medicationAdministration.contained?.push(emergencyContactRelatedPerson);
+      medicationAdministration.supportingInformation = [
+        {
+          reference: '#' + CONTAINED_EMERGENCY_CONTACT_ID,
+        },
+      ];
+    }
   }
 
   const medication = getContainedMedication(medicationAdministration);
@@ -233,6 +236,7 @@ async function administerImmunizationOrder(
               resourceType: 'Procedure',
               subject: { reference: `Patient/${patientId}` },
               encounter: { reference: `Encounter/${encounterId}` },
+              partOf: [createReference(medicationAdministration)],
               status: 'completed',
               code: {
                 coding: [{ code: cptCode.code, display: cptCode.display, system: 'http://www.ama-assn.org/go/cpt' }],
@@ -284,6 +288,31 @@ export function validateRequestParameters(
   }
 
   if (missingFields.length > 0) throw new Error(`Missing required fields [${missingFields.join(', ')}]`);
+
+  // Emergency contact is optional as a whole, but if any field is provided - all three are required.
+  // A partially-filled contact would violates FHIR constraint ele-1.
+  const emergencyContact = administrationDetails?.emergencyContact;
+
+  if (emergencyContact) {
+    const isFilled = (value: unknown): boolean => typeof value === 'string' && value.trim().length > 0;
+
+    const providedCount = [emergencyContact.relationship, emergencyContact.fullName, emergencyContact.mobile].filter(
+      isFilled
+    ).length;
+
+    if (providedCount > 0 && providedCount < 3) {
+      const missing: string[] = [];
+      if (!isFilled(emergencyContact.relationship)) missing.push('relationship');
+      if (!isFilled(emergencyContact.fullName)) missing.push('fullName');
+      if (!isFilled(emergencyContact.mobile)) missing.push('mobile');
+
+      throw INVALID_INPUT_ERROR(
+        `Emergency contact is incomplete. Provide all fields (relationship, full name, mobile) or none. Missing: ${missing.join(
+          ', '
+        )}.`
+      );
+    }
+  }
 
   function validateDate(value: string, input: string): void {
     const dt = DateTime.fromISO(value);
@@ -364,38 +393,41 @@ function createMedicationStatement(
 function createEmergencyContactRelatedPerson(
   patientReference: Reference,
   emergencyContact: ImmunizationEmergencyContact
-): RelatedPerson {
+): RelatedPerson | undefined {
+  const fullName = emergencyContact.fullName?.trim();
+  const mobile = emergencyContact.mobile?.trim();
+
   const relationshipCoding = EMERGENCY_CONTACT_RELATIONSHIPS.find(
     (relationship) => relationship.code === emergencyContact.relationship
   );
+
+  const name: RelatedPerson['name'] = fullName ? [{ text: fullName }] : undefined;
+  const telecom: RelatedPerson['telecom'] = mobile ? [{ system: 'phone', use: 'mobile', value: mobile }] : undefined;
+
+  const relationship: RelatedPerson['relationship'] = relationshipCoding
+    ? [
+        {
+          coding: [
+            {
+              system: relationshipCoding.system,
+              code: relationshipCoding.code,
+              display: relationshipCoding.display,
+            },
+          ],
+        },
+      ]
+    : undefined;
+
+  if (!name && !telecom && !relationship) {
+    return undefined;
+  }
+
   return {
     resourceType: 'RelatedPerson',
     id: CONTAINED_EMERGENCY_CONTACT_ID,
     patient: patientReference,
-    name: [
-      {
-        text: emergencyContact.fullName,
-      },
-    ],
-    telecom: [
-      {
-        system: 'phone',
-        use: 'mobile',
-        value: emergencyContact.mobile,
-      },
-    ],
-    relationship: relationshipCoding
-      ? [
-          {
-            coding: [
-              {
-                system: relationshipCoding.system,
-                code: relationshipCoding.code,
-                display: relationshipCoding.display,
-              },
-            ],
-          },
-        ]
-      : undefined,
+    name,
+    telecom,
+    relationship,
   };
 }

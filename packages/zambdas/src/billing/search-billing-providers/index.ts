@@ -1,28 +1,29 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Organization, Practitioner } from 'fhir/r4b';
-import { FHIR_IDENTIFIER_NPI, getNPI, getTaxID } from 'utils';
-import { checkOrCreateM2MClientToken, wrapHandler, ZambdaInput } from '../../shared';
-import { createBillingClient, EXCLUDE_WORKING_COPIES_PARAMS, fhirName, formatAddress } from '../shared';
-import { SearchBillingProvidersParams, validateRequestParameters } from './validateRequestParameters';
+import { SearchBillingProvidersInputSchema } from 'utils/lib/types/data/billing/billing.schemas';
+import { BillingProviderOption } from 'utils/lib/types/data/billing/billing.types';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { fetchAllPages } from '../../shared/fhir';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { ValidatedZambdaInput, validateWithSchema } from '../../shared/validation';
+import {
+  createBillingClient,
+  EXCLUDE_WORKING_COPIES_PARAMS,
+  mapProvider,
+  PROVIDER_ROLE_BILLING,
+  PROVIDER_ROLE_RENDERING,
+  PROVIDER_ROLE_TAG,
+} from '../shared';
 
-interface ProviderItem {
-  id: string;
-  name: string;
-  firstName?: string;
-  lastName?: string;
-  npi: string;
-  taxonomyCode?: string;
-  taxId?: string;
-  clia?: string;
-  address?: string;
-}
+type SearchBillingProvidersParams = ValidatedZambdaInput<typeof SearchBillingProvidersInputSchema>;
 
 let m2mToken: string;
 const ZAMBDA_NAME = 'search-billing-providers';
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  const params = validateRequestParameters(input);
+  const params = validateWithSchema(SearchBillingProvidersInputSchema, input);
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, params.secrets);
   const oystehr = createBillingClient(m2mToken, params.secrets);
 
@@ -33,51 +34,43 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
 async function performEffect(
   oystehr: Oystehr,
   params: SearchBillingProvidersParams
-): Promise<{ providers: ProviderItem[]; total: number; offset: number; pageSize: number }> {
+): Promise<{ providers: BillingProviderOption[]; total: number; offset: number; pageSize: number }> {
   const pageSize = params.pageSize ?? 50;
   const offset = params.offset ?? 0;
 
-  const searchParams: { name: string; value: string }[] = [
-    { name: '_sort', value: 'name' },
-    { name: '_count', value: String(pageSize) },
-    { name: '_offset', value: String(offset) },
+  // Role is a meta.tag (one system, code per role), independent of resource type: a provider
+  // (Practitioner or Organization) can bill and/or render.
+  const roleCode = params.providerType === 'rendering' ? PROVIDER_ROLE_RENDERING : PROVIDER_ROLE_BILLING;
+  const baseParams: { name: string; value: string }[] = [
+    { name: '_tag', value: `${PROVIDER_ROLE_TAG}|${roleCode}` },
+    ...EXCLUDE_WORKING_COPIES_PARAMS,
   ];
-  if (!params.includeWorkingCopies) searchParams.push(...EXCLUDE_WORKING_COPIES_PARAMS);
-  if (params.providerId) searchParams.push({ name: '_id', value: params.providerId });
-  if (params.name) searchParams.push({ name: 'name', value: params.name });
+  if (params.providerId) baseParams.push({ name: '_id', value: params.providerId });
+  if (params.name) baseParams.push({ name: 'name', value: params.name });
 
-  // TODO: rendering providers may need to support Organization in addition to Practitioner
-  if (params.providerType === 'rendering') {
-    const bundle = await oystehr.fhir.search<Practitioner>({ resourceType: 'Practitioner', params: searchParams });
-    const items = bundle.unbundle().map(mapPractitioner);
-    return { providers: items, total: bundle.total ?? 0, offset, pageSize };
-  }
+  // FHIR paginates per resource type, so to return one sorted, paginated list across both we fetch
+  // all matches and sort/paginate in memory. Provider counts are small; the two fetches run in parallel.
+  const practitioners: Practitioner[] = [];
+  const organizations: Organization[] = [];
+  await Promise.all([
+    fetchAllPages(async (o, count) => {
+      const bundle = await oystehr.fhir.search<Practitioner>({
+        resourceType: 'Practitioner',
+        params: [...baseParams, { name: '_count', value: String(count) }, { name: '_offset', value: String(o) }],
+      });
+      practitioners.push(...bundle.unbundle());
+      return bundle;
+    }, 100),
+    fetchAllPages(async (o, count) => {
+      const bundle = await oystehr.fhir.search<Organization>({
+        resourceType: 'Organization',
+        params: [...baseParams, { name: '_count', value: String(count) }, { name: '_offset', value: String(o) }],
+      });
+      organizations.push(...bundle.unbundle());
+      return bundle;
+    }, 100),
+  ]);
 
-  searchParams.push({ name: 'identifier', value: `${FHIR_IDENTIFIER_NPI}|` });
-  const bundle = await oystehr.fhir.search<Organization>({ resourceType: 'Organization', params: searchParams });
-  const items = bundle.unbundle().map(mapOrganization);
-  return { providers: items, total: bundle.total ?? 0, offset, pageSize };
-}
-
-function mapPractitioner(p: Practitioner): ProviderItem {
-  return {
-    id: p.id ?? '',
-    name: fhirName(p),
-    firstName: p.name?.[0]?.given?.join(' ') ?? '',
-    lastName: p.name?.[0]?.family ?? '',
-    npi: getNPI(p) ?? '',
-    taxonomyCode: p.qualification?.[0]?.code?.coding?.[0]?.code ?? '',
-  };
-}
-
-function mapOrganization(o: Organization): ProviderItem {
-  return {
-    id: o.id ?? '',
-    name: o.name ?? '',
-    npi: getNPI(o) ?? '',
-    taxId: getTaxID(o) ?? '',
-    // TODO: need to define and store CLIA
-    clia: '',
-    address: formatAddress(o.address?.[0]),
-  };
+  const all = [...practitioners, ...organizations].map(mapProvider).sort((a, b) => a.name.localeCompare(b.name));
+  return { providers: all.slice(offset, offset + pageSize), total: all.length, offset, pageSize };
 }

@@ -1,51 +1,38 @@
-import {
-  AppointmentContext,
-  BUCKET_NAMES,
-  getCoding,
-  getReasonForVisitAndAdditionalDetailsFromAppointment,
-  getReasonForVisitOptionsForServiceCategory,
-  getVisitOccupationalMedicineEmployerFromEncounter,
-  isInPersonAppointment,
-  isTelemedAppointment,
-  Secrets,
-  SERVICE_CATEGORY_SYSTEM,
-  ServiceMode,
-} from 'utils';
+import { getReasonForVisitOptionsForServiceCategory } from 'utils/lib/config-helpers/booking';
+import { AppointmentContext } from 'utils/lib/config-helpers/patient-record';
+import { getReasonForVisitAndAdditionalDetailsFromAppointment } from 'utils/lib/fhir/appointments';
+import { BUCKET_NAMES, SERVICE_CATEGORY_SYSTEM } from 'utils/lib/fhir/constants';
+import { getVisitOccupationalMedicineEmployerFromEncounter } from 'utils/lib/fhir/encounter';
+import { getCoding } from 'utils/lib/fhir/helpers';
+import { isInPersonAppointment, isTelemedAppointment } from 'utils/lib/fhir/moduleIdentification';
+import { Secrets } from 'utils/lib/secrets';
+import { ServiceMode } from 'utils/lib/types/common';
+import { createClinicalOystehrClient } from '../helpers';
 import { DataComposer, generatePdf, PdfRenderConfig, StyleFactory } from './pdf-common';
 import { rgbNormalized } from './pdf-utils';
+import { composeAttorneyData, createAttorneyInfoSection } from './sections/attorneyInfo';
+import { composeConsentFormsData, createConsentFormsSection } from './sections/consentFormsInfo';
+import { composeContactData, createContactInfoSection } from './sections/contactInfo';
+import { composeDocumentsData, createDocumentsSection } from './sections/documents';
+import { composeEmergencyContactData, createEmergencyContactInfoSection } from './sections/emergencyContactInfo';
+import { composeEmployerData, createEmployerInfoSection } from './sections/employerInfo';
 import {
-  composeAttorneyData,
-  composeConsentFormsData,
-  composeContactData,
-  composeDocumentsData,
-  composeEmergencyContactData,
-  composeEmployerData,
   composeInsuranceData,
-  composeOccupationalMedicineEmployerData,
-  composePatientData,
-  composePatientDetailsData,
-  composePatientPaymentsData,
-  composePharmacyData,
-  composeResponsiblePartyData,
-  composeVisitData,
-  createAttorneyInfoSection,
-  createConsentFormsSection,
-  createContactInfoSection,
-  createDocumentsSection,
-  createEmergencyContactInfoSection,
-  createEmployerInfoSection,
-  createOccupationalMedicineEmployerSection,
-  createPatientDetailsSection,
-  createPatientHeader,
-  createPatientInfoSection,
-  createPatientPaymentsSection,
-  createPharmacyFormsSection,
   createPrimaryInsuranceSection,
-  createResponsiblePartySection,
   createSecondaryInsuranceSection,
-  createVisitInfoSection,
-} from './sections';
+} from './sections/insuranceInfo';
+import {
+  composeOccupationalMedicineEmployerData,
+  createOccupationalMedicineEmployerSection,
+} from './sections/occupationalMedicineEmployerInfo';
+import { composePatientDetailsData, createPatientDetailsSection } from './sections/patientDetails';
+import { composePatientData, createPatientHeader, createPatientInfoSection } from './sections/patientInfo';
+import { composePatientPaymentsData, createPatientPaymentsSection } from './sections/patientPayments';
+import { composePharmacyData, createPharmacyFormsSection } from './sections/pharmacyInfo';
 import { composePrimaryCarePhysicianData, createPrimaryCarePhysicianSection } from './sections/primaryCarePhysician';
+import { composeResponsiblePartyData, createResponsiblePartySection } from './sections/responsiblePartyInfo';
+import { composeVisitData, createVisitInfoSection } from './sections/visitInfo';
+import { fetchServiceCategoryCatalog } from './service-category-catalog';
 import { AssetPaths, PdfResult, VisitDetailsData, VisitDetailsInput } from './types';
 
 // Build the same `AppointmentContext` the EHR's VisitDetailsPage feeds into
@@ -83,7 +70,7 @@ const composeVisitDetailsData: DataComposer<VisitDetailsInput, VisitDetailsData>
     emergencyContactResource,
     attorneyRelatedPerson,
     employerOrganization,
-    occupationalMedicineEmployerOrganization,
+    occupationalMedicineEmployerName,
     appointment,
     encounter,
     location,
@@ -102,7 +89,7 @@ const composeVisitDetailsData: DataComposer<VisitDetailsInput, VisitDetailsData>
   return {
     appointmentContext: buildAppointmentContext(input),
     patient: composePatientData({ patient, appointment }),
-    visit: composeVisitData({ appointment, location, timezone }),
+    visit: composeVisitData({ appointment, location, timezone, serviceCategories: input.serviceCategories }),
     contact: composeContactData({ patient, appointment }),
     details: composePatientDetailsData({ patient }),
     pcp: composePrimaryCarePhysicianData({ physician }),
@@ -118,7 +105,7 @@ const composeVisitDetailsData: DataComposer<VisitDetailsInput, VisitDetailsData>
       workersCompCoverage: coverages.workersComp,
       insuranceOrgs,
     }),
-    omEmployer: composeOccupationalMedicineEmployerData({ employer: occupationalMedicineEmployerOrganization }),
+    omEmployer: composeOccupationalMedicineEmployerData({ employerName: occupationalMedicineEmployerName }),
     paymentHistory: composePatientPaymentsData({ payments }),
   };
 };
@@ -200,8 +187,9 @@ export const createVisitDetailsPdf = async (
   secrets: Secrets | null,
   token: string
 ): Promise<PdfResult> => {
+  const serviceCategories = await fetchServiceCategoryCatalog(createClinicalOystehrClient(token, secrets));
   return generatePdf(
-    input,
+    { ...input, serviceCategories },
     composeVisitDetailsData,
     visitDetailsRenderConfig,
     {

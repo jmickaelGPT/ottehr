@@ -1,23 +1,20 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import Stripe from 'stripe';
+import { getStripeAccountForAppointmentOrEncounter } from 'utils/lib/fhir/payments';
 import {
   CheckPatientPaymentTerminalStatusInput,
   CheckPatientPaymentTerminalStatusResponse,
-  getStripeAccountForAppointmentOrEncounter,
-  INVALID_INPUT_ERROR,
-  isValidUUID,
-  MISSING_REQUEST_BODY,
-  MISSING_REQUIRED_PARAMETERS,
   TerminalPaymentActionStatus,
-} from 'utils';
-import {
-  createOystehrClient,
-  getAuth0Token,
-  getStripeClient,
-  lambdaResponse,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../../shared';
+} from 'utils/lib/types/api/patient-payment-types';
+import { INVALID_INPUT_ERROR, MISSING_REQUEST_BODY, MISSING_REQUIRED_PARAMETERS } from 'utils/lib/types/errors';
+import { isValidUUID } from 'utils/lib/validation/helper';
+import { getAuth0Token } from '../../../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../../../shared/helpers';
+import { lambdaResponse } from '../../../../shared/lambda';
+import { wrapHandler } from '../../../../shared/sentry';
+import { getStripeClient } from '../../../../shared/stripeIntegration';
+import { ZambdaInput } from '../../../../shared/types/common';
+import { safeJsonParse } from '../../../../shared/validation';
 
 const ZAMBDA_NAME = 'patient-payments-terminal-check-payment-status';
 
@@ -30,7 +27,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     oystehrM2MClientToken = await getAuth0Token(input.secrets);
   }
 
-  const oystehrClient = createOystehrClient(oystehrM2MClientToken, input.secrets);
+  const oystehrClient = createClinicalOystehrClient(oystehrM2MClientToken, input.secrets);
   const stripeAccount = await getStripeAccountForAppointmentOrEncounter(
     { encounterId: validatedParameters.encounterId },
     oystehrClient
@@ -66,7 +63,7 @@ const validateRequestParameters = (input: ZambdaInput): CheckPatientPaymentTermi
     throw MISSING_REQUEST_BODY;
   }
 
-  const { encounterId, readerId } = JSON.parse(input.body);
+  const { encounterId, readerId } = safeJsonParse(input.body);
 
   const missingParams: string[] = [];
   if (!encounterId) {

@@ -1,34 +1,36 @@
-import { Box, Link, Typography } from '@mui/material';
-import { FC } from 'react';
+import { Box, Link, Stack, Typography } from '@mui/material';
+import { FC, Fragment } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 import { AssessmentTitle } from 'src/components/AssessmentTitle';
 import { dataTestIds } from 'src/constants/data-test-ids';
-import { SectionList } from 'src/features/visits/shared/components/SectionList';
+import {
+  SectionHeading,
+  useNoteSectionTitleInCardHeader,
+} from 'src/features/visits/shared/components/NoteSectionHeading';
 import { useExcusePresignedFiles } from 'src/shared/hooks/useExcusePresignedFiles';
 import {
   dispositionCheckboxOptions,
-  followUpInOptions,
   getSpecialtyTransferDisplay,
   mapDispositionTypeToLabel,
+} from 'utils/lib/fhir/disposition';
+import {
+  followUpInOptions,
   NOTHING_TO_EAT_OR_DRINK_FIELD,
   NOTHING_TO_EAT_OR_DRINK_LABEL,
   REFUSAL_OF_EMS_TRANSPORT_FIELD,
   REFUSAL_OF_EMS_TRANSPORT_LABEL,
-} from 'utils';
-import { useChartFields } from '../../../hooks/useChartFields';
+} from 'utils/lib/types/api/chart-data/chart-data.types';
 import { usePatientInstructionsVisibility } from '../../../hooks/usePatientInstructionsVisibility';
-import { useChartData } from '../../../stores/appointment/appointment.store';
+import { useVisitNote } from '../../../hooks/useVisitNote';
 
 export const PatientInstructionsContainer: FC = () => {
-  const { data: chartFields } = useChartFields({
-    requestedFields: { disposition: {} },
-  });
+  const titleInCardHeader = useNoteSectionTitleInCardHeader();
+  const { data: note } = useVisitNote();
 
-  const { chartData } = useChartData();
-
-  const instructions = chartData?.instructions;
-  const disposition = chartFields?.disposition;
-  const schoolWorkExcuses = useExcusePresignedFiles(chartData?.schoolWorkNotes);
+  const instructions = note?.plan.instructions;
+  const disposition = note?.plan.disposition;
+  // Entries whose presigning failed come back without a URL and cannot be linked.
+  const schoolWorkExcuses = useExcusePresignedFiles(note?.plan.schoolWorkNotes).filter((excuse) => excuse.presignedUrl);
 
   const { showInstructions, showDischargeInstructions, showFollowUp, showSchoolWorkExcuse } =
     usePatientInstructionsVisibility();
@@ -89,14 +91,10 @@ export const PatientInstructionsContainer: FC = () => {
         <AssessmentTitle>Subspecialty follow-up</AssessmentTitle>
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
           {disposition?.followUp?.map((followUp) => {
-            const display = dispositionCheckboxOptions.find((option) => option.name === followUp.type)!.label;
-            let note = '';
-
-            if (followUp.type === 'other') {
-              note = `: ${followUp.note}`;
-            }
-
-            return <Typography key={followUp.type}>{`${display}${note}`}</Typography>;
+            const option = dispositionCheckboxOptions.find((o) => o.name === followUp.type);
+            if (!option) return null;
+            const note = followUp.type === 'other' && followUp.note ? `: ${followUp.note}` : '';
+            return <Typography key={followUp.type}>{`${option.label}${note}`}</Typography>;
           })}
         </Box>
       </>
@@ -117,11 +115,13 @@ export const PatientInstructionsContainer: FC = () => {
 
   return (
     <Box data-testid={dataTestIds.telemedEhrFlow.reviewTabPatientInstructionsContainer}>
-      <Typography variant="h5" color="primary.dark">
-        Plan
-      </Typography>
+      {!titleInCardHeader && <SectionHeading>Plan</SectionHeading>}
 
-      <SectionList sections={sections} sx={{ width: '100%' }} />
+      <Stack spacing={1} sx={{ width: '100%' }}>
+        {sections.map((section, index) => (
+          <Fragment key={index}>{section}</Fragment>
+        ))}
+      </Stack>
     </Box>
   );
 };

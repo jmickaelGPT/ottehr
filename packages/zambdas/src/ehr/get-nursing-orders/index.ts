@@ -1,14 +1,15 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { GetNursingOrdersInputValidated } from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../shared';
+import { GetNursingOrdersInputValidated } from 'utils/lib/types/data/orders/types';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import { getNursingOrderResources, mapResourcesNursingOrderDTOs } from './helpers';
 import { validateRequestParameters } from './validateRequestParameters';
 
 let m2mToken: string;
 
 export const index = wrapHandler('get-nursing-orders', async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`get-nursing-orders started, input: ${JSON.stringify(input)}`);
-
   let validatedParameters: GetNursingOrdersInputValidated;
 
   try {
@@ -25,7 +26,7 @@ export const index = wrapHandler('get-nursing-orders', async (input: ZambdaInput
   const { secrets, searchBy } = validatedParameters;
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   const { serviceRequests, tasks, practitioners, provenances, encounters } = await getNursingOrderResources(
     oystehr,

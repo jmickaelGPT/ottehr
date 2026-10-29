@@ -5,31 +5,36 @@ import {
   mapDisplayToInvoiceTaskStatus,
   mapInvoiceTaskStatusToDisplay,
   parseInvoiceTaskInput,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../shared';
-import { validateRequestParameters } from './validateRequestParameters';
+} from 'utils/lib/helpers/tasks/invoices-tasks';
+import { UpdateInvoiceTaskZambdaInputSchema } from 'utils/lib/types/api/invoicing.types';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { validateWithSchema } from '../../shared/validation';
 
 let m2mToken: string;
 
 const ZAMBDA_NAME = 'update-invoice-task';
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  const validatedParams = validateRequestParameters(input);
+  const validatedParams = validateWithSchema(UpdateInvoiceTaskZambdaInputSchema, input);
   const { secrets, taskId, status, invoiceTaskInput } = validatedParams;
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   const task = await oystehr.fhir.get<Task>({
     resourceType: 'Task',
     id: taskId,
   });
 
+  const originalStatus = task.status;
   task.status = status as any;
   console.log('New status: ', status);
   if (
     mapInvoiceTaskStatusToDisplay(status as any) === 'updating' &&
-    mapInvoiceTaskStatusToDisplay(task.status) === 'updating'
+    mapInvoiceTaskStatusToDisplay(originalStatus) === 'updating'
   ) {
     // this is for preventing task stack in "updating" status
     console.log(

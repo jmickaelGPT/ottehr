@@ -1,6 +1,6 @@
 import { FC, useCallback, useState } from 'react';
 import { useMedicationHistory } from 'src/features/visits/in-person/hooks/useMedicationHistory';
-import { MedicationDTO } from 'utils';
+import { MedicationDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
 import { useChartDataArrayValue } from '../../../hooks/useChartDataArrayValue';
 import { MedicalHistoryDoubleCard } from '../MedicalHistoryDoubleCard';
 import { CurrentMedicationsPatientColumn } from './CurrentMedicationsPatientColumn';
@@ -17,16 +17,7 @@ export const CurrentMedicationsCard: FC = () => {
     onSubmit,
     onRemove,
     values: medications,
-  } = useChartDataArrayValue(
-    'medications',
-    undefined,
-    {
-      _sort: '-_lastUpdated',
-      _include: 'MedicationStatement:source',
-      status: { type: 'token', value: 'active' },
-    },
-    refetchHistory
-  );
+  } = useChartDataArrayValue('medications', undefined, refetchHistory);
 
   const medicationData = { medications, isLoading, onRemove };
 

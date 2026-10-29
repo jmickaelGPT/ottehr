@@ -1,21 +1,16 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Account } from 'fhir/r4b';
 import Stripe from 'stripe';
-import {
-  checkForStripeCustomerDeletedError,
-  FHIR_RESOURCE_NOT_FOUND,
-  getStripeAccountForAppointmentOrEncounter,
-  PaymentMethodSetupZambdaOutput,
-} from 'utils';
+import { getStripeAccountForAppointmentOrEncounter } from 'utils/lib/fhir/payments';
+import { PaymentMethodSetupZambdaOutput } from 'utils/lib/types/data/payment/payment-method-types';
+import { checkForStripeCustomerDeletedError, FHIR_RESOURCE_NOT_FOUND } from 'utils/lib/types/errors';
 import { getAccountAndCoverageResourcesForPatient } from '../../../ehr/shared/harvest';
-import {
-  createOystehrClient,
-  ensureStripeCustomerId,
-  getAuth0Token,
-  lambdaResponse,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+import { getAuth0Token } from '../../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { lambdaResponse } from '../../../shared/lambda';
+import { wrapHandler } from '../../../shared/sentry';
+import { ensureStripeCustomerId } from '../../../shared/stripeIntegration';
+import { ZambdaInput } from '../../../shared/types/common';
 import { getStripeClient, validateUserHasAccessToPatientAccount } from '../helpers';
 import { validateRequestParameters } from './validateRequestParameters';
 
@@ -36,7 +31,7 @@ export const index = wrapHandler('payment-setup', async (input: ZambdaInput): Pr
   } else {
     console.log('already have a token, no need to update');
   }
-  const oystehrClient = createOystehrClient(m2mClientToken, secrets);
+  const oystehrClient = createClinicalOystehrClient(m2mClientToken, secrets);
   void (await validateUserHasAccessToPatientAccount(
     { beneficiaryPatientId, secrets, zambdaInput: input },
     oystehrClient
@@ -55,7 +50,7 @@ export const index = wrapHandler('payment-setup', async (input: ZambdaInput): Pr
   }
 
   const guarantor = accountResources.guarantorResource;
-  const { customerId } = await ensureStripeCustomerId(
+  const { customerId, createdWithoutEmail } = await ensureStripeCustomerId(
     {
       guarantorResource: guarantor,
       account,
@@ -92,6 +87,7 @@ export const index = wrapHandler('payment-setup', async (input: ZambdaInput): Pr
   const response: PaymentMethodSetupZambdaOutput = {
     clientSecret: setupIntent.client_secret,
     stripeAccount,
+    createdWithoutEmail: createdWithoutEmail || undefined,
   };
 
   return lambdaResponse(200, response);

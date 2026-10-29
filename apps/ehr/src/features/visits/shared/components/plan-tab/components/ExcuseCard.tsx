@@ -3,8 +3,8 @@ import { DateTime } from 'luxon';
 import { FC } from 'react';
 import { RoundedButton } from 'src/components/RoundedButton';
 import { UppercaseCaptionTypography } from 'src/features/visits/shared/components/UppercaseCaptionTypography';
-import { SchoolWorkNoteExcuseDocFileDTO } from 'utils';
-import { ExcuseLink } from './ExcuseLink';
+import { SchoolWorkNoteExcuseDocFileDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
+import { DocumentRow } from '../../DocumentRow';
 
 type ExcuseCardProps = {
   label: string;
@@ -26,7 +26,7 @@ export const ExcuseCard: FC<ExcuseCardProps> = (props) => {
 
       {excuse && (
         <>
-          <ExcuseLink
+          <DocumentRow
             label={excuse.name!}
             to={excuse.presignedUrl!}
             onDelete={disabled ? undefined : () => onDelete(excuse.id)}

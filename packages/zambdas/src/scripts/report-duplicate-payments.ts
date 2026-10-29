@@ -3,8 +3,8 @@ import { Appointment, Encounter, Location, PaymentNotice } from 'fhir/r4b';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { getAuth0Token } from '../shared';
-import { fhirApiUrlFromAuth0Audience } from './helpers';
+import { getAuth0Token } from '../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../shared/helpers';
 
 // Helper function to convert local date to UTC range (from start date to end of today)
 function getUTCRangeForLocalDateRangeToToday(localDateString: string): { start: Date; end: Date } {
@@ -365,10 +365,7 @@ async function main(): Promise<void> {
     throw new Error('❌ Failed to fetch auth token.');
   }
 
-  const oystehr = new Oystehr({
-    accessToken: token,
-    fhirApiUrl: fhirApiUrlFromAuth0Audience(secrets.AUTH0_AUDIENCE),
-  });
+  const oystehr = createClinicalOystehrClient(token, secrets);
 
   const { start, end } = getUTCRangeForLocalDateRangeToToday(targetDateString);
 

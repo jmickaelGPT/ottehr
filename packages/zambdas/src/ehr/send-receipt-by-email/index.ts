@@ -1,15 +1,15 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { DocumentReference } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import { getPresignedURL, InPersonReceiptTemplateData, MIME_TYPES } from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  EmailAttachment,
-  getEmailClient,
-  wrapHandler,
-  ZambdaInput,
-} from '../../shared';
+import { getPresignedURL } from 'utils/lib/helpers/presigned-file-url/helpers';
+import { InPersonReceiptTemplateData } from 'utils/lib/ottehr-config/sendgrid';
+import { MIME_TYPES } from 'utils/lib/utils/file';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { EmailAttachment, getEmailClient } from '../../shared/communication';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { assertZ3UrlInProject } from '../../shared/presigned-file-urls/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 const ZAMBDA_NAME = 'send-receipt-by-email';
@@ -17,14 +17,13 @@ const ZAMBDA_NAME = 'send-receipt-by-email';
 let m2mToken: string;
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`Input: ${JSON.stringify(input)}`);
   console.group('validateRequestParameters');
   const { recipientFullName, email, receiptDocRefId, secrets } = validateRequestParameters(input);
   console.groupEnd();
   console.debug('validateRequestParameters success');
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   console.log('fetching document reference');
   const documentReference = await oystehr.fhir.get<DocumentReference>({
@@ -38,6 +37,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   console.log(`content: ${JSON.stringify(content)}, url: ${z3Url}`);
 
   if (z3Url) {
+    assertZ3UrlInProject(z3Url, secrets);
     const presignedUrl = await getPresignedURL(z3Url, m2mToken);
     const file = await fetch(presignedUrl, {
       method: 'GET',

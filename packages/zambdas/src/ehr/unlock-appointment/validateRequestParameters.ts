@@ -1,16 +1,18 @@
-import {
-  getSecret,
-  MISSING_REQUEST_BODY,
-  MISSING_REQUEST_SECRETS,
-  SecretsKeys,
-  UnlockAppointmentZambdaInputValidated,
-} from 'utils';
+import { getSecret, SecretsKeys } from 'utils/lib/secrets';
+import { UnlockAppointmentZambdaInputValidated } from 'utils/lib/types/api/unlock-appointment/unlock-appointment.types';
+import { MISSING_REQUEST_BODY, MISSING_REQUEST_SECRETS } from 'utils/lib/types/errors';
 import { z } from 'zod';
-import { safeValidate, ZambdaInput } from '../../shared';
+import { ZambdaInput } from '../../shared/types/common';
+import { safeValidate } from '../../shared/validation';
 
-const UnlockAppointmentBodySchema = z.object({
-  appointmentId: z.string().uuid(),
-});
+const UnlockAppointmentBodySchema = z
+  .object({
+    appointmentId: z.string().uuid().optional(),
+    encounterId: z.string().uuid().optional(),
+  })
+  .refine((data) => Boolean(data.appointmentId) !== Boolean(data.encounterId), {
+    message: 'Provide exactly one of appointmentId or encounterId',
+  });
 
 export function validateRequestParameters(input: ZambdaInput): UnlockAppointmentZambdaInputValidated {
   if (!input.body) {
@@ -21,7 +23,7 @@ export function validateRequestParameters(input: ZambdaInput): UnlockAppointment
     throw MISSING_REQUEST_SECRETS;
   }
 
-  const { appointmentId } = safeValidate(UnlockAppointmentBodySchema, JSON.parse(input.body));
+  const { appointmentId, encounterId } = safeValidate(UnlockAppointmentBodySchema, JSON.parse(input.body));
 
   getSecret(SecretsKeys.PROJECT_API, input.secrets);
   getSecret(SecretsKeys.ORGANIZATION_ID, input.secrets);
@@ -30,6 +32,7 @@ export function validateRequestParameters(input: ZambdaInput): UnlockAppointment
 
   return {
     appointmentId,
+    encounterId,
     secrets: input.secrets,
     userToken,
   };

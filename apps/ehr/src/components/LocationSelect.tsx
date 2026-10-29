@@ -4,8 +4,8 @@ import { Location, Schedule } from 'fhir/r4b';
 import { ReactElement, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { LocationWithWalkinSchedule } from 'src/pages/AddPatient';
-import { isLocationVirtual } from 'utils';
 import { getAllFhirSearchPages } from 'utils/lib/fhir/getAllFhirSearchPages';
+import { isLocationInPerson, isLocationVirtual } from 'utils/lib/fhir/location';
 import { dataTestIds } from '../constants/data-test-ids';
 import { sortLocationsByLabel } from '../helpers';
 import { useApiClients } from '../hooks/useAppClients';
@@ -117,7 +117,7 @@ export default function LocationSelect({
     const allLocations = locations
       .filter(
         (location) =>
-          (locationType.includes(LocationType.IN_PERSON) && !isLocationVirtual(location)) ||
+          (locationType.includes(LocationType.IN_PERSON) && isLocationInPerson(location)) ||
           (locationType.includes(LocationType.VIRTUAL) && isLocationVirtual(location))
       )
       .map((location) => {

@@ -1,5 +1,5 @@
 import Oystehr, { BatchInput, BatchInputPostRequest, BatchInputRequest } from '@oystehr/sdk';
-import { captureException } from '@sentry/aws-serverless';
+import { captureException } from '@sentry/node-core/light';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import {
   Account,
@@ -21,58 +21,51 @@ import {
   Task,
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import { generate as uuid } from 'short-uuid';
+import { uuid } from 'short-uuid';
 import {
   ACCIDENT_TYPE_SYSTEM,
-  CanonicalUrl,
-  CreateAppointmentResponse,
-  CREATED_BY_SYSTEM,
-  createUserResourcesForPatient,
   CURRENT_EXAM_MIGRATION_VERSION,
-  E2E_TEST_RESOURCE_PROCESS_ID_SYSTEM,
   EXAM_MIGRATION_VERSION_URL,
   FHIR_APPOINTMENT_READY_FOR_PREPROCESSING_TAG,
   FHIR_EXTENSION,
-  FhirAppointmentStatus,
-  FhirEncounterStatus,
-  FOLLOWUP_SUBTYPE_SYSTEM,
-  FOLLOWUP_SYSTEMS,
-  FollowUpOptions,
-  formatPhoneNumber,
-  formatPhoneNumberDisplay,
-  getAppointmentDurationFromSlot,
-  getCanonicalQuestionnaire,
-  getCoding,
-  getFullestAvailableName,
-  getGroupAssignmentMode,
-  getSlotBookedViaGroupId,
-  getTaskResource,
-  isValidUUID,
-  makePrepopulatedItemsForPatient,
-  OTTEHR_MODULE,
-  PATIENT_BILLING_ACCOUNT_TYPE,
-  PatientInfo,
+  INTAKE_PAPERWORK_QR_TAG,
   PRIVATE_EXTENSION_BASE_URL,
-  RETURNING_PATIENT_META_TAG,
-  ScheduleOwnerFhirResource,
-  Secrets,
   SERVICE_CATEGORY_SYSTEM,
-  ServiceMode,
-  TaskIndicator,
-  User,
-  VisitType,
-} from 'utils';
+} from 'utils/lib/fhir/constants';
+import { buildFollowupEncounterType } from 'utils/lib/fhir/encounter';
+import { getGroupAssignmentMode } from 'utils/lib/fhir/healthcareService';
+import { getCoding, getTaskResource } from 'utils/lib/fhir/helpers';
+import { OTTEHR_MODULE } from 'utils/lib/fhir/moduleIdentification';
+import { getFullestAvailableName } from 'utils/lib/fhir/patient';
+import { getCanonicalQuestionnaire } from 'utils/lib/fhir/questionnaires';
+import { resolveEffectiveQuestionnaire } from 'utils/lib/fhir/questionnaires';
+import { formatPhoneNumber, formatPhoneNumberDisplay } from 'utils/lib/helpers/helpers';
+import { makePrepopulatedItemsForPatient } from 'utils/lib/helpers/paperwork/prePopulation';
+import { Secrets } from 'utils/lib/secrets';
+import { FhirAppointmentStatus, FhirEncounterStatus } from 'utils/lib/types/api/appointment.types';
 import {
-  AuditableZambdaEndpoints,
-  createAuditEvent,
-  createOystehrClient,
+  CreateAppointmentResponse,
+  FollowUpOptions,
+} from 'utils/lib/types/api/prebook-create-appointment/prebook-create-appointment.types';
+import { ScheduleOwnerFhirResource } from 'utils/lib/types/api/schedules';
+import { User } from 'utils/lib/types/api/user.types';
+import { CanonicalUrl, CREATED_BY_SYSTEM, ServiceMode, TaskIndicator } from 'utils/lib/types/common';
+import { E2E_TEST_RESOURCE_PROCESS_ID_SYSTEM, RETURNING_PATIENT_META_TAG } from 'utils/lib/types/constants';
+import { PatientInfo, VisitType } from 'utils/lib/types/data/telemed/appointments/create-appointment.types';
+import { getAppointmentDurationFromSlot, getSlotBookedViaGroupId } from 'utils/lib/utils/scheduleUtils';
+import { isValidUUID } from 'utils/lib/validation/helper';
+import {
   generatePatientRelatedRequests,
-  getAuth0Token,
-  getUser,
-  isTestUser,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+  linkNewPatientToAccountHolder,
+  makePatientBillingAccountRequest,
+} from '../../../shared/appointment/helpers';
+import { getM2MClientId, getUser, isM2MClient, isTestUser } from '../../../shared/auth';
+import { getAuth0Token } from '../../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { truncateForLog } from '../../../shared/logging';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
+import { AuditableZambdaEndpoints, createAuditEvent } from '../../../shared/userAuditLog';
 import { getEncounterClass, getRelatedResources, getTelemedRequiredAppointmentEncounterExtensions } from '../helpers';
 import {
   createAppointmentComplexValidation,
@@ -86,7 +79,9 @@ interface CreateAppointmentInput {
   scheduleOwner: ScheduleOwnerFhirResource;
   serviceMode: ServiceMode;
   patient: PatientInfo;
-  user: User;
+  user: User | undefined;
+  isM2M: boolean;
+  m2mClientId?: string;
   questionnaireCanonical: CanonicalUrl;
   secrets: Secrets | null;
   visitType: VisitType;
@@ -102,6 +97,7 @@ interface CreateAppointmentInput {
 
 // Lifting up value to outside of the handler allows it to stay in memory across warm lambda invocations
 let oystehrToken: string;
+
 export const index = wrapHandler('create-appointment', async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
   console.group('validateRequestParameters');
   // Step 1: Validate input
@@ -109,11 +105,16 @@ export const index = wrapHandler('create-appointment', async (input: ZambdaInput
 
   const token = input.headers.Authorization.replace('Bearer ', '');
 
-  const user = await getUser(token, input.secrets);
-  const validatedParameters = validateCreateAppointmentParams(input, user);
+  const isM2M = isM2MClient(token);
+  const m2mClientId = isM2M ? getM2MClientId(token) : undefined;
+  let user: User | undefined = undefined;
+  if (!isM2M) {
+    user = await getUser(token, input.secrets);
+  }
+  const validatedParameters = validateCreateAppointmentParams(input, user, isM2M);
   const { secrets, language } = validatedParameters;
+
   console.groupEnd();
-  console.debug('validateRequestParameters success', JSON.stringify(validatedParameters));
 
   if (!oystehrToken) {
     console.log('getting token');
@@ -121,9 +122,10 @@ export const index = wrapHandler('create-appointment', async (input: ZambdaInput
   } else {
     console.log('already have token');
   }
-  const oystehr = createOystehrClient(oystehrToken, input.secrets);
+  const oystehr = createClinicalOystehrClient(oystehrToken, input.secrets);
 
   console.time('performing-complex-validation');
+
   const effectInput = await createAppointmentComplexValidation(validatedParameters, oystehr);
   const {
     slot,
@@ -137,7 +139,7 @@ export const index = wrapHandler('create-appointment', async (input: ZambdaInput
     bookingLocation,
     attendingPractitioner,
   } = effectInput;
-  console.log('effectInput', effectInput);
+
   console.timeEnd('performing-complex-validation');
 
   let appointmentMetadata = injectMetadataIfNeeded(maybeMetadata);
@@ -163,6 +165,8 @@ export const index = wrapHandler('create-appointment', async (input: ZambdaInput
       patient,
       serviceMode,
       user,
+      isM2M,
+      m2mClientId,
       language,
       secrets,
       visitType,
@@ -180,13 +184,25 @@ export const index = wrapHandler('create-appointment', async (input: ZambdaInput
   const { message, appointmentId, fhirPatientId, questionnaireResponseId, encounterId, resources, relatedPersonId } =
     data_appointment;
 
-  await createAuditEvent(
-    AuditableZambdaEndpoints.appointmentCreate,
-    oystehr,
-    input,
-    fhirPatientId,
-    validatedParameters.secrets
-  );
+  // Booking already committed; swallow audit failures so they don't surface as a 5xx
+  try {
+    await createAuditEvent(
+      AuditableZambdaEndpoints.appointmentCreate,
+      oystehr,
+      input,
+      fhirPatientId,
+      validatedParameters.secrets
+    );
+  } catch (auditError) {
+    console.error(
+      'Failed to write appointment-create audit event (booking already committed):',
+      JSON.stringify(auditError, null, 2)
+    );
+    captureException(auditError, {
+      tags: { zambda: 'create-appointment', stage: 'post-commit-audit' },
+      extra: { appointmentId, fhirPatientId },
+    });
+  }
 
   const response: CreateAppointmentResponse = {
     message,
@@ -198,7 +214,8 @@ export const index = wrapHandler('create-appointment', async (input: ZambdaInput
     relatedPersonId,
   };
 
-  console.log(`fhirAppointment = ${JSON.stringify(response)}`, visitType);
+  console.log(`fhirAppointment = ${truncateForLog(response)}`, visitType);
+
   return {
     statusCode: 200,
     body: JSON.stringify(response),
@@ -214,6 +231,8 @@ export async function createAppointment(
     scheduleOwner,
     patient,
     user,
+    isM2M,
+    m2mClientId,
     secrets,
     visitType,
     serviceMode,
@@ -227,6 +246,7 @@ export async function createAppointment(
     await generatePatientRelatedRequests(user, patient, oystehr);
 
   let startTime: string | null; // iso string in UTC
+
   if (visitType === VisitType.WalkIn) {
     startTime = DateTime.now().setZone('UTC').toISO();
   } else {
@@ -251,17 +271,26 @@ export async function createAppointment(
   }
 
   const formattedUserNumber = formatPhoneNumberDisplay(user?.name?.replace('+1', ''));
-  const createdBy = isEHRUser
+
+  const createdBy = isM2M
+    ? `M2M Client ${m2mClientId}`
+    : isEHRUser
     ? `Staff ${user?.email}`
     : `${visitType === VisitType.WalkIn ? 'QR - ' : ''}Patient${formattedUserNumber ? ` ${formattedUserNumber}` : ''}`;
 
   console.log('getting questionnaire ID to create blank questionnaire response');
-  const currentQuestionnaire = await getCanonicalQuestionnaire(questionnaireUrl, oystehr);
+
+  // If the resolved questionnaire is a paperwork flow, assemble its constituent forms into a concrete
+  // item[] so pre-fill runs against the flattened pages; a non-flow questionnaire is returned as-is.
+  const currentQuestionnaire = await resolveEffectiveQuestionnaire(
+    await getCanonicalQuestionnaire(questionnaireUrl, oystehr),
+    oystehr
+  );
   let verifiedFormattedPhoneNumber = verifiedPhoneNumber;
 
   if (!patient.id && !verifiedPhoneNumber) {
     console.log('Getting verifiedPhoneNumber for new patient', patient.phoneNumber);
-    if (isEHRUser) {
+    if (isM2M || isEHRUser) {
       if (!patient.phoneNumber) {
         throw new Error('No phone number found for patient');
       }
@@ -292,12 +321,16 @@ export async function createAppointment(
     visitType,
     secrets,
     verifiedPhoneNumber: verifiedFormattedPhoneNumber,
-    contactInfo: { phone: verifiedFormattedPhoneNumber ?? 'not provided', email: patient.email ?? 'not provided' },
+    contactInfo: {
+      phone: verifiedFormattedPhoneNumber ?? 'not provided',
+      email: patient.noEmail ? '' : patient.email ?? '',
+      noEmail: patient.noEmail ?? false,
+    },
     questionnaire: currentQuestionnaire,
     oystehr: oystehr,
     updatePatientRequest,
     createPatientRequest,
-    performPreProcessing: user && !isTestUser(user),
+    performPreProcessing: Boolean(user) && !isTestUser(user!),
     listRequests,
     newPatientDob: (createPatientRequest?.resource as Patient | undefined)?.birthDate,
     createdBy,
@@ -322,22 +355,20 @@ export async function createAppointment(
     // If it is a new patient, create a RelatedPerson resource for the Patient
     // and create a Person resource if there is not one for the account
     // todo: this needs to happen via a transactional with the other must-happen-for-this-request-to-succeed items
-    const [userResource, patientWithFriendlyId] = await Promise.all([
-      createUserResourcesForPatient(oystehr, fhirPatient.id, verifiedFormattedPhoneNumber),
-      oystehr.fhir.generateFriendlyPatientId({ id: fhirPatient.id }).catch((error) => {
-        console.error(`Failed to generate friendly patient ID for Patient/${fhirPatient.id}:`, error);
-        return undefined;
-      }),
-    ]);
-    relatedPersonId = userResource?.relatedPerson?.id || '';
-    const person = userResource.person;
+    const {
+      relatedPerson,
+      person,
+      patient: patientWithFriendlyId,
+    } = await linkNewPatientToAccountHolder(oystehr, fhirPatient.id, verifiedFormattedPhoneNumber);
+
+    relatedPersonId = relatedPerson?.id || '';
 
     if (!person.id) {
       throw new Error('Person resource does not have an ID');
     }
 
     if (patientWithFriendlyId) {
-      patientToReturn = patientWithFriendlyId as Patient;
+      patientToReturn = patientWithFriendlyId;
     }
   }
 
@@ -385,7 +416,7 @@ interface TransactionInput {
   secrets: Secrets | null;
   createdBy: string;
   verifiedPhoneNumber: string | undefined;
-  contactInfo: { phone: string; email: string };
+  contactInfo: { phone: string; email: string; noEmail?: boolean };
   additionalInfo?: string;
   patient?: Patient;
   newPatientDob?: string;
@@ -398,6 +429,7 @@ interface TransactionInput {
   appointmentMetadata?: Appointment['meta'];
   followUpOptions?: FollowUpOptions;
 }
+
 interface TransactionOutput {
   appointment: Appointment;
   encounter: Encounter;
@@ -437,12 +469,14 @@ export const performTransactionalFhirRequests = async (input: TransactionInput):
   const parentEncounterId = followUpOptions?.parentEncounterId;
 
   let carriedOverDiagnoses: { condition: Condition; rank?: number }[] = [];
+
   if (parentEncounterId) {
     // Validation (not part of copy flow): parent must exist and not itself be a follow-up.
     const parentEncounter = await oystehr.fhir.get<Encounter>({
       resourceType: 'Encounter',
       id: parentEncounterId,
     });
+
     if (parentEncounter.partOf) {
       throw new Error('Cannot create a follow-up of a follow-up. Please select a top-level encounter as the parent.');
     }
@@ -479,14 +513,17 @@ export const performTransactionalFhirRequests = async (input: TransactionInput):
   if (!patient && !createPatientRequest?.fullUrl) {
     throw new Error('Unexpectedly have no patient and no request to make one');
   }
+
   const patientRef = patient ? `Patient/${patient.id}` : createPatientRequest?.fullUrl || '';
 
   const now = DateTime.now().setZone('UTC');
   const nowIso = now.toISO() ?? '';
+
   const startsAsBooked =
     visitType === VisitType.PreBook ||
     visitType === VisitType.PostTelemed ||
     (visitType === VisitType.WalkIn && serviceMode === ServiceMode.virtual);
+
   const initialAppointmentStatus: FhirAppointmentStatus = startsAsBooked ? 'booked' : 'arrived';
   const initialEncounterStatus: FhirEncounterStatus = startsAsBooked ? 'planned' : 'arrived';
 
@@ -501,6 +538,7 @@ export const performTransactionalFhirRequests = async (input: TransactionInput):
   if (serviceMode === ServiceMode.virtual) {
     const { encExtensions: telemedEncExtensions, apptExtensions: telemedApptExtensions } =
       getTelemedRequiredAppointmentEncounterExtensions(patientRef, nowIso);
+
     apptExtensions.push(...telemedApptExtensions);
     encExtensions.push(...telemedEncExtensions);
   }
@@ -515,18 +553,21 @@ export const performTransactionalFhirRequests = async (input: TransactionInput):
   const apptUrl = `urn:uuid:${uuid()}`;
   const bookedViaGroupId = slot ? getSlotBookedViaGroupId(slot) : undefined;
   const participants: AppointmentParticipant[] = [];
+
   participants.push({
     actor: {
       reference: patientRef,
     },
     status: 'accepted',
   });
+
   participants.push({
     actor: {
       reference: `${scheduleOwner.resourceType}/${scheduleOwner.id}`,
     },
     status: 'accepted',
   });
+
   // When the booking is scoped to a Location (either directly or via a group
   // member), add it as a participant so consumers that filter by Location
   // (tracking board, reports) see the booking. Skip if the scheduleOwner
@@ -539,6 +580,7 @@ export const performTransactionalFhirRequests = async (input: TransactionInput):
       status: 'accepted',
     });
   }
+
   // When the scheduleOwner is a PractitionerRole, add the underlying
   // Practitioner as a participant too. This keeps Appointment.participant-based
   // provider readers consistent with direct-Practitioner bookings.
@@ -550,6 +592,7 @@ export const performTransactionalFhirRequests = async (input: TransactionInput):
       status: 'accepted',
     });
   }
+
   // When the booking came through a group HS (stamped on the Slot via the
   // slot-booked-via-group extension at vending time), add the HS to
   // participants. Skip if scheduleOwner already IS the HS — that would just
@@ -568,6 +611,7 @@ export const performTransactionalFhirRequests = async (input: TransactionInput):
   let slotReference: Reference | undefined;
   const postSlotRequests: BatchInputPostRequest<Slot>[] = [];
   const patchSlotRequests: BatchInputRequest<Slot>[] = [];
+
   if (isValidUUID(slot?.id ?? '') && slot?.meta !== undefined) {
     // assume slot already persisted
     slotReference = {
@@ -602,6 +646,7 @@ export const performTransactionalFhirRequests = async (input: TransactionInput):
   }
 
   const otherMetaTags = performPreProcessing ? [FHIR_APPOINTMENT_READY_FOR_PREPROCESSING_TAG] : [];
+
   const apptResource: Appointment = {
     resourceType: 'Appointment',
     meta: {
@@ -624,7 +669,9 @@ export const performTransactionalFhirRequests = async (input: TransactionInput):
       text: visitType,
     },
     serviceCategory: slot?.serviceCategory,
-    description: reasonForVisit,
+    // FHIR rejects an empty string for Appointment.description (e.g. EHR "Add
+    // Visit", which has no reason-for-visit field), so omit it when blank.
+    description: reasonForVisit?.trim() || undefined,
     status: initialAppointmentStatus,
     created: now.toISO() ?? '',
     extension: apptExtensions,
@@ -652,6 +699,7 @@ export const performTransactionalFhirRequests = async (input: TransactionInput):
   // scheduleOwner alone can't distinguish "direct PR" from "group via
   // pools-providers" — the extension is the disambiguator.
   let bookedViaGroup: HealthcareService | undefined;
+
   if (bookedViaGroupId) {
     try {
       bookedViaGroup = await oystehr.fhir.get<HealthcareService>({
@@ -665,6 +713,7 @@ export const performTransactionalFhirRequests = async (input: TransactionInput):
   }
 
   let encounterParticipants: Encounter['participant'] | undefined;
+
   if (attendingPractitioner) {
     const isGroupBooking = bookedViaGroupId !== undefined;
     const groupAllowsStamping = bookedViaGroup ? getGroupAssignmentMode(bookedViaGroup) === 'provider' : false;
@@ -684,6 +733,7 @@ export const performTransactionalFhirRequests = async (input: TransactionInput):
   // and attaching it to the new encounter's diagnosis array (preserving rank/primary).
   const followUpDiagnosisRequests: BatchInputPostRequest<Condition>[] = [];
   const followUpDiagnosisEntries: NonNullable<Encounter['diagnosis']> = [];
+
   for (const { condition: parentCondition, rank } of carriedOverDiagnoses) {
     const newConditionUrl = `urn:uuid:${uuid()}`;
     const newCondition: Condition = {
@@ -747,23 +797,7 @@ export const performTransactionalFhirRequests = async (input: TransactionInput):
     ...(followUpDiagnosisEntries.length > 0 && { diagnosis: followUpDiagnosisEntries }),
     ...(parentEncounterId && {
       partOf: { reference: `Encounter/${parentEncounterId}` },
-      type: [
-        {
-          coding: [
-            {
-              system: FOLLOWUP_SYSTEMS.type.url,
-              code: FOLLOWUP_SYSTEMS.type.code,
-              display: 'Follow-up Encounter',
-            },
-            {
-              system: FOLLOWUP_SUBTYPE_SYSTEM,
-              code: 'scheduled',
-              display: 'scheduled',
-            },
-          ],
-          text: 'Follow-up Encounter',
-        },
-      ],
+      type: buildFollowupEncounterType('scheduled'),
     }),
   };
 
@@ -799,6 +833,9 @@ export const performTransactionalFhirRequests = async (input: TransactionInput):
     resourceType: 'QuestionnaireResponse',
     questionnaire: `${questionnaire.url}|${questionnaire.version}`,
     status: 'in-progress',
+    // Marks this as the intake paperwork QR so readers recognize it even when it points at a
+    // paperwork flow (whose canonical is the flow url, not an intake-paperwork url).
+    meta: { tag: [INTAKE_PAPERWORK_QR_TAG] },
     subject: { reference: patientRef },
     encounter: { reference: encUrl },
     item, // contains the pre-populated answers for the Patient
@@ -837,6 +874,7 @@ export const performTransactionalFhirRequests = async (input: TransactionInput):
     `Send confirmation text to ${getFullestAvailableName(patientToUse)}`,
     apptUrl
   );
+
   const taskRequest: BatchInputPostRequest<Task> = {
     method: 'POST',
     url: '/Task',
@@ -845,33 +883,14 @@ export const performTransactionalFhirRequests = async (input: TransactionInput):
 
   const postAccountRequests: BatchInputPostRequest<Account>[] = [];
   if (createPatientRequest?.fullUrl) {
-    const accountResource: Account = {
-      resourceType: 'Account',
-      status: 'active',
-      type: { ...PATIENT_BILLING_ACCOUNT_TYPE },
-      subject: [{ reference: createPatientRequest.fullUrl }],
-    };
-    postAccountRequests.push({
-      method: 'POST',
-      url: '/Account',
-      resource: accountResource,
-    });
+    postAccountRequests.push(makePatientBillingAccountRequest(createPatientRequest.fullUrl));
   } else if (patient && currentPatientAccount === undefined) {
-    const accountResource: Account = {
-      resourceType: 'Account',
-      status: 'active',
-      type: { ...PATIENT_BILLING_ACCOUNT_TYPE },
-      subject: [{ reference: `Patient/${patient.id}` }],
-    };
-    postAccountRequests.push({
-      method: 'POST',
-      url: '/Account',
-      resource: accountResource,
-    });
+    postAccountRequests.push(makePatientBillingAccountRequest(`Patient/${patient.id}`));
   }
 
   const postAccidentConditionRequests: BatchInputPostRequest<Condition>[] = [];
   const serviceCategoryCode = getCoding(slot?.serviceCategory, SERVICE_CATEGORY_SYSTEM)?.code;
+
   if (serviceCategoryCode === 'workers-comp') {
     postAccidentConditionRequests.push({
       method: 'POST',
@@ -971,8 +990,11 @@ const extractResourcesFromBundle = (bundle: Bundle<Resource>): TransactionOutput
 
 const injectMetadataIfNeeded = (maybeMetadata: Appointment['meta']): Appointment['meta'] => {
   let appointmentMetadata: Appointment['meta'] = maybeMetadata;
+
   console.log('PLAYWRIGHT_SUITE_ID: ', process.env.PLAYWRIGHT_SUITE_ID);
+
   let shouldInjectTestMetadata = process.env.PLAYWRIGHT_SUITE_ID ?? false;
+
   if (maybeMetadata && shouldInjectTestMetadata) {
     const hasTestTagAlready =
       maybeMetadata.tag?.some((coding) => {
@@ -991,5 +1013,6 @@ const injectMetadataIfNeeded = (maybeMetadata: Appointment['meta']): Appointment
     };
     console.log('using test metadata: ', JSON.stringify(appointmentMetadata, null, 2));
   }
+
   return appointmentMetadata;
 };

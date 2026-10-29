@@ -1,28 +1,33 @@
-import { Box, Typography } from '@mui/material';
+import { Box, Typography, useTheme } from '@mui/material';
 import React, { FC } from 'react';
 import { AssessmentTitle } from 'src/components/AssessmentTitle';
 import { dataTestIds } from 'src/constants/data-test-ids';
 import {
-  ASQ_FIELD,
-  ASQKeys,
-  asqLabels,
-  Field,
+  SectionHeading,
+  useNoteSectionTitleInCardHeader,
+} from 'src/features/visits/shared/components/NoteSectionHeading';
+import {
   formatScreeningQuestionWithNote,
-  NoteDTO,
-  patientScreeningQuestionsConfig,
   shouldDisplayScreeningQuestion,
-} from 'utils';
-import { useChartData } from '../../../stores/appointment/appointment.store';
+} from 'utils/lib/helpers/screening-questions/screening-questions-formatting.helper';
+import { patientScreeningQuestionsConfig } from 'utils/lib/ottehr-config/screening-questions';
+import { ASQ_FIELD, ASQKeys, asqLabels } from 'utils/lib/types/api/chart-data/chart-data.constants';
+import { NoteDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
+import { Field } from 'utils/lib/types/data/screening-questions/types';
+import { useVisitNote } from '../../../hooks/useVisitNote';
 
 type AdditionalQuestionsContainerProps = {
   notes?: NoteDTO[];
+  emptyMessage?: string;
 };
 
-export const AdditionalQuestionsContainer: FC<AdditionalQuestionsContainerProps> = ({ notes }) => {
-  const { chartData } = useChartData();
+export const AdditionalQuestionsContainer: FC<AdditionalQuestionsContainerProps> = ({ notes, emptyMessage }) => {
+  const titleInCardHeader = useNoteSectionTitleInCardHeader();
+  const { data: note } = useVisitNote();
+  const theme = useTheme();
 
   const getObservationByField = (field: string): any => {
-    return chartData?.observations?.find((obs) => obs.field === field);
+    return note?.screening.observations?.find((obs) => obs.field === field);
   };
 
   const renderFieldValue = (field: Field): React.ReactElement | null => {
@@ -39,16 +44,18 @@ export const AdditionalQuestionsContainer: FC<AdditionalQuestionsContainerProps>
     );
   };
 
-  const currentASQObs = chartData?.observations?.find((obs) => obs.field === ASQ_FIELD);
+  const currentASQObs = note?.screening.observations?.find((obs) => obs.field === ASQ_FIELD);
 
   return (
     <Box
       sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, width: '100%' }}
       data-testid={dataTestIds.progressNotePage.additionalQuestions}
     >
-      <Typography variant="h5" color="primary.dark">
-        Additional questions
-      </Typography>
+      {!titleInCardHeader && <SectionHeading>Screening questions</SectionHeading>}
+
+      {emptyMessage && !note?.screening.observations?.length && !notes?.length && (
+        <Typography color={theme.palette.text.secondary}>{emptyMessage}</Typography>
+      )}
 
       {/* Render all fields from config */}
       {patientScreeningQuestionsConfig.fields.map((field) => renderFieldValue(field))}

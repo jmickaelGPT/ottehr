@@ -1,27 +1,30 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import Stripe from 'stripe';
+import { getStripeCustomerIdFromAccount } from 'utils/lib/fhir/helpers';
 import {
-  FHIR_RESOURCE_NOT_FOUND,
   getStripeAccountForAppointmentOrEncounter,
-  getStripeCustomerIdFromAccount,
   getStripeTerminalLocationIdForAppointmentOrEncounter,
+} from 'utils/lib/fhir/payments';
+import {
   InitiatePatientPaymentTerminalInput,
   InitiatePatientPaymentTerminalResponse,
+} from 'utils/lib/types/api/patient-payment-types';
+import {
+  FHIR_RESOURCE_NOT_FOUND,
   INVALID_INPUT_ERROR,
-  isValidUUID,
   MISSING_REQUEST_BODY,
   MISSING_REQUIRED_PARAMETERS,
   STRIPE_CUSTOMER_ID_NOT_FOUND_ERROR,
-} from 'utils';
-import {
-  createOystehrClient,
-  getAuth0Token,
-  getStripeClient,
-  lambdaResponse,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../../shared';
+} from 'utils/lib/types/errors';
+import { isValidUUID } from 'utils/lib/validation/helper';
+import { getAuth0Token } from '../../../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../../../shared/helpers';
+import { lambdaResponse } from '../../../../shared/lambda';
+import { wrapHandler } from '../../../../shared/sentry';
+import { getStripeClient, stripeEncounterMetadata } from '../../../../shared/stripeIntegration';
+import { ZambdaInput } from '../../../../shared/types/common';
+import { safeJsonParse } from '../../../../shared/validation';
 import { getAccountAndCoverageResourcesForPatient } from '../../../shared/harvest';
 
 const ZAMBDA_NAME = 'patient-payments-terminal-initiate-payment';
@@ -37,7 +40,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     oystehrM2MClientToken = await getAuth0Token(input.secrets);
   }
 
-  const oystehrClient = createOystehrClient(oystehrM2MClientToken, input.secrets);
+  const oystehrClient = createClinicalOystehrClient(oystehrM2MClientToken, input.secrets);
   const { stripeCustomerId, stripeAccount } = await getStripePaymentContext(validatedParameters, oystehrClient);
 
   const stripeClient = getStripeClient(input.secrets);
@@ -77,10 +80,10 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
       setup_future_usage: 'off_session',
       description:
         validatedParameters.description ?? `Terminal payment for encounter ${validatedParameters.encounterId}`,
-      metadata: {
-        oystehr_patient_id: validatedParameters.patientId,
-        oystehr_encounter_id: validatedParameters.encounterId,
-      },
+      metadata: stripeEncounterMetadata({
+        encounterId: validatedParameters.encounterId,
+        patientId: validatedParameters.patientId,
+      }),
     },
     {
       stripeAccount,
@@ -123,7 +126,7 @@ const validateRequestParameters = (input: ZambdaInput): InitiatePatientPaymentTe
     throw MISSING_REQUEST_BODY;
   }
 
-  const { patientId, encounterId, amountInCents, readerId, simulatedReader, description } = JSON.parse(input.body);
+  const { patientId, encounterId, amountInCents, readerId, simulatedReader, description } = safeJsonParse(input.body);
 
   const missingParams: string[] = [];
   if (!patientId) {

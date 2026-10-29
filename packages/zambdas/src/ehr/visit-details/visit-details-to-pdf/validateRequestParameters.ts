@@ -1,6 +1,11 @@
-import { VisitDetailsInputSchema, VisitDetailsInputValidated, VisitDetailsInputValidatedSchema } from 'utils';
+import {
+  VisitDetailsInputSchema,
+  VisitDetailsInputValidated,
+  VisitDetailsInputValidatedSchema,
+} from 'utils/lib/types/api/visit-details/visit-details.types';
 import { ZodError } from 'zod';
-import { formatZodError, ZambdaInput } from '../../../shared';
+import { ZambdaInput } from '../../../shared/types/common';
+import { formatZodError, safeJsonParse } from '../../../shared/validation';
 
 export function validateRequestParameters(input: ZambdaInput): VisitDetailsInputValidated {
   console.group('validateRequestParameters');
@@ -17,7 +22,7 @@ export function validateRequestParameters(input: ZambdaInput): VisitDetailsInput
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(input.body);
+    parsed = safeJsonParse(input.body);
   } catch {
     throw new Error('Invalid JSON in request body.');
   }

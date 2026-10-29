@@ -1,29 +1,22 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { QuestionnaireResponse, Task } from 'fhir/r4b';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { GetMergePatientsTaskResponse, MergePatientsResponse } from 'utils/lib/types/api/patient-account';
+import { RoleType } from 'utils/lib/types/api/user.types';
+import { TASK_INPUT_TYPE_CODES, TASK_INPUT_TYPE_SYSTEM, TaskIndicator } from 'utils/lib/types/common';
 import {
-  GetMergePatientsTaskResponse,
-  getSecret,
-  isValidUUID,
-  MergePatientsResponse,
   MISSING_REQUEST_BODY,
   MISSING_REQUIRED_PARAMETERS,
   NOT_AUTHORIZED,
   QUESTIONNAIRE_RESPONSE_INVALID_CUSTOM_ERROR,
-  RoleType,
-  Secrets,
-  SecretsKeys,
-  TASK_INPUT_TYPE_CODES,
-  TASK_INPUT_TYPE_SYSTEM,
-  TaskIndicator,
-} from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  getUser,
-  topLevelCatch,
-  wrapHandler,
-  ZambdaInput,
-} from '../../shared';
+} from 'utils/lib/types/errors';
+import { isValidUUID } from 'utils/lib/validation/helper';
+import { checkOrCreateM2MClientToken, getUser } from '../../shared/auth';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { topLevelCatch } from '../../shared/lambda';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { safeJsonParse } from '../../shared/validation';
 
 const ZAMBDA_NAME = 'merge-patients';
 
@@ -59,7 +52,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     const validated = validateRequestParameters(input);
     const { secrets } = validated;
     m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-    const oystehr = createOystehrClient(m2mToken, secrets);
+    const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
     if (validated.mode === 'status') {
       if (!validated.patientId) {
@@ -129,7 +122,7 @@ const validateRequestParameters = (input: ZambdaInput): ValidatedInput => {
     throw NOT_AUTHORIZED;
   }
   const { secrets } = input;
-  const body = JSON.parse(input.body);
+  const body = safeJsonParse(input.body);
 
   // Status mode: caller passes only patientId (no questionnaireResponse).
   // NB: the wire discriminator is `requestMode`, not `mode` — the Oystehr SDK
@@ -191,7 +184,7 @@ const otherPatientIdOf = (task: Task): string =>
 
 async function getActiveMergeTaskForPatient(
   patientId: string,
-  oystehr: ReturnType<typeof createOystehrClient>
+  oystehr: ReturnType<typeof createClinicalOystehrClient>
 ): Promise<GetMergePatientsTaskResponse> {
   // Can't search by the merged-away patient directly — it lives in a Task.input
   // valueString, not a search param. So pull recent active/attention merge tasks

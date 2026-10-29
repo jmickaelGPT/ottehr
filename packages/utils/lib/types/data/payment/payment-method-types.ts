@@ -10,6 +10,7 @@ interface PaymentMethodParameters {
 
 export type PaymentMethodSetupParameters = PaymentMethodPatientParameters;
 export type PaymentMethodSetDefaultParameters = PaymentMethodPatientParameters & PaymentMethodParameters;
+export type PaymentMethodUnsetDefaultParameters = PaymentMethodPatientParameters;
 export type PaymentMethodListParameters = PaymentMethodPatientParameters;
 export type PaymentMethodDeleteParameters = PaymentMethodPatientParameters & PaymentMethodParameters;
 
@@ -28,6 +29,7 @@ export interface ListPaymentMethodsZambdaOutput {
 export interface PaymentMethodSetupZambdaOutput {
   clientSecret: string;
   stripeAccount: string | undefined;
+  createdWithoutEmail?: boolean;
 }
 
 export interface GetPatientBalancesZambdaInput {
@@ -37,6 +39,7 @@ export interface GetPatientBalancesZambdaInput {
 export interface GetPatientBalancesZambdaOutput {
   totalBalanceCents: number;
   pendingPaymentCents: number;
+  patientCreditCents: number;
   encounters: {
     encounterId: string;
     encounterDate: string;

@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BrowserRouter } from 'react-router-dom';
-import { GetRadiologyOrderListZambdaOrder, RadiologyOrderStatus } from 'utils';
+import { GetRadiologyOrderListZambdaOrder, RadiologyOrderStatus } from 'utils/lib/types/api/radiology';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { RadiologyTable } from '../../src/features/radiology/components/RadiologyTable';
 
@@ -32,11 +32,15 @@ describe('RadiologyTable - Cancel Radiology Order Tests', () => {
   const mockOrders: GetRadiologyOrderListZambdaOrder[] = [
     {
       serviceRequestId: 'order1',
+      cptCodeDisplay: 'X-Ray Chest PA and Lateral',
       studyType: 'X-Ray Chest PA and Lateral',
       diagnosis: 'Chest pain',
       orderAddedDateTime: '2024-12-20T10:00:00Z',
       visitDateTime: '2024-12-20T09:00:00Z',
       providerName: 'Dr. John Doe',
+      providerId: 'practitioner-1',
+      canEditPreliminaryReport: false,
+      canEditFinalReport: false,
       status: RadiologyOrderStatus.pending,
       appointmentId: 'appt1',
       isStat: false,
@@ -44,11 +48,15 @@ describe('RadiologyTable - Cancel Radiology Order Tests', () => {
     },
     {
       serviceRequestId: 'order2',
+      cptCodeDisplay: 'CT Head',
       studyType: 'CT Head',
       diagnosis: 'Headache',
       orderAddedDateTime: '2024-12-19T14:30:00Z',
       visitDateTime: '2024-12-19T13:00:00Z',
       providerName: 'Dr. Jane Smith',
+      providerId: 'practitioner-2',
+      canEditPreliminaryReport: false,
+      canEditFinalReport: false,
       status: RadiologyOrderStatus.final,
       appointmentId: 'appt2',
       isStat: true,
@@ -74,9 +82,14 @@ describe('RadiologyTable - Cancel Radiology Order Tests', () => {
       showDeleteRadiologyOrderDialog: mockShowDeleteRadiologyOrderDialog,
       DeleteOrderDialog: null,
       handleSaveReport: vi.fn(),
+      handleUpdateReport: vi.fn(),
+      handleSavePerformedBy: vi.fn().mockResolvedValue(true),
       handleSendForFinalRead: vi.fn(),
+      handleUpdateConsent: vi.fn(),
       isSavingReport: false,
+      isSavingPerformedBy: false,
       isSendingForFinalRead: false,
+      isUpdatingConsent: false,
     });
 
     mockNavigate.mockReturnValue(vi.fn());
@@ -163,9 +176,14 @@ describe('RadiologyTable - Cancel Radiology Order Tests', () => {
       showDeleteRadiologyOrderDialog: mockShowDeleteRadiologyOrderDialog,
       DeleteOrderDialog: null,
       handleSaveReport: vi.fn(),
+      handleUpdateReport: vi.fn(),
+      handleSavePerformedBy: vi.fn().mockResolvedValue(true),
       handleSendForFinalRead: vi.fn(),
+      handleUpdateConsent: vi.fn(),
       isSavingReport: false,
+      isSavingPerformedBy: false,
       isSendingForFinalRead: false,
+      isUpdatingConsent: false,
     });
 
     renderComponent();
@@ -190,9 +208,14 @@ describe('RadiologyTable - Cancel Radiology Order Tests', () => {
       showDeleteRadiologyOrderDialog: mockShowDeleteRadiologyOrderDialog,
       DeleteOrderDialog: null,
       handleSaveReport: vi.fn(),
+      handleUpdateReport: vi.fn(),
+      handleSavePerformedBy: vi.fn().mockResolvedValue(true),
       handleSendForFinalRead: vi.fn(),
+      handleUpdateConsent: vi.fn(),
       isSavingReport: false,
+      isSavingPerformedBy: false,
       isSendingForFinalRead: false,
+      isUpdatingConsent: false,
     });
 
     renderComponent();
@@ -215,9 +238,14 @@ describe('RadiologyTable - Cancel Radiology Order Tests', () => {
       showDeleteRadiologyOrderDialog: mockShowDeleteRadiologyOrderDialog,
       DeleteOrderDialog: null,
       handleSaveReport: vi.fn(),
+      handleUpdateReport: vi.fn(),
+      handleSavePerformedBy: vi.fn().mockResolvedValue(true),
       handleSendForFinalRead: vi.fn(),
+      handleUpdateConsent: vi.fn(),
       isSavingReport: false,
+      isSavingPerformedBy: false,
       isSendingForFinalRead: false,
+      isUpdatingConsent: false,
     });
 
     renderComponent();
@@ -259,9 +287,14 @@ describe('RadiologyTable - Cancel Radiology Order Tests', () => {
       showDeleteRadiologyOrderDialog: mockShowDeleteRadiologyOrderDialog,
       DeleteOrderDialog: null,
       handleSaveReport: vi.fn(),
+      handleUpdateReport: vi.fn(),
+      handleSavePerformedBy: vi.fn().mockResolvedValue(true),
       handleSendForFinalRead: vi.fn(),
+      handleUpdateConsent: vi.fn(),
       isSavingReport: false,
+      isSavingPerformedBy: false,
       isSendingForFinalRead: false,
+      isUpdatingConsent: false,
     });
 
     renderComponent();
@@ -288,9 +321,14 @@ describe('RadiologyTable - Cancel Radiology Order Tests', () => {
       showDeleteRadiologyOrderDialog: mockShowDeleteRadiologyOrderDialog,
       DeleteOrderDialog: mockDialog,
       handleSaveReport: vi.fn(),
+      handleUpdateReport: vi.fn(),
+      handleSavePerformedBy: vi.fn().mockResolvedValue(true),
       handleSendForFinalRead: vi.fn(),
+      handleUpdateConsent: vi.fn(),
       isSavingReport: false,
+      isSavingPerformedBy: false,
       isSendingForFinalRead: false,
+      isUpdatingConsent: false,
     });
 
     renderComponent();

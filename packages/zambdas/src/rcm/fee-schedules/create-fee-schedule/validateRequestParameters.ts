@@ -1,5 +1,13 @@
-import { MISSING_REQUEST_BODY, MISSING_REQUIRED_PARAMETERS } from 'utils';
-import { ZambdaInput } from '../../../shared';
+import { MISSING_REQUEST_BODY } from 'utils/lib/types/errors';
+import { z } from 'zod';
+import { ZambdaInput } from '../../../shared/types/common';
+import { safeJsonParse, safeValidate } from '../../../shared/validation';
+
+const CreateFeeScheduleBodySchema = z.object({
+  name: z.string().min(1),
+  effectiveDate: z.string().min(1),
+  description: z.string().optional(),
+});
 
 export interface CreateFeeScheduleParams {
   name: string;
@@ -13,11 +21,7 @@ export function validateRequestParameters(input: ZambdaInput): CreateFeeSchedule
     throw MISSING_REQUEST_BODY;
   }
 
-  const { name, effectiveDate, description } = JSON.parse(input.body);
-
-  if (!name || !effectiveDate) {
-    throw MISSING_REQUIRED_PARAMETERS(['name', 'effectiveDate']);
-  }
+  const { name, effectiveDate, description } = safeValidate(CreateFeeScheduleBodySchema, safeJsonParse(input.body));
 
   return {
     name,

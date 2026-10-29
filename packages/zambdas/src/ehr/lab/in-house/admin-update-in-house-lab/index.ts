@@ -3,27 +3,24 @@ import { APIGatewayProxyResult } from 'aws-lambda';
 import { randomUUID } from 'crypto';
 import { Operation } from 'fast-json-patch';
 import { ActivityDefinition, Provenance } from 'fhir/r4b';
+import { makeOptimisticLockIfMatchHeader } from 'utils/lib/fhir/helpers';
+import { getApiError } from 'utils/lib/helpers/oystehrApi';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { IN_HOUSE_LAB_LATEST_TAG_DEFINITION } from 'utils/lib/types/data/in-house/in-house.constants';
 import {
   AdminEditInHouseLab,
   AdminInHouseLabConfigOutput,
   AdminUpdateInHouseLabInput,
   AdminUpdateInHouseLabStatus,
-  getApiError,
-  getSecret,
-  IN_HOUSE_LAB_LATEST_TAG_DEFINITION,
-  INVALID_INPUT_ERROR,
-  makeOptimisticLockIfMatchHeader,
-  Secrets,
-  SecretsKeys,
-} from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  parseCreatedResourcesBundle,
-  topLevelCatch,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../../shared';
+} from 'utils/lib/types/data/in-house/in-house.types';
+import { INVALID_INPUT_ERROR } from 'utils/lib/types/errors';
+import { checkOrCreateM2MClientToken } from '../../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../../shared/helpers';
+import { topLevelCatch } from '../../../../shared/lambda';
+import { truncateForLog } from '../../../../shared/logging';
+import { parseCreatedResourcesBundle } from '../../../../shared/resources.helpers';
+import { wrapHandler } from '../../../../shared/sentry';
+import { ZambdaInput } from '../../../../shared/types/common';
 import {
   convertAdminInHouseLabItemDefinitionToActivityDefinition,
   incrementSemVer,
@@ -38,8 +35,6 @@ let m2mToken: string;
 const ZAMBDA_NAME = 'admin-update-in-house-lab';
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`admin-update-in-house-lab started, input: ${JSON.stringify(input)}`);
-
   try {
     const validatedParameters: AdminUpdateInHouseLabInput & { secrets: Secrets | null; userToken: string } =
       validateRequestParameters(input);
@@ -49,7 +44,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     console.log('validateRequestParameters success');
 
     m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-    const oystehr = createOystehrClient(m2mToken, secrets);
+    const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
     let mutatedActivityDefinition: ActivityDefinition;
     if (dataAndUpdateType.updateType === 'edit') {
@@ -66,7 +61,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     );
 
     const response: AdminInHouseLabConfigOutput = makeAdminInHouseLabConfigOutput(mutatedActivityDefinition);
-    console.log('admin-update-in-house-lab response', JSON.stringify(response));
+    console.log('admin-update-in-house-lab response', truncateForLog(response));
 
     return {
       statusCode: 200,

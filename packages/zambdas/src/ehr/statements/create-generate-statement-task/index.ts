@@ -1,16 +1,19 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Appointment, Encounter, Patient, Task } from 'fhir/r4b';
 import { DateTime } from 'luxon';
+import { getTaskResource } from 'utils/lib/fhir/helpers';
+import { getFullestAvailableName } from 'utils/lib/fhir/patient';
+import { TaskIndicator } from 'utils/lib/types/common';
 import {
-  getFullestAvailableName,
-  getTaskResource,
   INVALID_INPUT_ERROR,
   MISSING_REQUEST_BODY,
   MISSING_REQUEST_SECRETS,
   MISSING_REQUIRED_PARAMETERS,
-  TaskIndicator,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../shared';
+} from 'utils/lib/types/errors';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 
 const ZAMBDA_NAME = 'create-generate-statement-task';
 
@@ -39,7 +42,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   const validatedInput = validateRequestParameters(input);
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, input.secrets);
-  const oystehr = createOystehrClient(m2mToken, input.secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, input.secrets);
 
   const encounter = await oystehr.fhir.get<Encounter>({
     resourceType: 'Encounter',

@@ -4,16 +4,19 @@ import { Box, IconButton, Typography, useTheme } from '@mui/material';
 import { enqueueSnackbar } from 'notistack';
 import React, { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { ExtendedMedicationDataForResponse, getApiError } from 'utils';
+import { enqueueOrderDeleteWarnings } from 'src/features/visits/shared/utils/orderDeleteWarnings';
+import { getApiError } from 'utils/lib/helpers/oystehrApi';
+import { ExtendedMedicationDataForResponse } from 'utils/lib/types/api/medication-administration.types';
 import { CustomDialog } from '../../../../../../components/dialogs/CustomDialog';
 import { useMedicationManagement } from '../../../hooks/useMedicationManagement';
 import { getEditOrderUrl } from '../../../routing/helpers';
 
 interface MedicationActionsProps {
   medication: ExtendedMedicationDataForResponse;
+  onEditOrder?: (medicationId: string) => void;
 }
 
-export const MedicationActions: React.FC<MedicationActionsProps> = ({ medication }) => {
+export const MedicationActions: React.FC<MedicationActionsProps> = ({ medication, onEditOrder }) => {
   const theme = useTheme();
   const { canEditMedication, deleteMedication } = useMedicationManagement();
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
@@ -36,8 +39,7 @@ export const MedicationActions: React.FC<MedicationActionsProps> = ({ medication
   const isEditable = canEditMedication(medication);
   // Edit is available for pending (edit order) and completed (view/edit completed details)
   const showEdit = isEditable || isCompleted;
-  // Delete is available only for pending medications
-  const showDelete = isEditable;
+  const showDelete = medication.status !== 'cancelled';
 
   if (!showEdit && !showDelete) {
     return null;
@@ -56,7 +58,7 @@ export const MedicationActions: React.FC<MedicationActionsProps> = ({ medication
     setIsDeleting(true);
     setError(null);
     try {
-      await deleteMedication(medication.id);
+      enqueueOrderDeleteWarnings(await deleteMedication(medication.id));
       setIsDeleteDialogOpen(false);
     } catch (error) {
       const errorMessage = getApiError({
@@ -76,6 +78,10 @@ export const MedicationActions: React.FC<MedicationActionsProps> = ({ medication
   );
 
   const navigateToEditOrder = (): void => {
+    if (onEditOrder) {
+      onEditOrder(medication.id);
+      return;
+    }
     if (!appointmentId) {
       enqueueSnackbar('navigation error', { variant: 'error' });
       return;

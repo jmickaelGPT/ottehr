@@ -3,17 +3,23 @@ import { APIGatewayProxyResult } from 'aws-lambda';
 import { randomUUID } from 'crypto';
 import { HealthcareService, PractitionerRole, Schedule } from 'fhir/r4b';
 import {
-  BLANK_SCHEDULE_JSON_TEMPLATE,
-  INVALID_INPUT_ERROR,
-  MISSING_REQUEST_BODY,
-  MISSING_REQUIRED_PARAMETERS,
   PRACTITIONER_ROLE_ALL_CATEGORIES_EXTENSION_URL,
   SCHEDULE_DISPLAY_NAME_EXTENSION_URL,
   SCHEDULE_EXTENSION_URL,
-  Secrets,
   TIMEZONE_EXTENSION_URL,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../shared';
+} from 'utils/lib/fhir/constants';
+import { Secrets } from 'utils/lib/secrets';
+import {
+  INVALID_INPUT_ERROR,
+  MISSING_REQUEST_BODY,
+  MISSING_REQUIRED_PARAMETERS,
+  PRACTITIONER_SCHEDULE_CONFLICT_ERROR,
+} from 'utils/lib/types/errors';
+import { BLANK_SCHEDULE_JSON_TEMPLATE } from 'utils/lib/utils/scheduleUtils';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import { checkPractitionerRoleConflict } from '../admin-practitioner-role-shared/check-conflict';
 
 interface AdminCreatePractitionerRoleInput {
@@ -97,7 +103,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   const parsed = validateRequestParameters(input);
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, parsed.secrets);
-  const oystehr = createOystehrClient(m2mToken, parsed.secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, parsed.secrets);
 
   // Reject configurations where this provider already has an active schedule
   // at this location offering one of the requested categories. We resolve
@@ -123,19 +129,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     { categoryNameById }
   );
   if (conflict) {
-    return {
-      statusCode: 400,
-      body: JSON.stringify({
-        code: 'PRACTITIONER_SCHEDULE_CONFLICT',
-        message: `This provider already has an active schedule at this location offering ${conflict.conflictingCategoryNames.join(
-          ', '
-        )}. Remove ${
-          conflict.conflictingCategoryNames.length === 1 ? 'it' : 'them'
-        } from that schedule first, or pick a different location.`,
-        conflictingPractitionerRoleId: conflict.conflictingPractitionerRoleId,
-        conflictingCategoryNames: conflict.conflictingCategoryNames,
-      }),
-    };
+    throw PRACTITIONER_SCHEDULE_CONFLICT_ERROR(conflict.conflictingCategoryNames);
   }
 
   // Create the PractitionerRole and its Schedule in a single FHIR transaction

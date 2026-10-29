@@ -2,33 +2,30 @@ import Oystehr from '@oystehr/sdk';
 import { randomUUID } from 'crypto';
 import { Appointment, Location, Patient, Schedule, Slot } from 'fhir/r4b';
 import { DateTime } from 'luxon';
+import { appointmentTypeForAppointment } from 'utils/lib/fhir/appointments';
+import { SLOT_WALKIN_APPOINTMENT_TYPE_CODING, SlotServiceCategory, SLUG_SYSTEM } from 'utils/lib/fhir/constants';
+import { checkEncounterIsVirtual } from 'utils/lib/fhir/encounter';
+import { getSlugForBookableResource, isPostTelemedAppointment } from 'utils/lib/fhir/helpers';
+import { isTelemedAppointment } from 'utils/lib/fhir/moduleIdentification';
+import { VisitStatusLabel, VisitStatusWithoutUnknown } from 'utils/lib/types/api/appointment.types';
+import { GetPatientVisitListInput, PatientVisitListResponse } from 'utils/lib/types/api/patient-visit-history.types';
 import {
-  appointmentTypeForAppointment,
-  checkEncounterIsVirtual,
   CreateAppointmentInputParams,
   CreateAppointmentResponse,
-  GetPatientVisitListInput,
+} from 'utils/lib/types/api/prebook-create-appointment/prebook-create-appointment.types';
+import { ScheduleOwnerFhirResource } from 'utils/lib/types/api/schedules';
+import { ServiceMode, Timezone } from 'utils/lib/types/common';
+import { TIMEZONES } from 'utils/lib/types/constants';
+import { PatientInfo } from 'utils/lib/types/data/telemed/appointments/create-appointment.types';
+import {
   getScheduleExtension,
   getSlotIsPostTelemed,
   getSlotIsWalkin,
-  getSlugForBookableResource,
   getTimezone,
-  isPostTelemedAppointment,
-  isTelemedAppointment,
-  PatientInfo,
-  PatientVisitListResponse,
-  ScheduleOwnerFhirResource,
-  ServiceMode,
-  SLOT_WALKIN_APPOINTMENT_TYPE_CODING,
-  SlotServiceCategory,
-  SLUG_SYSTEM,
-  Timezone,
-  TIMEZONES,
-  VisitStatusLabel,
-  VisitStatusWithoutUnknown,
-} from 'utils';
+} from 'utils/lib/utils/scheduleUtils';
 import { assert, inject } from 'vitest';
-import { getAuth0Token } from '../../src/shared';
+import { getAuth0Token } from '../../src/shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../src/shared/helpers';
 import { SECRETS } from '../data/secrets';
 import { ensureM2MPractitionerProfile } from '../helpers/configureTestM2MClient';
 import {
@@ -402,14 +399,9 @@ describe('tests for getting the visit history for a patient', () => {
       AUTH0_AUDIENCE: AUTH0_AUDIENCE,
     });
 
-    oystehr = new Oystehr({
-      accessToken: token,
-      fhirApiUrl: FHIR_API,
-      projectApiUrl: EXECUTE_ZAMBDA_URL,
-      services: {
-        zambdaApiUrl: EXECUTE_ZAMBDA_URL,
-      },
+    oystehr = createClinicalOystehrClient(token, SECRETS, {
       projectId: PROJECT_ID,
+      services: { fhirApiUrl: FHIR_API, projectApiUrl: EXECUTE_ZAMBDA_URL, zambdaApiUrl: EXECUTE_ZAMBDA_URL },
     });
     await ensureM2MPractitionerProfile(token);
     inPersonSchedule = await setUpInPersonResources();

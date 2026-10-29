@@ -19,36 +19,34 @@ import {
   Task,
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
+import { getFullestAvailableName } from 'utils/lib/fhir/patient';
+import { getPatchBinary } from 'utils/lib/fhir/resourcePatch';
 import {
-  getFullestAvailableName,
   getOrderNumber,
-  getPatchBinary,
-  getSecret,
   getTestNameFromDr,
   isPSCOrder,
-  LAB_ORDER_UPDATE_RESOURCES_EVENTS,
   makeExternalLabLabelConfig,
-  PROVENANCE_ACTIVITY_CODING_ENTITY,
-  SaveOrderCollectionData,
-  Secrets,
-  SecretsKeys,
-  UpdateLabOrderResourcesInput,
-} from 'utils';
+} from 'utils/lib/helpers/labs/helpers';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { PROVENANCE_ACTIVITY_CODING_ENTITY } from 'utils/lib/types/data/labs/labs.constants';
 import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  getMyPractitionerId,
-  sendErrors,
-  sendOrderResultEmailToPatient,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../../shared';
+  LAB_ORDER_UPDATE_RESOURCES_EVENTS,
+  SaveOrderCollectionData,
+  UpdateLabOrderResourcesInput,
+} from 'utils/lib/types/data/labs/labs.types';
+import { checkOrCreateM2MClientToken } from '../../../../shared/auth';
+import { sendOrderResultEmailToPatient } from '../../../../shared/communication';
+import { sendErrors } from '../../../../shared/errors';
+import { createClinicalOystehrClient } from '../../../../shared/helpers';
 import { createExternalLabsLabelPDF } from '../../../../shared/pdf/external-labs-label-pdf';
 import {
   createExternalLabResultPDF,
   createExternalLabResultPDFBasedOnDr,
 } from '../../../../shared/pdf/labs-results-form-pdf';
+import { getMyPractitionerId } from '../../../../shared/practitioners';
+import { wrapHandler } from '../../../../shared/sentry';
 import { createOwnerReference } from '../../../../shared/tasks';
+import { ZambdaInput } from '../../../../shared/types/common';
 import { diagnosticReportSpecificResultType, getExternalLabOrderResourcesViaServiceRequest } from '../../shared/labs';
 import {
   getSpecimenPatchAndMostRecentCollectionDate,
@@ -68,8 +66,6 @@ const ZAMBDA_NAME = 'update-lab-order-resources';
 let m2mToken: string;
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`update-lab-order-resources started, input: ${JSON.stringify(input)}`);
-
   let secrets = input.secrets;
   let validatedParameters: UpdateLabOrderResourcesInput & { secrets: Secrets | null; userToken: string };
 
@@ -89,7 +85,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   console.log('validateRequestParameters success');
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
   const practitionerIdFromCurrentUser = await getMyPractitionerId(
     validatedParameters.userToken,
     validatedParameters.secrets

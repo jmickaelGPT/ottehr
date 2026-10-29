@@ -1,25 +1,25 @@
 import { SearchParam } from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Device, DeviceProperty } from 'fhir/r4b';
+import { Secrets } from 'utils/lib/secrets';
+import { AdminUpdatePrintingConfigInput, LabelPrintingConfig } from 'utils/lib/types/data/printing';
 import {
-  AdminUpdatePrintingConfigInput,
   LABEL_PRINTING_CONFIG_DEVICE_TAG,
   LABEL_PRINTING_CONFIG_SHOULD_OPEN_ON_PRINT_EXT_SYSTEM,
   LABEL_PRINTING_DEVICE_PROPERTIES_SYSTEM,
   LABEL_PRINTING_DEVICE_PROPERTIES_VALUE_SYSTEM_MAP,
-  LabelPrintingConfig,
   LabelPrintingProperty,
-  Secrets,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../shared';
+} from 'utils/lib/utils/printing';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 let m2mToken: string;
 const ZAMBDA_NAME = 'admin-update-label-printing-config';
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`${ZAMBDA_NAME} started, input: ${JSON.stringify(input)}`);
-
   const validatedParameters: AdminUpdatePrintingConfigInput & { secrets: Secrets | null; userToken: string } =
     validateRequestParameters(input);
 
@@ -28,7 +28,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   console.log('validateRequestParameters success');
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   // we'll grab the singular existing printing config if it exists, or we'll make a new one
   const searchParams: SearchParam[] = [

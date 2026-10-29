@@ -1,19 +1,21 @@
 import Oystehr, { BatchInputGetRequest } from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Coverage, CoverageEligibilityResponse, Practitioner } from 'fhir/r4b';
+import { pullCoverageIdentifyingDetails } from 'utils/lib/fhir/billing';
+import { parseCoverageEligibilityResponse } from 'utils/lib/fhir/billing';
+import { getPreferredPharmacyFromPatient } from 'utils/lib/fhir/patient';
+import { Secrets } from 'utils/lib/secrets';
 import {
   CoverageCheckWithDetails,
-  getPreferredPharmacyFromPatient,
-  INVALID_RESOURCE_ID_ERROR,
-  isValidUUID,
-  MISSING_REQUEST_BODY,
-  MISSING_REQUIRED_PARAMETERS,
+  PATIENT_ACCOUNT_ELIGIBILITY_CHECK_COUNT,
   PatientAccountResponse,
-  pullCoverageIdentifyingDetails,
-  Secrets,
-} from 'utils';
-import { parseCoverageEligibilityResponse } from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../shared';
+} from 'utils/lib/types/api/patient-account';
+import { INVALID_RESOURCE_ID_ERROR, MISSING_REQUEST_BODY, MISSING_REQUIRED_PARAMETERS } from 'utils/lib/types/errors';
+import { isValidUUID } from 'utils/lib/validation/helper';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { getAccountAndCoverageResourcesForPatient } from '../../shared/harvest';
 
 const ZAMBDA_NAME = 'get-patient-account';
@@ -24,10 +26,9 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   console.group('validateRequestParameters');
   const validatedParameters = validateRequestParameters(input);
   console.groupEnd();
-  console.debug('validateRequestParameters success', JSON.stringify(validatedParameters));
   const { secrets } = validatedParameters;
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
   const resources = await performEffect(validatedParameters, oystehr);
 
   return {
@@ -67,7 +68,7 @@ const performEffect = async (input: Input, oystehr: Oystehr): Promise<PatientAcc
         },
         {
           name: '_count', // we shouldn't need more than the most recent 10 eligibility checks
-          value: '10',
+          value: String(PATIENT_ACCOUNT_ELIGIBILITY_CHECK_COUNT),
         },
       ],
     })
@@ -150,7 +151,6 @@ const validateRequestParameters = (input: ZambdaInput): Input => {
     throw new Error('user token unexpectedly missing');
   }
 
-  console.log('input', JSON.stringify(input, null, 2));
   const { secrets } = input;
   const { patientId } = JSON.parse(input.body);
 

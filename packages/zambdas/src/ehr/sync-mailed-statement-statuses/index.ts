@@ -1,6 +1,9 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../shared';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
 import { syncMailedStatementStatuses } from '../../shared/sync-mailed-statement-statuses';
+import { ZambdaInput } from '../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 let m2mToken: string;
@@ -11,7 +14,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   const { secrets, batchSize } = validateRequestParameters(input);
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   console.log('Starting on-demand sync of mailed statement statuses');
 

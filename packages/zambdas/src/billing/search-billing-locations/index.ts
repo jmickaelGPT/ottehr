@@ -1,8 +1,12 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Location } from 'fhir/r4b';
-import { BillingLocationOption, getNPI } from 'utils';
-import { checkOrCreateM2MClientToken, wrapHandler, ZambdaInput } from '../../shared';
+import { getNPI } from 'utils/lib/fhir/helpers';
+import { BillingLocationOption } from 'utils/lib/types/data/billing/billing.types';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { getPlaceOfServiceCode } from '../service-facility.helpers';
 import { createBillingClient, EXCLUDE_WORKING_COPIES_PARAMS, formatAddress } from '../shared';
 import { SearchBillingLocationsParams, validateRequestParameters } from './validateRequestParameters';
 
@@ -26,8 +30,8 @@ async function performEffect(
   const searchParams: { name: string; value: string }[] = [
     { name: '_count', value: '50' },
     { name: '_sort', value: 'name' },
+    ...EXCLUDE_WORKING_COPIES_PARAMS,
   ];
-  if (!params.includeWorkingCopies) searchParams.push(...EXCLUDE_WORKING_COPIES_PARAMS);
   if (params.name) searchParams.push({ name: 'name', value: params.name });
 
   const response = await oystehr.fhir.search<Location>({ resourceType: 'Location', params: searchParams });
@@ -37,6 +41,7 @@ async function performEffect(
     name: l.name ?? '',
     npi: getNPI(l) ?? '',
     address: formatAddress(l.address),
+    posCode: getPlaceOfServiceCode(l) ?? '',
   }));
 
   return { locations };

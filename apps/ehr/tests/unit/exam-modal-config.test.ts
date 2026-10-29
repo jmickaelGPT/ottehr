@@ -2,8 +2,8 @@ import type {
   ExamCardCheckboxWithModalComponent,
   ExamCardNonTextComponent,
   ExamModalCheckboxOption,
-} from 'config-types';
-import { examConfig } from 'utils';
+} from 'config-types/config/examination';
+import { examConfig } from 'utils/lib/ottehr-config/examination';
 import { assert, describe, expect, it } from 'vitest';
 
 const configComponents = examConfig.default.components;

@@ -2,6 +2,7 @@ import Oystehr, { User } from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import {
   Appointment,
+  DocumentReference,
   Encounter,
   HealthcareService,
   Location,
@@ -10,39 +11,67 @@ import {
   QuestionnaireResponse,
 } from 'fhir/r4b';
 import {
-  AppointmentSummary,
-  AvailableLocationInformation,
-  checkEncounterIsVirtual,
-  Closure,
-  DOB_UNCONFIRMED_ERROR,
   extractHealthcareServiceAndSupportingLocations,
   getLastUpdateTimestampForResource,
+} from 'utils/lib/fhir/helpers';
+import { resolveEffectiveQuestionnaire } from 'utils/lib/fhir/questionnaires';
+import {
   getQuestionnaireAndValueSets,
-  getScheduleExtension,
-  HealthcareServiceWithLocationContext,
   isNonPaperworkQuestionnaireResponse,
   mapQuestionnaireAndValueSetsToItemsList,
-  NO_READ_ACCESS_TO_PATIENT_ERROR,
-  PaperworkSupportingInfo,
-  PersonSex,
-  ScheduleExtension,
-  ScheduleType,
-  Secrets,
-  ServiceMode,
-  serviceModeForHealthcareService,
-  SLUG_SYSTEM,
-  UCGetPaperworkResponse,
-  VisitType,
-} from 'utils';
+} from 'utils/lib/helpers/paperwork/paperwork';
+import { Secrets } from 'utils/lib/secrets';
+import { HealthcareServiceWithLocationContext } from 'utils/lib/types/data/paperwork.types';
+import { PATIENT_PHOTO_CODE } from 'utils/lib/types/data/paperwork/paperwork.constants';
 import {
-  createOystehrClient,
-  getAuth0Token,
-  getOtherOfficesForLocation,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+  PaperworkSupportingInfo,
+  PatientConditionPhoto,
+  UCGetPaperworkResponse,
+} from 'utils/lib/types/data/paperwork/paperwork.types';
+import {
+  APPOINTMENT_NOT_FOUND_ERROR,
+  DOB_UNCONFIRMED_ERROR,
+  NO_READ_ACCESS_TO_PATIENT_ERROR,
+} from 'utils/lib/types/errors';
 import { getUser, userHasAccessToPatient } from '../../../shared/auth';
+import { getAuth0Token } from '../../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
+import { formatPatientSexForPaperwork, getPaperworkSupportingInfoForUserWithAccess } from '../sharedHelpers';
 import { validateRequestParameters } from './validateRequestParameters';
+
+const getPatientConditionPhotos = async (
+  oystehr: Oystehr,
+  patientID: string,
+  appointmentID: string
+): Promise<PatientConditionPhoto[]> => {
+  try {
+    const docRefs = (
+      await oystehr.fhir.search<DocumentReference>({
+        resourceType: 'DocumentReference',
+        params: [
+          { name: 'status', value: 'current' },
+          { name: 'subject', value: `Patient/${patientID}` },
+          { name: 'type', value: PATIENT_PHOTO_CODE },
+          { name: 'related', value: `Appointment/${appointmentID}` },
+        ],
+      })
+    ).unbundle();
+
+    return docRefs.flatMap(
+      (docRef) =>
+        docRef.content?.flatMap((content) => {
+          const url = content.attachment?.url;
+          if (!url) return [];
+          return [{ documentReferenceId: docRef.id, url, title: content.attachment?.title }];
+        }) ?? []
+    );
+  } catch (e) {
+    console.error('error fetching patient condition photos', JSON.stringify(e));
+    return [];
+  }
+};
 
 export interface GetPaperworkInput {
   appointmentID: string;
@@ -79,7 +108,7 @@ export const index = wrapHandler('get-paperwork', async (input: ZambdaInput): Pr
     console.log('already have token');
   }
 
-  const oystehr = createOystehrClient(oystehrToken, secrets);
+  const oystehr = createClinicalOystehrClient(oystehrToken, secrets);
   // const z3Client = createZ3Client(oystehrToken, secrets);
   // const projectAPI = getSecret(SecretsKeys.PROJECT_API, secrets);
 
@@ -163,10 +192,11 @@ export const index = wrapHandler('get-paperwork', async (input: ZambdaInput): Pr
     return resource.resourceType == 'QuestionnaireResponse';
   }) as QuestionnaireResponse;
 
-  const missingResources: string[] = [];
   if (!appointment) {
-    missingResources.push('Appointment');
+    throw APPOINTMENT_NOT_FOUND_ERROR;
   }
+
+  const missingResources: string[] = [];
   if (!encounter) {
     missingResources.push('Encounter');
   }
@@ -216,10 +246,9 @@ export const index = wrapHandler('get-paperwork', async (input: ZambdaInput): Pr
   );
   console.timeEnd('get-booking-questionnaire');
 
-  if (!questionnaire.item) {
-    questionnaire.item = [];
-  }
-  const allItems = mapQuestionnaireAndValueSetsToItemsList(questionnaire.item, valueSets);
+  const effectiveQuestionnaire = await resolveEffectiveQuestionnaire(questionnaire, oystehr);
+
+  const allItems = mapQuestionnaireAndValueSetsToItemsList(effectiveQuestionnaire.item ?? [], valueSets);
 
   console.log('checking user access to patient');
   console.time('check-user-access');
@@ -264,11 +293,7 @@ export const index = wrapHandler('get-paperwork', async (input: ZambdaInput): Pr
     console.log('building get paperwork response');
     const updateTimestamp = getLastUpdateTimestampForResource(questionnaireResponseResource);
 
-    // gender must be saved in lower case on the patient resource but the paperwork sex fields consume the value with title case
-    const formatPatientSexForPaperwork = (value: string): PersonSex | undefined => {
-      const sex = Object.keys(PersonSex).find((key) => PersonSex[key as keyof typeof PersonSex] === value);
-      return sex as PersonSex | undefined;
-    };
+    const patientConditionPhotos = await getPatientConditionPhotos(oystehr, fhirPatient.id, appointment.id ?? '');
 
     // console.log('qrResponse item', JSON.stringify(questionnaireResponseResource.item));
 
@@ -285,6 +310,7 @@ export const index = wrapHandler('get-paperwork', async (input: ZambdaInput): Pr
       },
       allItems,
       questionnaireResponse: questionnaireResponseResource,
+      patientConditionPhotos,
     };
     // console.log('returning response: ', JSON.stringify(response));
     return {
@@ -315,38 +341,6 @@ export const index = wrapHandler('get-paperwork', async (input: ZambdaInput): Pr
     };
   }
 });
-
-interface GetPaperworkSupportingInfoInput {
-  appointment: Appointment;
-  encounter: Encounter;
-  patient: Patient;
-  location: Location | undefined;
-  hsResources: { hs: HealthcareService; locations?: Location[]; serviceArea?: Location } | undefined;
-  practitioner?: Practitioner;
-}
-
-function getPaperworkSupportingInfoForUserWithAccess(input: GetPaperworkSupportingInfoInput): PaperworkSupportingInfo {
-  const { appointment, patient, location, hsResources, practitioner, encounter } = input;
-  const serviceMode: ServiceMode = checkEncounterIsVirtual(encounter)
-    ? ServiceMode['virtual']
-    : ServiceMode['in-person'];
-
-  return {
-    appointment: {
-      id: appointment?.id ?? 'Unknown', // i hate this
-      start: appointment?.start || 'Unknown',
-      location: makeLocationSummary({ appointment, location, hsResources, practitioner }),
-      visitType: appointment?.appointmentType?.text as VisitType,
-      status: appointment?.status,
-      serviceMode: serviceMode,
-    },
-    patient: {
-      id: patient.id,
-      firstName: patient.name?.[0].given?.[0],
-      dateOfBirth: patient.birthDate,
-    },
-  };
-}
 
 enum Access_Level {
   anonymous,
@@ -379,95 +373,5 @@ const validateUserAccess = async (input: AccessValidationInput): Promise<Access_
     return Access_Level.full;
   } else {
     throw DOB_UNCONFIRMED_ERROR;
-  }
-};
-interface LocationSummaryInput {
-  appointment: Appointment;
-  location?: Location;
-  hsResources?: HealthcareServiceWithLocationContext;
-  practitioner?: Practitioner;
-}
-// todo: consider whether all the location config stuff needs to be on here
-const makeLocationSummary = (input: LocationSummaryInput): AppointmentSummary['location'] => {
-  const { appointment, location, hsResources, practitioner } = input;
-  if (hsResources) {
-    // do a thing
-    const { hs, locations, coverageArea } = hsResources;
-    const otherOffices: AvailableLocationInformation['otherOffices'] = [];
-    const serviceMode = serviceModeForHealthcareService(hs);
-    let scheduleExtension: ScheduleExtension | undefined = undefined;
-    let loc: Location | undefined;
-    // note there's not really any clear notion what to do here if the HS pools provider schedules
-    // this is to be addressed in a future release
-    if (serviceMode === ServiceMode['in-person']) {
-      // this is most likely a fictional use case...
-      loc = locations?.find((tempLoc) => {
-        return appointment?.participant?.some((maybeLoc) => {
-          const reference = maybeLoc.actor?.reference;
-          if (reference) {
-            return reference === `${tempLoc.resourceType}/${tempLoc.id}`;
-          }
-          return false;
-        });
-      });
-      if (loc === undefined) {
-        loc = locations?.length === 1 ? locations[0] : undefined;
-      }
-      if (loc) {
-        scheduleExtension = getScheduleExtension(loc);
-      }
-    } else {
-      loc = coverageArea?.length === 1 ? coverageArea[0] : undefined;
-    }
-    return {
-      id: loc?.id,
-      slug: loc?.identifier?.find((identifierTemp) => identifierTemp.system === SLUG_SYSTEM)?.value,
-      name: loc?.name ?? hs?.name,
-      description: loc?.description,
-      address: loc?.address,
-      telecom: loc?.telecom,
-      timezone: loc?.extension?.find(
-        (extensionTemp) => extensionTemp.url === 'http://hl7.org/fhir/StructureDefinition/timezone'
-      )?.valueString,
-      otherOffices,
-      scheduleOwnerType: ScheduleType['group'],
-      scheduleExtension,
-    };
-  } else if (practitioner) {
-    // todo build out practitioner scheduling more
-    return {
-      id: practitioner?.id,
-      slug: practitioner?.identifier?.find((identifierTemp) => identifierTemp.system === SLUG_SYSTEM)?.value,
-      name: `${practitioner.name?.[0]?.given?.[0]} ${practitioner.name?.[0]?.family}`,
-      description: undefined,
-      address: undefined,
-      telecom: [],
-      timezone: practitioner?.extension?.find(
-        (extensionTemp) => extensionTemp.url === 'http://hl7.org/fhir/StructureDefinition/timezone'
-      )?.valueString,
-      otherOffices: [],
-      scheduleOwnerType: ScheduleType['provider'],
-    };
-  } else {
-    const closures: Closure[] = [];
-    if (location) {
-      const schedule = getScheduleExtension(location);
-      if (schedule && schedule.closures) {
-        closures.push(...schedule.closures);
-      }
-    }
-    return {
-      id: location?.id,
-      slug: location?.identifier?.find((identifierTemp) => identifierTemp.system === SLUG_SYSTEM)?.value,
-      name: location?.name,
-      description: location?.description,
-      address: location?.address,
-      telecom: location?.telecom,
-      timezone: location?.extension?.find(
-        (extensionTemp) => extensionTemp.url === 'http://hl7.org/fhir/StructureDefinition/timezone'
-      )?.valueString,
-      otherOffices: location ? getOtherOfficesForLocation(location) : [],
-      scheduleOwnerType: ScheduleType['location'],
-    };
   }
 };

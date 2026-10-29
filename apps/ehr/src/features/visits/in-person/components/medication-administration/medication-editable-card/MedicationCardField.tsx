@@ -17,7 +17,9 @@ import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider';
 import { DateTime } from 'luxon';
 import React from 'react';
 import { LOCATION_OPTIONS } from 'src/shared/utils/options';
-import { IN_HOUSE_CONTAINED_MEDICATION_ID, MedicationData, REQUIRED_FIELD_ERROR_MESSAGE } from 'utils';
+import { IN_HOUSE_CONTAINED_MEDICATION_ID } from 'utils/lib/types/api/medication-administration.constants';
+import { MedicationData } from 'utils/lib/types/api/medication-administration.types';
+import { REQUIRED_FIELD_ERROR_MESSAGE } from 'utils/lib/validation/constants';
 import { dataTestIds } from '../../../../../../constants/data-test-ids';
 import { OrderFieldsSelectsOptions } from '../../../hooks/useGetFieldOptions';
 import { MedicationFieldType } from './fieldsConfig';
@@ -126,7 +128,7 @@ export const MedicationCardField: React.FC<MedicationCardFieldProps> = ({
               helperText: showError && required && !value ? REQUIRED_FIELD_ERROR_MESSAGE : '',
             },
           }}
-          format="yyyy-MM-dd HH:mm a"
+          format="MM/dd/yyyy hh:mm a"
         />
       </LocalizationProvider>
     );
@@ -160,7 +162,7 @@ export const MedicationCardField: React.FC<MedicationCardFieldProps> = ({
               },
             },
           }}
-          format="yyyy-MM-dd"
+          format="MM/dd/yyyy"
         />
       </LocalizationProvider>
     );

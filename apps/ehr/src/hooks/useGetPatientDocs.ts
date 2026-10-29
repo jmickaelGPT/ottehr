@@ -1,29 +1,38 @@
 import { useAuth0 } from '@auth0/auth0-react';
-import { SearchParam } from '@oystehr/sdk';
+import Oystehr, { SearchParam } from '@oystehr/sdk';
 import { useQuery, useQueryClient, UseQueryResult } from '@tanstack/react-query';
 import { DocumentReference, FhirResource, List, QuestionnaireResponse, Reference } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { createCustomFolder, deletePatientDocument, renameCustomFolder } from 'src/api/api';
+import { FOLDERS_CONFIG, HIDE_WHILE_PRELIMINARY_TAG } from 'utils/lib/fhir/constants';
 import {
-  chooseJson,
   CUSTOM_FOLDERS_CATALOG_IDENTIFIER,
-  CustomFolderDefinition,
-  getMimeType,
-  getPresignedURL,
   isCustomFolderList,
+  parseCustomFoldersCatalogIncludingDeleted,
+  PATIENT_FOLDERS_CODE,
+} from 'utils/lib/fhir/list';
+import { useSuccessQuery } from 'utils/lib/frontend/hooks/useSuccessQuery';
+import { safelyCaptureMessage } from 'utils/lib/frontend/sentry';
+import { removePrefix } from 'utils/lib/helpers/helpers';
+import { chooseJson } from 'utils/lib/helpers/oystehrApi';
+import { getPresignedURL } from 'utils/lib/helpers/presigned-file-url/helpers';
+import {
+  CustomFolderDefinition,
   isSyntheticFolderId,
   makeSyntheticFolderId,
-  parseCustomFoldersCatalogIncludingDeleted,
-} from 'utils';
-import { useSuccessQuery } from 'utils/lib/frontend';
-import { safelyCaptureMessage } from 'utils/lib/frontend/sentry';
+} from 'utils/lib/types/data/custom-folder.types';
+import { getFileNameFromUrl, getMimeType } from 'utils/lib/utils/file';
 import { parseFileExtension } from '../helpers/files.helper';
 import { useApiClients } from './useAppClients';
 
-const PATIENT_FOLDERS_CODE = 'patient-docs-folder';
-
 const CREATE_PATIENT_UPLOAD_DOCUMENT_URL_ZAMBDA_ID = 'create-upload-document-url';
+
+export type DownloadDocumentOptions = {
+  skipRelated?: boolean;
+  /** A tab reserved inside the click; a popup opened after this call's awaits would be blocked. */
+  targetTab?: Window | null;
+};
 
 export type PatientDocumentsFolder = {
   id: string;
@@ -49,27 +58,52 @@ export type PatientDocumentAttachment = {
   fileNameFromUrl?: string;
   z3Url?: string;
   presignedUrl?: string;
+  /** The stored MIME type. Carried so the UI decides what is faxable on the same input the server uses. */
+  contentType?: string;
 };
 
 // http://localhost:5175/patient/104e4c8c-1866-4c96-a436-88080c691614/docs
 // "date": "2024-09-02T10:22:53.870Z",
 export type PatientDocumentInfo = {
   id: string;
+  typeCodes?: string[];
   //TODO: probably be DocumentReference's [parent DomainResource.text] value to have ability to use _text search modifier
   docName: string;
   //TODO: remove
   folderName?: string;
   whenAddedDate?: string;
-  //TODO: where to get data for this field?
+  /** Display name of the practitioner who filed the document, from `DocumentReference.author`. */
   whoAdded?: string;
   attachments?: PatientDocumentAttachment[];
   encounterId?: string;
+  // Appointment the document was filed against, when it is linked that way instead of by encounter.
+  appointmentId?: string;
+};
+
+/**
+ * How a document points at the visit it belongs to.
+ *
+ * Two fields because the write paths disagree. EHR uploads and the intake paperwork PDF set
+ * `context.encounter`, while other intake documents — consent forms, condition photos, school/work
+ * notes — record the visit as an Appointment in `context.related` and set no encounter. A document
+ * belongs to a visit if either matches, so both are carried rather than picking one as canonical.
+ *
+ * Note that some intake documents match neither on purpose: harvest files photo ID and insurance
+ * cards under `related: Patient/<id>`, treating them as patient-level records that outlive any one
+ * visit, so they stay visit-less.
+ */
+export type DocumentVisitRef = {
+  encounterId?: string;
+  appointmentId?: string;
 };
 
 export type PatientDocumentsFilters = {
   documentName?: string;
   documentsFolder?: PatientDocumentsFolder;
   dateAdded?: DateTime;
+  // Restrict results to documents filed against this visit. Also narrows the folder counters,
+  // so the sidebar reflects what the visit actually contains.
+  visit?: DocumentVisitRef;
 };
 
 export type UploadDocumentActionResult = {
@@ -115,9 +149,210 @@ export type UseGetPatientDocsReturn = {
 export const QUERY_KEYS = {
   GET_PATIENT_DOCS_FOLDERS: 'get-patient-docs-folders',
   GET_SEARCH_PATIENT_DOCUMENTS: 'get-search-patient-documents',
+  GET_VISIT_DOCUMENT_IDS: 'get-visit-document-ids',
 };
 
-export const useGetPatientDocs = (patientId: string, filters?: PatientDocumentsFilters): UseGetPatientDocsReturn => {
+const DOCUMENT_SEARCH_PAGE_SIZE = 200;
+// Backstop against an unbounded loop if the server keeps advertising a next page. Far above any
+// real patient chart; reaching it is a bug, not a big chart.
+const DOCUMENT_SEARCH_MAX = 20000;
+
+/**
+ * A working copy its producer has asked to keep hidden until it is finished.
+ *
+ * Both halves are required. The tag alone would hide a document that has since been completed; the status
+ * alone would hide anything unfinished, and `preliminary` is not a synonym for "not worth reading" — an
+ * unreviewed lab result carries it, and burying those would hide results a clinician is waiting on.
+ *
+ * Nothing here knows which kinds of document have drafts. A workflow opts in by tagging what it produces,
+ * which is why this filter has not needed to change as more of them have.
+ */
+const isHiddenDraft = (docRef: DocumentReference): boolean =>
+  docRef.docStatus === 'preliminary' &&
+  (docRef.meta?.tag ?? []).some(
+    (tag) => tag.system === HIDE_WHILE_PRELIMINARY_TAG.system && tag.code === HIDE_WHILE_PRELIMINARY_TAG.code
+  );
+
+/**
+ * Every page of a DocumentReference search, concatenated.
+ *
+ * A single `fhir.search` returns one server-sized page. Both callers here need the complete set —
+ * one drives the folder counters, the other the documents table — so a truncated page shows wrong
+ * counts or hides documents outright, with nothing on screen to indicate it happened.
+ */
+const searchAllDocumentReferencePages = async <T extends FhirResource>(
+  oystehr: Oystehr,
+  params: SearchParam[],
+  context: { site: string; tags: Record<string, string> }
+): Promise<T[]> => {
+  const resources: T[] = [];
+  let offset = 0;
+  let hasMorePages = true;
+
+  while (hasMorePages) {
+    const bundle = await oystehr.fhir.search<T>({
+      resourceType: 'DocumentReference',
+      params: [
+        ...params,
+        { name: '_count', value: `${DOCUMENT_SEARCH_PAGE_SIZE}` },
+        { name: '_offset', value: `${offset}` },
+      ],
+    });
+
+    const page = bundle.unbundle() as T[];
+    resources.push(...page);
+
+    // Advance by what the server actually returned, not by what was requested: a server free to
+    // cap `_count` below the requested size would otherwise leave a gap the size of the shortfall,
+    // silently skipping documents.
+    offset += page.length;
+
+    // An empty page means there is nothing left to read even if a next link is advertised, and the
+    // offset can no longer advance, so stop there too.
+    const serverReportsMorePages = bundle.link?.some((link) => link.relation === 'next') ?? false;
+    hasMorePages = serverReportsMorePages && page.length > 0;
+
+    if (hasMorePages && resources.length >= DOCUMENT_SEARCH_MAX) {
+      safelyCaptureMessage('DocumentReference paging hit its ceiling; results are truncated', {
+        level: 'error',
+        tags: { ...context.tags, site: context.site, ceiling: `${DOCUMENT_SEARCH_MAX}` },
+      });
+      hasMorePages = false;
+    }
+  }
+
+  return resources;
+};
+
+export const hasVisitRef = (visit: DocumentVisitRef | undefined): boolean =>
+  !!visit && (!!visit.encounterId || !!visit.appointmentId);
+
+/**
+ * One search-param set per way a document can reference a visit. FHIR cannot OR two different
+ * search params in a single request, so each linkage is queried separately and the results unioned.
+ */
+const visitSearchParamSets = (visit: DocumentVisitRef): SearchParam[][] => {
+  const sets: SearchParam[][] = [];
+  if (visit.encounterId) sets.push([{ name: 'encounter', value: `Encounter/${visit.encounterId}` }]);
+  if (visit.appointmentId) sets.push([{ name: 'related', value: `Appointment/${visit.appointmentId}` }]);
+  return sets;
+};
+
+/**
+ * Documents matching `baseParams`, restricted to `visit` when one is given. A document linked both
+ * ways would come back from both searches, so results are de-duplicated by id.
+ */
+const searchDocumentReferencesForVisit = async <T extends FhirResource>(
+  oystehr: Oystehr,
+  baseParams: SearchParam[],
+  visit: DocumentVisitRef | undefined,
+  context: { site: string; tags: Record<string, string> }
+): Promise<T[]> => {
+  const paramSets = visit ? visitSearchParamSets(visit) : [];
+
+  if (paramSets.length === 0) {
+    return searchAllDocumentReferencePages<T>(oystehr, baseParams, context);
+  }
+
+  const perLinkage = await Promise.all(
+    paramSets.map((visitParams) =>
+      searchAllDocumentReferencePages<T>(oystehr, [...baseParams, ...visitParams], context)
+    )
+  );
+
+  const byId = new Map<string, T>();
+  for (const resource of perLinkage.flat()) {
+    if (resource.id && !byId.has(resource.id)) byId.set(resource.id, resource);
+  }
+  return [...byId.values()];
+};
+
+/**
+ * Ids of every document filed against one visit, regardless of folder.
+ *
+ * The folder counters come from `List.entry` lengths, which are patient-wide. When a visit filter
+ * is active the sidebar has to show per-visit counts instead, and the main document search can't
+ * supply them (it is itself narrowed to the selected folder). So fetch the visit's document ids
+ * once and intersect them with each folder's entries.
+ *
+ * Pages exhaustively — these ids drive the counters, so a truncated result silently undercounts and
+ * can show 0 for a folder that holds documents. Only ids are requested (`_elements`), which keeps
+ * each page cheap.
+ */
+const useVisitDocumentIds = (patientId: string, visit: DocumentVisitRef | undefined): Set<string> | undefined => {
+  const { oystehr } = useApiClients();
+  const isVisitScoped = hasVisitRef(visit);
+
+  const { data } = useQuery({
+    queryKey: [
+      QUERY_KEYS.GET_VISIT_DOCUMENT_IDS,
+      { patientId, encounterId: visit?.encounterId, appointmentId: visit?.appointmentId },
+    ],
+    enabled: !!oystehr && !!patientId && isVisitScoped,
+    queryFn: async (): Promise<string[]> => {
+      if (!oystehr) throw new Error('useVisitDocumentIds() oystehr not defined');
+
+      const docRefs = await searchDocumentReferencesForVisit<DocumentReference>(
+        oystehr,
+        [
+          { name: 'subject', value: `Patient/${patientId}` },
+          // Only ids are needed to intersect with folder entries, which keeps each page cheap.
+          { name: '_elements', value: 'id' },
+        ],
+        visit,
+        {
+          site: 'useVisitDocumentIds',
+          tags: {
+            patientId,
+            encounterId: visit?.encounterId ?? '',
+            appointmentId: visit?.appointmentId ?? '',
+          },
+        }
+      );
+
+      return docRefs.map((docRef) => docRef.id).filter((id): id is string => !!id);
+    },
+  });
+
+  return useMemo(() => (isVisitScoped && data ? new Set(data) : undefined), [isVisitScoped, data]);
+};
+
+/**
+ * Rewrites folder counters to only count documents belonging to the given visit. Folders are kept
+ * even at zero so a user can still open one and upload into it (matching the patient-level view).
+ */
+const applyVisitCountsToFolders = (
+  folders: PatientDocumentsFolder[],
+  visitDocumentIds: Set<string> | undefined
+): PatientDocumentsFolder[] => {
+  if (!visitDocumentIds) return folders;
+
+  return folders.map((folder) => {
+    const documentsRefs = (folder.documentsRefs ?? []).filter((docRef) => {
+      const id = removePrefix('DocumentReference/', docRef.reference?.reference ?? '');
+      return !!id && visitDocumentIds.has(id);
+    });
+    return { ...folder, documentsCount: documentsRefs.length, documentsRefs };
+  });
+};
+
+export type UseGetPatientDocsOptions = {
+  /**
+   * Visit that documents uploaded through this hook are filed against. Deliberately separate from
+   * `filters.visit`: filtering by a visit is a browsing action and must not silently retarget
+   * uploads. Only visit-scoped surfaces (Progress Note, Visit Details) set this.
+   *
+   * An encounter id, because uploads write `context.encounter` — the `related`-to-Appointment
+   * linkage is only read, never written here.
+   */
+  uploadEncounterId?: string;
+};
+
+export const useGetPatientDocs = (
+  patientId: string,
+  filters?: PatientDocumentsFilters,
+  options?: UseGetPatientDocsOptions
+): UseGetPatientDocsReturn => {
   const [documents, setDocuments] = useState<PatientDocumentInfo[]>();
   const [documentsFolders, setDocumentsFolders] = useState<PatientDocumentsFolder[]>([]);
   const [currentFilters, setCurrentFilters] = useState<PatientDocumentsFilters | undefined>(filters);
@@ -138,7 +373,13 @@ export const useGetPatientDocs = (patientId: string, filters?: PatientDocumentsF
     }
   );
 
-  const documentActions = usePatientDocsActions({ patientId });
+  const visitDocumentIds = useVisitDocumentIds(patientId, currentFilters?.visit);
+  const visibleFolders = useMemo(
+    () => applyVisitCountsToFolders(documentsFolders, visitDocumentIds),
+    [documentsFolders, visitDocumentIds]
+  );
+
+  const documentActions = usePatientDocsActions({ patientId, encounterId: options?.uploadEncounterId });
   const folderActions = useFolderActions({ patientId });
 
   const searchDocuments = useCallback((filters: PatientDocumentsFilters): void => {
@@ -157,113 +398,127 @@ export const useGetPatientDocs = (patientId: string, filters?: PatientDocumentsF
   );
 
   const downloadDocument = useCallback(
-    async (documentId: string, options?: { skipRelated?: boolean }): Promise<void> => {
-      const authToken = await getAccessTokenSilently();
-
-      let patientDoc = getDocumentById(documentId);
-      let documentReferenceResource: DocumentReference | undefined;
-
-      if (!patientDoc && oystehr) {
-        documentReferenceResource = (
-          await oystehr.fhir.search<DocumentReference>({
-            resourceType: 'DocumentReference',
-            params: [{ name: '_id', value: documentId }],
-          })
-        ).unbundle()[0];
-        if (documentReferenceResource) {
-          patientDoc = createDocumentInfo(documentReferenceResource);
-          setDocuments([...(documents ?? []), patientDoc]);
+    async (documentId: string, options?: DownloadDocumentOptions): Promise<void> => {
+      let pendingTab = options?.targetTab ?? null;
+      const openFile = (url: string): void => {
+        if (pendingTab) {
+          pendingTab.location.href = url;
+          pendingTab = null;
+          return;
         }
-      }
-
-      if (!documentReferenceResource && oystehr) {
-        documentReferenceResource = (
-          await oystehr.fhir.search<DocumentReference>({
-            resourceType: 'DocumentReference',
-            params: [{ name: '_id', value: documentId }],
-          })
-        ).unbundle()[0];
-      }
-
-      const openAttachments = async (attachments: PatientDocumentAttachment[]): Promise<void> => {
-        const urlSigningRequests = attachments.map(async (attachment) => {
-          let presignedUrl = undefined;
-          if (attachment.z3Url) {
-            presignedUrl = await getPresignedURL(attachment.z3Url, authToken);
-          }
-          return { attachment, presignedUrl };
-        });
-
-        const filesInfoToDownload = (await Promise.all(urlSigningRequests))
-          .filter((signedAttach) => !!signedAttach.presignedUrl)
-          .map((signedAttach) => {
-            const fileTitle = signedAttach.attachment.title;
-            const fileExt = parseFileExtension(signedAttach.attachment.fileNameFromUrl) ?? 'unknown';
-            const fullFileName = fileTitle.includes('.') ? fileTitle : `${fileTitle}.${fileExt}`;
-            return {
-              fileName: fullFileName,
-              urlToDownload: signedAttach.presignedUrl!,
-            };
-          });
-
-        for (const fileInfo of filesInfoToDownload) {
-          await fetch(new URL(fileInfo.urlToDownload), {
-            method: 'GET',
-            headers: { 'Cache-Control': 'no-cache' },
-          })
-            .then((response) => {
-              if (!response.ok) {
-                throw new Error(`failed to download Document attachment [${fileInfo.fileName}]`);
-              }
-              return response.blob();
-            })
-            .then((blob) => {
-              const mimeType = getMimeType(fileInfo.fileName) || blob.type;
-              if (!mimeType) {
-                throw new Error(`Failed to open file: unknown MIME type for file ${fileInfo.fileName}`);
-              }
-              const fileBlob = window.URL.createObjectURL(new Blob([blob], { type: mimeType }));
-              window.open(fileBlob, '_blank');
-            })
-            .catch((error) => {
-              console.log(error);
-            });
-        }
+        window.open(url, '_blank');
       };
 
-      const docAttachments = patientDoc?.attachments ?? [];
-      if (docAttachments.length > 0) {
-        await openAttachments(docAttachments);
-      } else {
-        console.error(`No attachments found for a docId=[${documentId}]`);
-      }
+      try {
+        const authToken = await getAccessTokenSilently();
 
-      if (options?.skipRelated) return;
+        let patientDoc = getDocumentById(documentId);
+        let documentReferenceResource: DocumentReference | undefined;
 
-      const attachedDocumentIds =
-        documentReferenceResource?.context?.related
-          ?.map((r) => r?.reference)
-          .filter((ref): ref is string => typeof ref === 'string')
-          .map((ref) => {
-            const [type, id] = ref.split('/');
-            return type === 'DocumentReference' ? id : undefined;
-          })
-          .filter((id): id is string => !!id && id !== documentId) ?? [];
-
-      for (const attachedDocumentId of attachedDocumentIds) {
-        const attachedDocumentReferenceResource = (
-          await oystehr!.fhir.search<DocumentReference>({
-            resourceType: 'DocumentReference',
-            params: [{ name: '_id', value: attachedDocumentId }],
-          })
-        ).unbundle()[0];
-
-        if (attachedDocumentReferenceResource) {
-          const attachedDocumentInfo = createDocumentInfo(attachedDocumentReferenceResource);
-          if (attachedDocumentInfo.attachments?.length) {
-            await openAttachments(attachedDocumentInfo.attachments);
+        if (!patientDoc && oystehr) {
+          documentReferenceResource = (
+            await oystehr.fhir.search<DocumentReference>({
+              resourceType: 'DocumentReference',
+              params: [{ name: '_id', value: documentId }],
+            })
+          ).unbundle()[0];
+          if (documentReferenceResource) {
+            patientDoc = createDocumentInfo(documentReferenceResource);
+            setDocuments([...(documents ?? []), patientDoc]);
           }
         }
+
+        if (!documentReferenceResource && oystehr) {
+          documentReferenceResource = (
+            await oystehr.fhir.search<DocumentReference>({
+              resourceType: 'DocumentReference',
+              params: [{ name: '_id', value: documentId }],
+            })
+          ).unbundle()[0];
+        }
+
+        const openAttachments = async (attachments: PatientDocumentAttachment[]): Promise<void> => {
+          const urlSigningRequests = attachments.map(async (attachment) => {
+            let presignedUrl = undefined;
+            if (attachment.z3Url) {
+              presignedUrl = await getPresignedURL(attachment.z3Url, authToken);
+            }
+            return { attachment, presignedUrl };
+          });
+
+          const filesInfoToDownload = (await Promise.all(urlSigningRequests))
+            .filter((signedAttach) => !!signedAttach.presignedUrl)
+            .map((signedAttach) => {
+              const fileTitle = signedAttach.attachment.title;
+              const fileExt = parseFileExtension(signedAttach.attachment.fileNameFromUrl) ?? 'unknown';
+              const fullFileName = fileTitle.includes('.') ? fileTitle : `${fileTitle}.${fileExt}`;
+              return {
+                fileName: fullFileName,
+                urlToDownload: signedAttach.presignedUrl!,
+              };
+            });
+
+          for (const fileInfo of filesInfoToDownload) {
+            await fetch(new URL(fileInfo.urlToDownload), {
+              method: 'GET',
+              headers: { 'Cache-Control': 'no-cache' },
+            })
+              .then((response) => {
+                if (!response.ok) {
+                  throw new Error(`failed to download Document attachment [${fileInfo.fileName}]`);
+                }
+                return response.blob();
+              })
+              .then((blob) => {
+                const mimeType = getMimeType(fileInfo.fileName) || blob.type;
+                if (!mimeType) {
+                  throw new Error(`Failed to open file: unknown MIME type for file ${fileInfo.fileName}`);
+                }
+                const fileBlob = window.URL.createObjectURL(new Blob([blob], { type: mimeType }));
+                openFile(fileBlob);
+              })
+              .catch((error) => {
+                console.log(error);
+              });
+          }
+        };
+
+        const docAttachments = patientDoc?.attachments ?? [];
+        if (docAttachments.length > 0) {
+          await openAttachments(docAttachments);
+        } else {
+          console.error(`No attachments found for a docId=[${documentId}]`);
+        }
+
+        if (options?.skipRelated) return;
+
+        const attachedDocumentIds =
+          documentReferenceResource?.context?.related
+            ?.map((r) => r?.reference)
+            .filter((ref): ref is string => typeof ref === 'string')
+            .map((ref) => {
+              const [type, id] = ref.split('/');
+              return type === 'DocumentReference' ? id : undefined;
+            })
+            .filter((id): id is string => !!id && id !== documentId) ?? [];
+
+        for (const attachedDocumentId of attachedDocumentIds) {
+          const attachedDocumentReferenceResource = (
+            await oystehr!.fhir.search<DocumentReference>({
+              resourceType: 'DocumentReference',
+              params: [{ name: '_id', value: attachedDocumentId }],
+            })
+          ).unbundle()[0];
+
+          if (attachedDocumentReferenceResource) {
+            const attachedDocumentInfo = createDocumentInfo(attachedDocumentReferenceResource);
+            if (attachedDocumentInfo.attachments?.length) {
+              await openAttachments(attachedDocumentInfo.attachments);
+            }
+          }
+        }
+      } finally {
+        pendingTab?.close();
       }
     },
     [documents, getAccessTokenSilently, getDocumentById, oystehr, setDocuments]
@@ -320,7 +575,7 @@ export const useGetPatientDocs = (patientId: string, filters?: PatientDocumentsF
     documents: documents,
     // documentsByFolders: documentsByFolders,
     isLoadingFolders: isLoadingFolders,
-    documentsFolders: documentsFolders,
+    documentsFolders: visibleFolders,
     searchDocuments: searchDocuments,
     downloadDocument: downloadDocument,
     renameDocument,
@@ -329,22 +584,109 @@ export const useGetPatientDocs = (patientId: string, filters?: PatientDocumentsF
   };
 };
 
-type PatientDocsFoldersQueryData = {
+export type PatientDocsFoldersQueryData = {
   lists: List[];
   catalogDefs: CustomFolderDefinition[];
 };
 
-const useGetPatientDocsFolders = (
+// Pure transform from the raw folders query data to displayable folders (real per-patient
+// Lists plus synthesized folders — see the comments inline). Exported so consumers of
+// useGetPatientDocsFolders can derive folders directly from query data instead of relying
+// on the onSuccess callback (which only fires when the data reference changes).
+export const parsePatientDocsFolders = (
+  data: PatientDocsFoldersQueryData,
+  patientId: string
+): PatientDocumentsFolder[] => {
+  const { lists, catalogDefs } = data;
+
+  const patientFolderLists = lists.filter(
+    (list) => list.status === 'current' && list.code?.coding?.some((c) => c.code === PATIENT_FOLDERS_CODE)
+  );
+
+  const byInternalName = new Map<string, PatientDocumentsFolder>();
+
+  for (const list of patientFolderLists) {
+    const internalName = list.title;
+    if (!internalName) continue;
+    const isCustom = isCustomFolderList(list);
+    // Custom folder displayName is owned by the catalog (active or soft-deleted).
+    // A per-patient List with no matching catalog entry is unreachable through supported
+    // flows (deletes are soft); skip it and report the invariant so it can be remediated.
+    const catalogDef = isCustom ? catalogDefs.find((d) => d.internalName === internalName) : undefined;
+    if (isCustom && !catalogDef) {
+      safelyCaptureMessage('Custom-folder List has no matching catalog entry (invariant violation)', {
+        level: 'error',
+        tags: {
+          invariant: 'custom-folder-list:has-catalog-entry',
+          site: 'useGetPatientDocsFolders',
+          patientId,
+          listId: list.id ?? '',
+          internalName,
+        },
+      });
+      continue;
+    }
+
+    const docRefs: DocRef[] = (list.entry ?? []).map((entry) => ({ reference: entry.item }) as DocRef);
+
+    const folderName = isCustom
+      ? catalogDef!.displayName
+      : list.code?.coding?.find((c) => c.code === PATIENT_FOLDERS_CODE)?.display ?? '';
+
+    byInternalName.set(internalName, {
+      id: list.id!,
+      folderName,
+      internalName,
+      documentsCount: docRefs.length,
+      documentsRefs: docRefs,
+      isCustom,
+    });
+  }
+
+  // Synthesize folders the patient has no per-patient List for yet, so they can be opened
+  // and uploaded to; the real List is created lazily on first upload (see the
+  // create-upload-document-url zambda). Two sources:
+  //  - System folders (FOLDERS_CONFIG): missing for patients created before the folder
+  //    existed or before seeding ran.
+  //  - Custom folders (catalog): soft-deleted entries are skipped so patients who never
+  //    used the folder don't see it reappear after an admin deletes it.
+  const synthCandidates = [
+    ...FOLDERS_CONFIG.map((c) => ({ internalName: c.title, displayName: c.display, isCustom: false })),
+    ...catalogDefs
+      .filter((def) => !def.deleted)
+      .map((def) => ({ internalName: def.internalName, displayName: def.displayName, isCustom: true })),
+  ];
+  for (const { internalName, displayName, isCustom } of synthCandidates) {
+    if (byInternalName.has(internalName)) continue;
+    byInternalName.set(internalName, {
+      id: makeSyntheticFolderId(internalName),
+      folderName: displayName,
+      internalName,
+      documentsCount: 0,
+      documentsRefs: [],
+      isCustom,
+    });
+  }
+
+  return Array.from(byInternalName.values());
+};
+
+// Exported so screens that file documents for an ad-hoc patient (e.g. inbound-fax matching)
+// can reuse the folder loading + synthetic-folder logic instead of re-implementing it.
+export const useGetPatientDocsFolders = (
   {
     patientId,
   }: {
     patientId: string;
   },
-  onSuccess: (data: PatientDocumentsFolder[]) => void
+  onSuccess?: (data: PatientDocumentsFolder[]) => void
 ): UseQueryResult<PatientDocsFoldersQueryData, Error> => {
   const { oystehr } = useApiClients();
   const queryResult = useQuery({
     queryKey: [QUERY_KEYS.GET_PATIENT_DOCS_FOLDERS, { patientId }],
+    // Callers may render before a patient is chosen (empty patientId) or before the
+    // oystehr client initializes; don't run (and error-retry) the query until both exist.
+    enabled: !!oystehr && !!patientId,
 
     queryFn: async (): Promise<PatientDocsFoldersQueryData> => {
       if (!oystehr) {
@@ -384,69 +726,7 @@ const useGetPatientDocsFolders = (
     if (!data) {
       return;
     }
-    const { lists, catalogDefs } = data;
-
-    const patientFolderLists = lists.filter(
-      (list) => list.status === 'current' && list.code?.coding?.some((c) => c.code === PATIENT_FOLDERS_CODE)
-    );
-
-    const byInternalName = new Map<string, PatientDocumentsFolder>();
-
-    for (const list of patientFolderLists) {
-      const internalName = list.title;
-      if (!internalName) continue;
-      const isCustom = isCustomFolderList(list);
-      // Custom folder displayName is owned by the catalog (active or soft-deleted).
-      // A per-patient List with no matching catalog entry is unreachable through supported
-      // flows (deletes are soft); skip it and report the invariant so it can be remediated.
-      const catalogDef = isCustom ? catalogDefs.find((d) => d.internalName === internalName) : undefined;
-      if (isCustom && !catalogDef) {
-        safelyCaptureMessage('Custom-folder List has no matching catalog entry (invariant violation)', {
-          level: 'error',
-          tags: {
-            invariant: 'custom-folder-list:has-catalog-entry',
-            site: 'useGetPatientDocsFolders',
-            patientId,
-            listId: list.id ?? '',
-            internalName,
-          },
-        });
-        continue;
-      }
-
-      const docRefs: DocRef[] = (list.entry ?? []).map((entry) => ({ reference: entry.item }) as DocRef);
-
-      const folderName = isCustom
-        ? catalogDef!.displayName
-        : list.code?.coding?.find((c) => c.code === PATIENT_FOLDERS_CODE)?.display ?? '';
-
-      byInternalName.set(internalName, {
-        id: list.id!,
-        folderName,
-        internalName,
-        documentsCount: docRefs.length,
-        documentsRefs: docRefs,
-        isCustom,
-      });
-    }
-
-    // Synthesize folders for catalog entries that don't have a per-patient List yet.
-    // The List is created lazily on first upload. Soft-deleted entries are skipped:
-    // patients who never used the folder shouldn't see it appear after admin deletes it.
-    for (const def of catalogDefs) {
-      if (def.deleted) continue;
-      if (byInternalName.has(def.internalName)) continue;
-      byInternalName.set(def.internalName, {
-        id: makeSyntheticFolderId(def.internalName),
-        folderName: def.displayName,
-        internalName: def.internalName,
-        documentsCount: 0,
-        documentsRefs: [],
-        isCustom: true,
-      });
-    }
-
-    onSuccess?.(Array.from(byInternalName.values()));
+    onSuccess?.(parsePatientDocsFolders(data, patientId));
   });
 
   return queryResult;
@@ -475,8 +755,13 @@ const useSearchPatientDocuments = (
         docSearchTerm: filters?.documentName,
         docCreationDate: docCreationDate,
         docFolderId: filters?.documentsFolder?.id,
+        encounterId: filters?.visit?.encounterId,
+        appointmentId: filters?.visit?.appointmentId,
       },
     ],
+    // Same reason as `useGetDocsFolders` above: without this the guards below are reachable, and the
+    // query fails and error-retries on every mount that precedes a patient or a client.
+    enabled: !!oystehr && !!patientId,
 
     queryFn: async () => {
       if (!oystehr) throw new Error('useSearchPatientDocuments() oystehr not defined');
@@ -500,12 +785,15 @@ const useSearchPatientDocuments = (
         searchParams.push({ name: 'date', value: `eq${docCreationDate}` });
       }
 
-      return (
-        await oystehr.fhir.search<FhirResource>({
-          resourceType: 'DocumentReference',
-          params: searchParams,
-        })
-      ).unbundle();
+      return await searchDocumentReferencesForVisit<FhirResource>(oystehr, searchParams, filters?.visit, {
+        site: 'useSearchPatientDocuments',
+        tags: {
+          patientId,
+          folderId: docsFolder?.id ?? '',
+          encounterId: filters?.visit?.encounterId ?? '',
+          appointmentId: filters?.visit?.appointmentId ?? '',
+        },
+      });
     },
   });
 
@@ -518,23 +806,17 @@ const useSearchPatientDocuments = (
       const searchResultsResources: FhirResource[] = data;
       console.log(`useSearchPatientDocuments() search results cnt=[${searchResultsResources.length}]`);
 
-      //&& resource.status === 'current'
       const docRefsResources =
-        searchResultsResources
-          ?.filter((resource: FhirResource) => resource.resourceType === 'DocumentReference')
-          ?.map((docRefResource: FhirResource) => docRefResource as DocumentReference) ?? [];
+        searchResultsResources?.filter(
+          (resource: FhirResource): resource is DocumentReference =>
+            resource.resourceType === 'DocumentReference' &&
+            // `superseded` says a newer copy of this same document exists, so listing it only offers a
+            // way to open the stale one.
+            resource.status !== 'superseded' &&
+            !isHiddenDraft(resource)
+        ) ?? [];
 
-      const documents = docRefsResources.map((docRef) => {
-        const docName = debug__createDisplayedDocumentName(docRef);
-        const attachments = extractDocumentAttachments(docRef);
-
-        return {
-          id: docRef.id!,
-          docName: docName,
-          whenAddedDate: docRef.date,
-          attachments: attachments,
-        } as PatientDocumentInfo;
-      });
+      const documents = docRefsResources.map((docRef) => createDocumentInfo(docRef));
 
       //TODO: remove when _text search will be available
       const resultDocuments = debug__mimicTextNarrativeDocumentsFilter(documents, filters);
@@ -548,11 +830,6 @@ const useSearchPatientDocuments = (
 };
 
 const extractDocumentAttachments = (docRef: DocumentReference): PatientDocumentAttachment[] => {
-  const getFileNameFromUrl = (url: string | undefined): string | undefined => {
-    if (!url) return;
-    const parsedUrl = new URL(url);
-    return parsedUrl.pathname.split('/').pop() || '';
-  };
   return docRef.content
     ?.map((docRefContent) => docRefContent?.attachment)
     ?.map((docRefAttachment) => {
@@ -569,6 +846,7 @@ const extractDocumentAttachments = (docRef: DocumentReference): PatientDocumentA
         title,
         fileNameFromUrl: getFileNameFromUrl(docRefAttachment.url),
         z3Url: docRefAttachment.url,
+        contentType: docRefAttachment.contentType,
       } as PatientDocumentAttachment;
     });
 };
@@ -593,7 +871,14 @@ const debug__mimicTextNarrativeDocumentsFilter = (
   });
 };
 
-const usePatientDocsActions = ({ patientId }: { patientId: string }): UsePatientDocsActionsReturn => {
+const usePatientDocsActions = ({
+  patientId,
+  encounterId,
+}: {
+  patientId: string;
+  // When present, documents uploaded through these actions are filed against this visit.
+  encounterId?: string;
+}): UsePatientDocsActionsReturn => {
   const { oystehrZambda } = useApiClients();
   const queryClient = useQueryClient();
   const [isUploading, setIsUploading] = useState(false);
@@ -613,6 +898,7 @@ const usePatientDocsActions = ({ patientId }: { patientId: string }): UsePatient
         const createUploadDocumentRes = await oystehrZambda.zambda.execute({
           id: CREATE_PATIENT_UPLOAD_DOCUMENT_URL_ZAMBDA_ID,
           patientId: patientId,
+          ...(encounterId ? { encounterId } : {}),
           ...restParams,
         });
         console.log('signing request end RESULT =>');
@@ -647,6 +933,9 @@ const usePatientDocsActions = ({ patientId }: { patientId: string }): UsePatient
           queryClient.refetchQueries({
             queryKey: [QUERY_KEYS.GET_SEARCH_PATIENT_DOCUMENTS, { patientId }],
           }),
+          queryClient.refetchQueries({
+            queryKey: [QUERY_KEYS.GET_VISIT_DOCUMENT_IDS, { patientId }],
+          }),
         ]);
 
         return {
@@ -662,7 +951,7 @@ const usePatientDocsActions = ({ patientId }: { patientId: string }): UsePatient
         setIsUploading(false);
       }
     },
-    [oystehrZambda, patientId, queryClient]
+    [oystehrZambda, patientId, encounterId, queryClient]
   );
 
   const deleteDocumentAction = useCallback(
@@ -681,6 +970,9 @@ const usePatientDocsActions = ({ patientId }: { patientId: string }): UsePatient
         }),
         queryClient.refetchQueries({
           queryKey: [QUERY_KEYS.GET_SEARCH_PATIENT_DOCUMENTS, { patientId }],
+        }),
+        queryClient.refetchQueries({
+          queryKey: [QUERY_KEYS.GET_VISIT_DOCUMENT_IDS, { patientId }],
         }),
       ]);
     },
@@ -747,13 +1039,33 @@ export interface UploadPatientDocumentResponse {
   presignedUrl: string;
 }
 
+/**
+ * The Appointment a document is filed against, when it is linked through `context.related`.
+ *
+ * `related` is a general-purpose slot: writers put a Patient there (update-visit-files), a
+ * ServiceRequest (radiology), or sibling DocumentReferences (attached files). Only Appointment
+ * references identify a visit, so everything else is ignored.
+ */
+const extractRelatedAppointmentId = (documentReference: DocumentReference): string | undefined => {
+  for (const related of documentReference.context?.related ?? []) {
+    const appointmentId = removePrefix('Appointment/', related.reference ?? '');
+    if (appointmentId) return appointmentId;
+  }
+  return undefined;
+};
+
 const createDocumentInfo = (documentReference: DocumentReference): PatientDocumentInfo => {
   return {
     id: documentReference.id!,
+    typeCodes: documentReference.type?.coding?.flatMap((coding) => (coding.code ? [coding.code] : [])),
     docName: debug__createDisplayedDocumentName(documentReference),
     whenAddedDate: documentReference.date,
+    // The reference carries the practitioner's name alongside the pointer, so a document is attributed
+    // without a second lookup. Blank where the writer recorded no author — which is most of them today.
+    whoAdded: documentReference.author?.find((author) => author.display)?.display,
     attachments: extractDocumentAttachments(documentReference),
-    encounterId: documentReference.context?.encounter?.[0]?.reference?.split('/')?.[1],
+    encounterId: removePrefix('Encounter/', documentReference.context?.encounter?.[0]?.reference ?? ''),
+    appointmentId: extractRelatedAppointmentId(documentReference),
   };
 };
 

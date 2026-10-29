@@ -1,21 +1,25 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { CreateResourcesFromAudioRecordingInput, Secrets, userMe } from 'utils';
+import { DocumentReference, Encounter } from 'fhir/r4b';
+import { DateTime } from 'luxon';
+import { userMe } from 'utils/lib/auth/user-me.helper';
 import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  createPresignedUrl,
-  wrapHandler,
-  ZambdaInput,
-} from '../../shared';
-import { createResourcesFromAiInterview, invokeChatbotVertexAI } from '../../shared/ai';
+  AMBIENT_SCRIBE_RECORDING_PENDING_CODING,
+  DOCUMENT_REFERENCE_SUMMARY_FROM_AUDIO,
+  PUBLIC_EXTENSION_BASE_URL,
+} from 'utils/lib/fhir/constants';
+import { getFormatDuration } from 'utils/lib/helpers/helpers';
+import { Secrets } from 'utils/lib/secrets';
+import { CreateResourcesFromAudioRecordingInput } from 'utils/lib/types/api/appointment.types';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { assertDefined, createClinicalOystehrClient } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 let m2mToken: string;
 
 const ZAMBDA_NAME = 'create-resources-from-audio-recording';
 
-const TRANSCRIPT_PROMPT =
-  'give a transcript of this file, include only the transcript without other input, include who the speaker is with labels for the provider and the patient';
 export interface CreateResourcesFromAudioRecordingInputValidated extends CreateResourcesFromAudioRecordingInput {
   userToken: string;
   secrets: Secrets | null;
@@ -26,35 +30,54 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   const { userToken, z3URL, duration, visitID, secrets } = validatedParameters;
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, validatedParameters.secrets);
-  const oystehr = createOystehrClient(m2mToken, validatedParameters.secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, validatedParameters.secrets);
 
   const providerUserProfile = (await userMe(userToken, secrets)).profile;
 
-  const presignedFileDownloadUrl = await createPresignedUrl(m2mToken, z3URL, 'download');
-  console.log(presignedFileDownloadUrl);
-  const file = await fetch(presignedFileDownloadUrl);
-  const fileBlob = await file.arrayBuffer();
-  const fileBase64 = Buffer.from(fileBlob).toString('base64');
-  const mimeType = file.headers.get('Content-Type') || 'unknown';
+  const encounter = await oystehr.fhir.get<Encounter>({ resourceType: 'Encounter', id: visitID });
+  const patientId = assertDefined(encounter.subject?.reference?.split('/')[1], 'patientId');
 
-  const transcript = await invokeChatbotVertexAI(
-    [{ text: TRANSCRIPT_PROMPT }, { inlineData: { mimeType: mimeType, data: fileBase64 } }],
-    secrets
-  );
+  const pendingDocumentReference: DocumentReference = {
+    resourceType: 'DocumentReference',
+    status: 'current',
+    type: { coding: [AMBIENT_SCRIBE_RECORDING_PENDING_CODING] },
+    category: [
+      {
+        coding: [
+          {
+            system: 'http://loinc.org',
+            code: '34133-9',
+            display: 'Summarization of episode note',
+          },
+        ],
+      },
+    ],
+    description: DOCUMENT_REFERENCE_SUMMARY_FROM_AUDIO,
+    subject: { reference: `Patient/${patientId}` },
+    date: DateTime.now().toISO(),
+    content: [
+      {
+        attachment: {
+          url: z3URL,
+          title: `Audio recording (${duration ? getFormatDuration(duration) : 'unknown'})`,
+        },
+      },
+    ],
+    context: {
+      encounter: [{ reference: `Encounter/${visitID}` }],
+    },
+    extension: [
+      {
+        url: `${PUBLIC_EXTENSION_BASE_URL}/provider`,
+        valueReference: { reference: providerUserProfile },
+      },
+    ],
+  };
 
-  const createdResources = await createResourcesFromAiInterview(
-    oystehr,
-    visitID,
-    transcript,
-    z3URL,
-    duration,
-    mimeType,
-    providerUserProfile,
-    secrets
-  );
+  const created = await oystehr.fhir.create<DocumentReference>(pendingDocumentReference);
 
   return {
     statusCode: 200,
-    body: JSON.stringify(`Successfully created ` + createdResources),
+    body: JSON.stringify(`Successfully created DocumentReference/${created.id}`),
   };
 });

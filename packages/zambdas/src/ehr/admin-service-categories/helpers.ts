@@ -2,19 +2,24 @@ import Oystehr from '@oystehr/sdk';
 import { CodeableConcept, HealthcareService } from 'fhir/r4b';
 import {
   DEFAULT_SERVICE_CATEGORY_DURATION_MINUTES,
+  SERVICE_CATEGORY_CONFIG_EXTENSION_URL,
+  SERVICE_CATEGORY_SYSTEM,
+  SERVICE_CATEGORY_TAG,
+} from 'utils/lib/fhir/constants';
+import { getAllFhirSearchPages } from 'utils/lib/fhir/getAllFhirSearchPages';
+import {
   getServiceCategoryCadenceMinutes,
   getServiceCategoryDurationMinutes,
   getServiceCategoryModes,
   getServiceCategoryVisitTypes,
   parseReasonsForVisit,
-  SERVICE_CATEGORY_CONFIG_EXTENSION_URL,
-  SERVICE_CATEGORY_SYSTEM,
-  SERVICE_CATEGORY_TAG,
+  parseServiceCategoryAbbreviation,
   serviceCategoryCharacteristics,
-  ServiceMode,
-  ServiceVisitType,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, ZambdaInput } from '../../shared';
+} from 'utils/lib/fhir/healthcareService';
+import { ServiceMode, ServiceVisitType } from 'utils/lib/types/common';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { ZambdaInput } from '../../shared/types/common';
 
 /**
  * Runtime-editable per-service-category settings. Mirrors the shape of the
@@ -46,6 +51,11 @@ export interface ServiceCategory {
   id?: string;
   name: string;
   code: string;
+  /**
+   * Short abbreviation (2-3 chars) shown on the Tracking Board and patient
+   * visit lists — e.g. 'UC', 'WC'. Stored in the JSON-blob config extension.
+   */
+  abbreviation?: string;
   active: boolean;
   config: ServiceCategoryRuntimeConfig;
   /**
@@ -61,7 +71,33 @@ let m2mToken: string;
 export async function getClient(input: ZambdaInput): Promise<Oystehr> {
   if (!input.secrets) throw new Error('No secrets provided');
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, input.secrets);
-  return createOystehrClient(m2mToken, input.secrets);
+  return createClinicalOystehrClient(m2mToken, input.secrets);
+}
+
+/**
+ * Look up an existing service-category HealthcareService by its `code`. Used
+ * by the create/update validators to enforce code uniqueness — a duplicate
+ * code in the FHIR catalog would let two records claim the same service-
+ * routing key, with which one wins at lookup time being arbitrary.
+ *
+ * Mirrors the `_tag` filter used by `admin-list-service-categories` then filters in code. The
+ * `type[].coding[]` match is `system|code` so a non-SERVICE_CATEGORY_SYSTEM
+ * coding that happens to share the code string can't false-positive.
+ */
+export async function findServiceCategoryByCode(
+  oystehr: Oystehr,
+  code: string
+): Promise<HealthcareService | undefined> {
+  const results = await getAllFhirSearchPages<HealthcareService>(
+    {
+      resourceType: 'HealthcareService',
+      params: [{ name: '_tag', value: SERVICE_CATEGORY_TAG.code }],
+    },
+    oystehr
+  );
+  return results.find(
+    (hs) => hs.type?.[0]?.coding?.some((c) => c.system === SERVICE_CATEGORY_SYSTEM && c.code === code)
+  );
 }
 
 export function toRecord(resource: HealthcareService): ServiceCategory {
@@ -90,6 +126,7 @@ export function toRecord(resource: HealthcareService): ServiceCategory {
     id: resource.id,
     name: resource.name,
     code,
+    abbreviation: parseServiceCategoryAbbreviation(resource),
     active: resource.active !== false,
     config: {
       durationMinutes: getServiceCategoryDurationMinutes(resource) ?? DEFAULT_SERVICE_CATEGORY_DURATION_MINUTES,
@@ -126,6 +163,12 @@ export function toFhirResource(record: ServiceCategory): HealthcareService {
   // to preserve foreign characteristics should use mergeOwnedCharacteristics
   // with SERVICE_CATEGORY_OWNED_CHARACTERISTIC_SYSTEMS before persisting.
   const reasons = record.config.reasonsForVisit ?? [];
+  const abbreviation = record.abbreviation?.trim();
+  // Free-form fields share a single JSON-blob extension. Only include keys
+  // that carry a value so the extension stays absent when nothing is set.
+  const configBlob: { reasonsForVisit?: typeof reasons; abbreviation?: string } = {};
+  if (reasons.length > 0) configBlob.reasonsForVisit = reasons;
+  if (abbreviation) configBlob.abbreviation = abbreviation;
   return {
     resourceType: 'HealthcareService',
     id: record.id,
@@ -134,13 +177,12 @@ export function toFhirResource(record: ServiceCategory): HealthcareService {
     name: record.name,
     type,
     characteristic: ownedCharacteristics,
-    // Free-form fields still live in the JSON-blob extension.
     extension:
-      reasons.length > 0
+      Object.keys(configBlob).length > 0
         ? [
             {
               url: SERVICE_CATEGORY_CONFIG_EXTENSION_URL,
-              valueString: JSON.stringify({ reasonsForVisit: reasons }),
+              valueString: JSON.stringify(configBlob),
             },
           ]
         : undefined,

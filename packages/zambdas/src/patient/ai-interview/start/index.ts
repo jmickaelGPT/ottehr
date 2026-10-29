@@ -2,17 +2,16 @@ import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Appointment, Encounter, Patient, QuestionnaireResponse } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import {
-  AI_QUESTIONNAIRE_ID,
-  createOystehrClient,
-  getSecret,
-  Secrets,
-  SecretsKeys,
-  SERVICE_CATEGORY_SYSTEM,
-  StartInterviewInput,
-} from 'utils';
-import { getAuth0Token, validateJsonBody, validateString, wrapHandler, ZambdaInput } from '../../../shared';
+import { SERVICE_CATEGORY_SYSTEM } from 'utils/lib/fhir/constants';
+import { createOystehrClient } from 'utils/lib/helpers/helpers';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { StartInterviewInput } from 'utils/lib/types/api/ai-interview.types';
+import { AI_QUESTIONNAIRE_ID } from 'utils/lib/types/constants';
 import { invokeChatbot } from '../../../shared/ai';
+import { getAuth0Token } from '../../../shared/getAuth0Token';
+import { validateJsonBody, validateString } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 
 export const INTERVIEW_COMPLETED = 'Interview completed.';
 
@@ -75,9 +74,13 @@ interface Input extends StartInterviewInput {
 
 const ZAMBDA_NAME = 'ai-interview-start';
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`Input: ${JSON.stringify(input)}`);
+  const startedAt = Date.now();
+  const logStep = (step: string): void => console.log(`[${ZAMBDA_NAME}] ${step} done at ${Date.now() - startedAt}ms`);
+
   const { appointmentId, secrets } = validateInput(input);
+  console.log(`[${ZAMBDA_NAME}] start appointmentId=${appointmentId}`);
   const oystehr = await createOystehr(secrets);
+  logStep('oystehr client setup');
 
   const resources = (
     await oystehr.fhir.search<Encounter | Appointment | Patient>({
@@ -98,6 +101,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
       ],
     })
   ).unbundle();
+  logStep('Encounter search');
   const encounter = resources.find((resource) => resource.resourceType === 'Encounter');
   const encounterId = encounter?.id;
   if (encounter == null || encounterId == null) {
@@ -112,6 +116,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   const patient = resources.find((resource) => resource.resourceType === 'Patient');
   let questionnaireResponse: QuestionnaireResponse;
   const existingQuestionnaireResponse = await findAIInterviewQuestionnaireResponse(encounterId, oystehr);
+  logStep('QuestionnaireResponse search');
   const patientInfoDetails = [];
   if (patient) {
     if (patient.name && patient.name.length > 0) {
@@ -148,6 +153,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     questionnaireResponse = existingQuestionnaireResponse;
   } else {
     questionnaireResponse = await createQuestionnaireResponse(encounterId, prompt, oystehr, secrets);
+    logStep('chatbot call and QuestionnaireResponse create');
   }
   return {
     statusCode: 200,

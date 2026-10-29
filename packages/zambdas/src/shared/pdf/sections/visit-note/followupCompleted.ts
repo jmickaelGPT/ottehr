@@ -1,6 +1,6 @@
 import { DateTime } from 'luxon';
-import { formatDateTimeToZone } from 'utils';
-import { drawFieldLine } from '../../helpers/render';
+import { formatDateTimeToZone } from 'utils/lib/utils/date';
+import { drawFieldLine } from '../../helpers/render/drawFieldLine';
 import { createConfiguredSection, DataComposer } from '../../pdf-common';
 import { EncounterInfo, FollowupCompleted, PdfSection } from '../../types';
 import { FullAppointmentResourcePackage } from '../../visit-details-pdf/types';
@@ -29,6 +29,7 @@ export const createFollowupCompletedSection = <
     shouldRender: (_sectionData, rootData) => !!rootData?.encounter?.isFollowup,
     render: (client, data, styles) => {
       drawFieldLine(client, styles, { label: 'Follow-up completed', value: data.completedDateTime });
+      client.drawSeparatedLine(styles.lineStyles.separator);
     },
   }));
 };

@@ -1,7 +1,9 @@
-import { alpha, Grid, Paper, Table, TableBody, TableCell, TableHead, TableRow, useTheme } from '@mui/material';
+import { alpha, Box, Grid, Paper, Table, TableBody, TableCell, TableHead, TableRow, useTheme } from '@mui/material';
 import { FC } from 'react';
 import { dataTestIds } from 'src/constants/data-test-ids';
-import { RosCard, RosItemConfig } from 'utils';
+import { RosCard, RosItemConfig } from 'utils/lib/ottehr-config/review-of-systems/in-person.config';
+import { RosCommentField } from './RosCommentField';
+import { RosSelectAllRow } from './RosSelectAllRow';
 import { RosTableRow } from './RosTableRow';
 
 interface RosTableProps {
@@ -21,7 +23,7 @@ export const RosTable: FC<RosTableProps> = ({ config }) => {
   const theme = useTheme();
 
   const renderSystem = ([systemKey, system]: [string, RosCard]): React.ReactNode => (
-    <Paper key={systemKey} variant="outlined" sx={{ height: '100%' }}>
+    <Paper key={systemKey} variant="outlined" sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <Table size="small" sx={{ tableLayout: 'fixed' }} data-testid={dataTestIds.reviewOfSystemsPage.rosTable}>
         <TableHead>
           <TableRow
@@ -61,11 +63,15 @@ export const RosTable: FC<RosTableProps> = ({ config }) => {
           </TableRow>
         </TableHead>
         <TableBody>
+          <RosSelectAllRow items={system.items} />
           {Object.entries(system.items).map(([baseKey, item]) => (
             <RosTableRow key={baseKey} baseKey={baseKey} item={item} />
           ))}
         </TableBody>
       </Table>
+      <Box sx={{ p: 1 }}>
+        <RosCommentField systemKey={systemKey} systemLabel={system.label} />
+      </Box>
     </Paper>
   );
 

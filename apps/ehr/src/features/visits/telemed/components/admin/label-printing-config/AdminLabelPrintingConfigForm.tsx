@@ -5,7 +5,6 @@ import {
   FormControl,
   FormControlLabel,
   FormHelperText,
-  FormLabel,
   Grid,
   InputLabel,
   MenuItem,
@@ -13,20 +12,22 @@ import {
   Typography,
   useTheme,
 } from '@mui/material';
-import { OystehrSdkError } from '@oystehr/sdk/dist/cjs/errors';
+import type Oystehr from '@oystehr/sdk';
 import { ReactElement } from 'react';
 import { Controller, FormProvider, useForm } from 'react-hook-form';
 import { dataTestIds } from 'src/constants/data-test-ids';
 import {
-  APIError,
-  getLabelTypeMetadata,
   LabelOrientationSchema,
   LabelPrintingConfig,
   LabelPrintingConfigSchema,
   MANUFACTURER_TO_LABEL_MAPPING,
   PrintModeSchema,
   SupportedPrinterManufacturerSchema,
-} from 'utils';
+} from 'utils/lib/types/data/printing';
+import { APIError } from 'utils/lib/types/errors';
+import { getLabelTypeMetadata } from 'utils/lib/utils/printing';
+
+type OystehrSdkError = Oystehr.OystehrSdkError;
 
 export interface AdminPrintingConfigFormProps {
   defaultValues: LabelPrintingConfig;
@@ -64,16 +65,6 @@ export default function AdminLabelPrintingConfigForm(props: AdminPrintingConfigF
         <Grid container direction="row" alignItems="center" justifyContent="space-between">
           <Grid item xs={10} sm={10} md={10}>
             <Grid container direction="row" rowSpacing={2}>
-              <FormLabel
-                sx={{
-                  ...theme.typography.h4,
-                  color: theme.palette.primary.dark,
-                  mb: 2,
-                  display: 'block',
-                }}
-              >
-                Configure Print Settings
-              </FormLabel>
               <Typography
                 sx={{
                   ...theme.typography.body1,

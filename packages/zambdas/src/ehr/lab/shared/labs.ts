@@ -1,5 +1,5 @@
 import Oystehr, { BatchInputGetRequest, SearchParam } from '@oystehr/sdk';
-import { captureException } from '@sentry/aws-serverless';
+import { captureException } from '@sentry/node-core/light';
 import {
   Account,
   ActivityDefinition,
@@ -20,49 +20,68 @@ import {
   QuestionnaireResponseItem,
   QuestionnaireResponseItemAnswer,
   Reference,
+  Resource,
   Schedule,
   ServiceRequest,
   Slot,
   Specimen,
   Task,
 } from 'fhir/r4b';
+import { PATIENT_BILLING_ACCOUNT_TYPE, WORKERS_COMP_ACCOUNT_TYPE } from 'utils/lib/fhir/constants';
+import { getCoding } from 'utils/lib/fhir/helpers';
+import { isInHouseLabServiceRequest } from 'utils/lib/helpers/in-house-labs';
 import {
-  ABNORMAL_RESULT_DR_TAG,
-  DiagnosticReportLabDetailPageDTO,
   docRefIsAbnAndCurrent,
   docRefIsLabelPDFAndCurrent,
   docRefIsLabGeneratedResult,
   docRefIsOrderPDFAndCurrent,
   docRefIsOttehrGeneratedResultAndCurrent,
-  DynamicAOEInput,
-  EncounterExternalLabResult,
-  EncounterInHouseLabResult,
-  EXTERNAL_LAB_ERROR,
-  ExternalLabDocuments,
   externalLabOrderIsManual,
-  ExternalLabOrderResult,
-  ExternalLabOrderResultConfig,
   getAdditionalPlacerId,
-  getCoding,
   getOrderNumber,
   getOrderNumberFromDr,
-  getPresignedURL,
   getTestDetailsFromActivityDefinition,
   getTestItemCodeFromDr,
   getTestNameOrCodeFromDr,
-  getTimezone,
+  isExternalLabServiceRequest,
+  isPSCOrder,
+  nameLabTest,
+  parseLabInfoFromServiceRequest,
+} from 'utils/lib/helpers/labs/helpers';
+import { getPresignedURL } from 'utils/lib/helpers/presigned-file-url/helpers';
+import {
+  EncounterExternalLabResult,
+  EncounterInHouseLabResult,
+  ExternalLabOrderResult,
+  ExternalLabOrderResultConfig,
+  InHouseLabResult,
+  NonNormalResult,
+} from 'utils/lib/types/api/lab';
+import {
+  ABNORMAL_RESULT_DR_TAG,
   IN_HOUSE_DIAGNOSTIC_REPORT_CATEGORY_CONFIG,
   IN_HOUSE_OBS_DEF_ID_SYSTEM,
   IN_HOUSE_TEST_CODE_SYSTEM,
   INCONCLUSIVE_RESULT_DR_TAG,
-  InHouseLabResult,
-  isExternalLabServiceRequest,
-  isInHouseLabServiceRequest,
-  isPSCOrder,
+  NEUTRAL_RESULT_DR_TAG,
+  SERVICE_REQUEST_REFLEX_TRIGGERED_TAG_CODES,
+  SERVICE_REQUEST_REFLEX_TRIGGERED_TAG_SYSTEM,
+} from 'utils/lib/types/data/in-house/in-house.constants';
+import {
   LAB_DR_TYPE_TAG,
   LAB_OBS_VALUE_WITH_PRECISION_EXT,
   LAB_ORDER_TASK,
   LAB_RESULT_DOC_REF_CODING_CODE,
+  OYSTEHR_LAB_DIAGNOSTIC_REPORT_CATEGORY,
+  OYSTEHR_LAB_GUID_SYSTEM,
+  OYSTEHR_LAB_OI_CODE_SYSTEM,
+  OYSTEHR_LAB_ORDER_PLACER_ID_SYSTEM,
+  SR_REVOKED_REASON_EXT,
+} from 'utils/lib/types/data/labs/labs.constants';
+import {
+  DiagnosticReportLabDetailPageDTO,
+  DynamicAOEInput,
+  ExternalLabDocuments,
   LabDocument,
   LabDocumentBase,
   LabDocumentByRequisition,
@@ -70,23 +89,12 @@ import {
   LabDocumentRelatedToServiceRequest,
   LabDocumentType,
   LabDrTypeTagCode,
-  LabelPdf,
   LabOrderResultDetails,
   LabType,
-  nameLabTest,
-  NEUTRAL_RESULT_DR_TAG,
-  NonNormalResult,
-  OYSTEHR_LAB_DIAGNOSTIC_REPORT_CATEGORY,
-  OYSTEHR_LAB_GUID_SYSTEM,
-  OYSTEHR_LAB_OI_CODE_SYSTEM,
-  OYSTEHR_LAB_ORDER_PLACER_ID_SYSTEM,
-  parseLabInfoFromServiceRequest,
-  PATIENT_BILLING_ACCOUNT_TYPE,
-  SERVICE_REQUEST_REFLEX_TRIGGERED_TAG_CODES,
-  SERVICE_REQUEST_REFLEX_TRIGGERED_TAG_SYSTEM,
-  SR_REVOKED_REASON_EXT,
-  WORKERS_COMP_ACCOUNT_TYPE,
-} from 'utils';
+} from 'utils/lib/types/data/labs/labs.types';
+import { LabelPdf } from 'utils/lib/types/data/printing';
+import { EXTERNAL_LAB_ERROR } from 'utils/lib/types/errors';
+import { getTimezone } from 'utils/lib/utils/scheduleUtils';
 import { parseLabOrderStatusWithSpecificTask } from '../external/get-lab-orders/helpers';
 import { getInHouseLabTestUrlAndVersionForADFromServiceRequest } from './in-house-labs';
 
@@ -134,6 +142,10 @@ const makeSearchParamsBasedOnDiagnosticReport = (diagnosticReportID: string): Se
       value: 'DiagnosticReport:result', // observations
     },
     {
+      name: '_include',
+      value: 'DiagnosticReport:encounter', // we expect reflex tests to have encounters
+    },
+    {
       name: '_include:iterate',
       value: 'Encounter:appointment',
     },
@@ -174,12 +186,17 @@ export async function getExternalLabOrderResourcesViaDiagnosticReport(
       params: searchParams,
     })
   )?.unbundle();
+  console.log(
+    'these are the returned resources searching for DR based resources',
+    resourceSearch.map((res) => `${res.resourceType}/${res.id}`).sort()
+  );
 
   const patients: Patient[] = [];
   const organizations: Organization[] = [];
   const diagnosticReports: DiagnosticReport[] = [];
   const observations: Observation[] = [];
   const schedules: Schedule[] = [];
+  const serviceRequests: ServiceRequest[] = [];
 
   resourceSearch.forEach((resource) => {
     if (resource.resourceType === 'Patient') patients.push(resource);
@@ -208,7 +225,6 @@ export async function getExternalLabOrderResourcesViaDiagnosticReport(
   const diagnosticReport = diagnosticReports[0];
   const schedule = schedules.length ? schedules[0] : undefined;
 
-  const serviceRequests: ServiceRequest[] = [];
   if (type === 'unsolicited') {
     serviceRequests.push(
       ...resourceSearch.filter(
@@ -665,6 +681,7 @@ export const makeEncounterLabResults = async (
   const documentReferences: DocumentReference[] = [];
   const activeExternalLabServiceRequestIds = new Set<string>();
   const activeInHouseLabServiceRequestIds = new Set<string>();
+  const orderedInHouseLabServiceRequestIds = new Set<string>();
   const reflexTestsPending: string[] = []; // array of test names pending;
   const serviceRequestMap: Record<string, { resource: ServiceRequest; type: LabType }> = {};
   const diagnosticReportMap: Record<string, DiagnosticReport> = {};
@@ -693,6 +710,9 @@ export const makeEncounterLabResults = async (
             if (!isManual && resource.id) activeExternalLabServiceRequestIds.add(resource.id);
           }
           if (isInHouseLabSR && resource.id) activeInHouseLabServiceRequestIds.add(resource.id);
+        }
+        if (resource.status === 'draft' && isInHouseLabSR && resource.id) {
+          orderedInHouseLabServiceRequestIds.add(resource.id);
         }
 
         const reflexTestTriggered = resource.meta?.tag?.find(
@@ -726,7 +746,7 @@ export const makeEncounterLabResults = async (
 
   // Fetch ActivityDefinitions for in-house labs to get component names for observations
   const inHouseServiceRequests = Object.values(serviceRequestMap)
-    .filter((detail) => detail.type === LabType.inHouse)
+    .filter((detail) => detail.type === LabType.inHouse && detail.resource.status !== 'draft')
     .map((detail) => detail.resource);
   const activityDefinitionMap =
     oystehr && inHouseServiceRequests.length > 0
@@ -829,6 +849,10 @@ export const makeEncounterLabResults = async (
     return serviceRequest?.code?.text || 'name missing';
   });
 
+  const inHouseTestsOrdered = Array.from(orderedInHouseLabServiceRequestIds).map(
+    (srId) => serviceRequestMap[`ServiceRequest/${srId}`].resource.code?.text || 'name missing'
+  );
+
   const externalLabResultConfig: EncounterExternalLabResult = {
     resultsPending: externalResultsPending.length > 0 ? externalResultsPending : undefined,
     labOrderResults: externalLabOrderResults,
@@ -837,6 +861,7 @@ export const makeEncounterLabResults = async (
   const inHouseLabResultConfig: EncounterInHouseLabResult = {
     resultsPending: inHouseResultsPending.length > 0 ? inHouseResultsPending : undefined,
     reflexTestsPending: reflexTestsPending.length > 0 ? reflexTestsPending : undefined,
+    testsOrdered: inHouseTestsOrdered.length > 0 ? inHouseTestsOrdered : undefined,
     labOrderResults: inHouseLabOrderResults,
   };
   return { externalLabResultConfig, inHouseLabResultConfig };
@@ -924,10 +949,11 @@ export const configLabRequestsForGetChartData = (encounterId: string): BatchInpu
     url: `/DocumentReference?status=current&type=${LAB_RESULT_DOC_REF_CODING_CODE.code}&encounter=${encounterId}&_include:iterate=DocumentReference:related&_include:iterate=DiagnosticReport:based-on&_include:iterate=DiagnosticReport:result`,
   };
   // Grabbing active lab service requests separately since they might not have results
-  // but we validate against actually signing the progress note if there are any pending
+  // but we validate against actually signing the progress note if there are any pending.
+  // Draft ones are in-house tests ordered but not yet collected, so the note can show them too
   const activeLabServiceRequestSearch: BatchInputGetRequest = {
     method: 'GET',
-    url: `/ServiceRequest?encounter=Encounter/${encounterId}&status=active&code=${OYSTEHR_LAB_OI_CODE_SYSTEM}|,${IN_HOUSE_TEST_CODE_SYSTEM}|`,
+    url: `/ServiceRequest?encounter=Encounter/${encounterId}&status=active,draft&code=${OYSTEHR_LAB_OI_CODE_SYSTEM}|,${IN_HOUSE_TEST_CODE_SYSTEM}|`,
   };
   return [docRefSearch, activeLabServiceRequestSearch];
 };
@@ -1628,4 +1654,108 @@ export const accountIsWorkersComp = (account: Account): boolean => {
     (coding) => coding.system === workersCompSystem && coding.code === workersCompCode
   );
   return !!isWorkersComp;
+};
+
+export const isTaskPST = (task: Task): boolean => {
+  return (
+    task.code?.coding?.some(
+      (coding) => coding.system === LAB_ORDER_TASK.system && coding.code === LAB_ORDER_TASK.code.preSubmission
+    ) || false
+  );
+};
+
+export const isTaskFinal = (task: Task): boolean => {
+  return (
+    task.code?.coding?.some(
+      (coding) => coding.system === LAB_ORDER_TASK.system && coding.code === LAB_ORDER_TASK.code.reviewFinalResult
+    ) || false
+  );
+};
+
+export const isTaskPrelim = (task: Task): boolean => {
+  return (
+    task.code?.coding?.some(
+      (coding) => coding.system === LAB_ORDER_TASK.system && coding.code === LAB_ORDER_TASK.code.reviewPreliminaryResult
+    ) || false
+  );
+};
+
+export const isTaskCorrected = (task: Task): boolean => {
+  return (
+    task.code?.coding?.some(
+      (coding) => coding.system === LAB_ORDER_TASK.system && coding.code === LAB_ORDER_TASK.code.reviewCorrectedResult
+    ) || false
+  );
+};
+
+export const isTaskCancelledResult = (task: Task): boolean => {
+  return (
+    task.code?.coding?.some(
+      (coding) => coding.system === LAB_ORDER_TASK.system && coding.code === LAB_ORDER_TASK.code.reviewCancelledResult
+    ) || false
+  );
+};
+
+export const parseTaskPST = (tasks: Task[], serviceRequestId: string): Task | null => {
+  const relatedTasks = filterResourcesBasedOnServiceRequest(tasks, serviceRequestId);
+
+  for (const task of relatedTasks) {
+    if (isTaskPST(task)) {
+      return task;
+    }
+  }
+
+  return null;
+};
+
+export const filterResourcesBasedOnTargetResource = <T extends Resource & { basedOn?: Reference[] }>({
+  resources,
+  targetResourceId,
+  targetResourceType,
+}: {
+  resources: T[];
+  targetResourceId: string;
+  targetResourceType: string;
+}): T[] => {
+  return resources.filter(
+    (resource) => resource.basedOn?.some((basedOn) => basedOn.reference === `${targetResourceType}/${targetResourceId}`)
+  );
+};
+
+export const filterResourcesBasedOnServiceRequest = <T extends Resource & { basedOn?: Reference[] }>(
+  resources: T[],
+  serviceRequestId: string
+): T[] => {
+  return filterResourcesBasedOnTargetResource({
+    resources,
+    targetResourceId: serviceRequestId,
+    targetResourceType: 'ServiceRequest',
+  });
+};
+
+export const filterResourcesBasedOnDiagnosticReports = <T extends Resource & { basedOn?: Reference[] }>(
+  resources: T[],
+  results: DiagnosticReport[]
+): T[] => {
+  const resultsIds: string[] = results
+    .map((result) => result.id)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+
+  if (!resultsIds.length) {
+    return [];
+  }
+
+  const result: T[] = [];
+
+  for (const resultId of resultsIds) {
+    const relatedResources = filterResourcesBasedOnTargetResource<T>({
+      resources,
+      targetResourceId: resultId,
+      targetResourceType: 'DiagnosticReport',
+    });
+
+    result.push(...relatedResources);
+  }
+
+  return result;
 };

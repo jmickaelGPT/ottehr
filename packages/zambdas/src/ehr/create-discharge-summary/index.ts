@@ -1,24 +1,28 @@
 import Oystehr from '@oystehr/sdk';
-import { captureException } from '@sentry/aws-serverless';
+import { captureException } from '@sentry/node-core/light';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { DocumentReference } from 'fhir/r4b';
-import { PDFDocument } from 'pdf-lib';
+import { uploadObjectToZ3 } from 'utils/lib/helpers/presigned-file-url/helpers';
+import { visitNoteToLegacyChartData } from 'utils/lib/helpers/visit-note/visit-note-to-chart-data.helper';
+import { Secrets } from 'utils/lib/secrets';
 import {
   CreateDischargeSummaryInputValidated,
   CreateDischargeSummaryResponse,
-  PATIENT_EDUCATION_DOC_TYPE_CODE,
-  progressNoteChartDataRequestedFields,
-  Secrets,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../shared';
+} from 'utils/lib/types/api/create-discharge-summary/create-discharge-summary.types';
+import { PATIENT_EDUCATION_DOC_TYPE_CODE } from 'utils/lib/types/data/paperwork/paperwork.constants';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { buildVisitNote } from '../../shared/chart-sections/visit-note';
+import { fetchErxPharmacies } from '../../shared/erx';
+import { createClinicalOystehrClient } from '../../shared/helpers';
 import { createDischargeSummaryPdf } from '../../shared/pdf/discharge-summary-pdf';
 import { getUpcomingFollowUps } from '../../shared/pdf/get-upcoming-follow-ups';
 import { makeDischargeSummaryPdfDocumentReference } from '../../shared/pdf/make-discharge-summary-document-reference';
+import { countPdfPages, downloadFileBytes, mergePdfDocuments } from '../../shared/pdf/merge-pdfs';
 import { getAppointmentAndRelatedResources } from '../../shared/pdf/visit-details-pdf/get-video-resources';
-import { createPresignedUrl, uploadObjectToZ3 } from '../../shared/z3Utils';
-import { getChartData } from '../get-chart-data';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { createPresignedUrl } from '../../shared/z3Utils';
 import { getMedicationOrders } from '../get-medication-orders';
-import { getRadiologyOrders } from '../radiology/order-list';
 import { validateRequestParameters } from './validateRequestParameters';
 
 let m2mToken: string;
@@ -26,8 +30,6 @@ let m2mToken: string;
 export const index = wrapHandler(
   'create-discharge-summary',
   async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-    console.log(`create-discharge-summary started, input: ${JSON.stringify(input)}`);
-
     let validatedParameters: CreateDischargeSummaryInputValidated;
 
     try {
@@ -44,7 +46,7 @@ export const index = wrapHandler(
     const { appointmentId, timezone, secrets } = validatedParameters;
 
     m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-    const oystehr = createOystehrClient(m2mToken, secrets);
+    const oystehr = createClinicalOystehrClient(m2mToken, secrets);
     console.log('Created Oystehr client');
 
     const response = await performEffect(oystehr, appointmentId, secrets, timezone);
@@ -74,17 +76,7 @@ export const performEffect = async (
   }
   const { encounter, patient, listResources } = visitResources;
 
-  const chartDataPromise = getChartData(oystehr, m2mToken, encounter.id!);
-  const additionalChartDataPromise = getChartData(
-    oystehr,
-    m2mToken,
-    encounter.id!,
-    progressNoteChartDataRequestedFields
-  );
-
-  const radiologyOrdersPromise = getRadiologyOrders(oystehr, {
-    encounterIds: [encounter.id!],
-  });
+  const visitNotePromise = buildVisitNote({ oystehr, m2mToken }, encounter.id!);
 
   const medicationOrdersPromise = getMedicationOrders(oystehr, {
     searchBy: {
@@ -101,33 +93,33 @@ export const performEffect = async (
     encounter.id
   );
 
-  const [chartDataResult, additionalChartDataResult, radiologyData, medicationOrdersData, upcomingFollowUps] =
-    await Promise.all([
-      chartDataPromise,
-      additionalChartDataPromise,
-      radiologyOrdersPromise,
-      medicationOrdersPromise,
-      upcomingFollowUpsPromise,
-    ]);
-  const chartData = chartDataResult.response;
-  const additionalChartData = additionalChartDataResult.response;
+  const [visitNote, medicationOrdersData, upcomingFollowUps] = await Promise.all([
+    visitNotePromise,
+    medicationOrdersPromise,
+    upcomingFollowUpsPromise,
+  ]);
+  // The discharge summary composers read the two whole-chart shapes; the adapter presents the note as both.
+  const { chartData, additionalChartData } = visitNoteToLegacyChartData(visitNote, { module: 'in-person' });
   const medicationOrders = medicationOrdersData?.orders.filter((order) => order.status !== 'cancelled');
 
   console.log('Chart data received');
+  const erxPharmacies = await fetchErxPharmacies(oystehr, additionalChartData?.prescribedMedications);
+
   const { pdfInfo, attached } = await createDischargeSummaryPdf(
     {
       allChartData: {
         chartData,
         additionalChartData,
-        radiologyData,
         medicationOrders,
       },
       appointmentPackage: visitResources,
       upcomingFollowUps,
+      erxPharmacies,
     },
     secrets,
     m2mToken
   );
+
   if (!patient?.id) throw new Error(`No patient has been found for encounter: ${encounter.id}`);
 
   // Append patient education PDFs if any exist
@@ -146,31 +138,19 @@ export const performEffect = async (
     if (educationDocRefs.length > 0) {
       console.log(`Found ${educationDocRefs.length} patient education PDF(s) to append`);
 
-      // Download the discharge summary PDF
-      const dischargePdfUrl = await createPresignedUrl(m2mToken, pdfInfo.uploadURL, 'download');
-      const dischargeResponse = await fetch(dischargePdfUrl);
-      if (!dischargeResponse.ok) {
-        throw new Error(
-          `Failed to download discharge summary PDF: ${dischargeResponse.status} ${dischargeResponse.statusText}`
-        );
-      }
-      const dischargeBytes = new Uint8Array(await dischargeResponse.arrayBuffer());
-      const mergedPdf = await PDFDocument.load(dischargeBytes);
+      const dischargeBytes = await downloadFileBytes(pdfInfo.uploadURL, m2mToken);
+      const parts: Uint8Array[] = [dischargeBytes];
 
-      // Download and merge each education PDF
       for (const docRef of educationDocRefs) {
         const z3Url = docRef.content?.[0]?.attachment?.url;
         if (!z3Url) continue;
         try {
-          const eduPdfUrl = await createPresignedUrl(m2mToken, z3Url, 'download');
-          const eduResponse = await fetch(eduPdfUrl);
-          if (!eduResponse.ok) {
-            throw new Error(`Failed to download education PDF: ${eduResponse.status} ${eduResponse.statusText}`);
-          }
-          const eduBytes = new Uint8Array(await eduResponse.arrayBuffer());
-          const eduPdf = await PDFDocument.load(eduBytes);
-          const pages = await mergedPdf.copyPages(eduPdf, eduPdf.getPageIndices());
-          pages.forEach((page) => mergedPdf.addPage(page));
+          const eduBytes = await downloadFileBytes(z3Url, m2mToken);
+
+          // parses the document so a malformed PDF is caught (and skipped) here rather than at merge time
+          await countPdfPages(eduBytes);
+
+          parts.push(eduBytes);
           console.log(`Appended education PDF from DocumentReference/${docRef.id}`);
         } catch (err) {
           console.error(`Failed to append education PDF DocumentReference/${docRef.id}:`, err);
@@ -179,7 +159,7 @@ export const performEffect = async (
       }
 
       // Re-upload the merged PDF to the same Z3 URL
-      const mergedBytes = await mergedPdf.save();
+      const { bytes: mergedBytes } = await mergePdfDocuments(parts);
       const uploadUrl = await createPresignedUrl(m2mToken, pdfInfo.uploadURL, 'upload');
       await uploadObjectToZ3(mergedBytes, uploadUrl);
       console.log('Re-uploaded merged discharge summary with education PDFs');

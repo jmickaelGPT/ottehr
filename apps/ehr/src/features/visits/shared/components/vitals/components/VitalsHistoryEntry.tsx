@@ -4,18 +4,19 @@ import WarningAmberOutlinedIcon from '@mui/icons-material/WarningAmberOutlined';
 import { Box, IconButton, Typography, useTheme } from '@mui/material';
 import { DateTime } from 'luxon';
 import React, { JSX, useState } from 'react';
+import { vitalsConfig } from 'utils/lib/helpers/vitals/config-schema';
+import { formatBMIWithUnit } from 'utils/lib/helpers/vitals/vitals-bmi.helper';
+import { formatHeightObservationValue } from 'utils/lib/helpers/vitals/vitals-height.helper';
+import { celsiusToFahrenheit, roundTemperatureValue } from 'utils/lib/helpers/vitals/vitals-temperature.helper';
 import {
-  celsiusToFahrenheit,
-  formatDateTimeToLocalTimezone,
-  formatHeightObservationValue,
-  formatWeightKg,
-  formatWeightLbs,
+  getDotVisionScreeningLines,
   getVisionExtraOptionsFormattedString,
-  roundTemperatureValue,
-  vitalsConfig,
-  VitalsObservationDTO,
-} from 'utils';
+} from 'utils/lib/helpers/vitals/vitals-vision.helper';
+import { formatWeightKg, formatWeightLbs } from 'utils/lib/helpers/vitals/vitals-weight.helper';
+import { VitalsObservationDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
+import { formatDateTimeToLocalTimezone } from 'utils/lib/utils/date';
 import { DeleteVitalModal } from '../DeleteVitalModal';
+import DotVisionDocumentChip from '../vision/DotVisionDocumentChip';
 
 type VitalHistoryElementProps<T extends VitalsObservationDTO = VitalsObservationDTO> = {
   historyEntry: T;
@@ -60,11 +61,7 @@ export const VitalHistoryElement: React.FC<VitalHistoryElementProps> = ({
           {observationValueElements.map((value, index) => {
             if (typeof value === 'string') {
               return (
-                <Typography
-                  key={index}
-                  component="span"
-                  sx={{ fontWeight: index === 0 ? 'bold' : 'normal', color: lineColor }}
-                >
+                <Typography key={index} component="span" sx={{ fontWeight: 'bold', color: lineColor }}>
                   {value}
                 </Typography>
               );
@@ -154,7 +151,29 @@ export const getObservationValueElements = (
     }
     case 'vital-height':
       return [formatHeightObservationValue(historyEntry.value)];
-    case 'vital-vision':
+    case 'vital-bmi':
+      return [formatBMIWithUnit(historyEntry.value)];
+    case 'vital-vision': {
+      const dotLines = getDotVisionScreeningLines(historyEntry.dotVisionScreening);
+      if (dotLines.length > 0) {
+        const dotDocument = historyEntry.dotVisionScreening?.document;
+        return [
+          <Box key="dot" component="span" sx={{ display: 'block' }}>
+            {dotLines.map((line, idx) => {
+              const [label, value] = line.split(/:(.+)/);
+              return (
+                <Typography key={idx} component="div" sx={{ color: lineColor }}>
+                  {label}:
+                  <Typography component="span" sx={{ fontWeight: 'bold', color: lineColor }}>
+                    {value}
+                  </Typography>
+                </Typography>
+              );
+            })}
+            {dotDocument && <DotVisionDocumentChip document={dotDocument} />}
+          </Box>,
+        ];
+      }
       return [
         <>
           {historyEntry.leftEyeVisionText && (
@@ -177,6 +196,7 @@ export const getObservationValueElements = (
           </Typography>
         </>,
       ];
+    }
     case 'vital-last-menstrual-period': {
       if (!historyEntry.value && historyEntry.isUnsure) {
         return ['unsure'];

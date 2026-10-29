@@ -2,40 +2,38 @@ import Oystehr, { SearchParam } from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { PractitionerRole, Schedule } from 'fhir/r4b';
 import { DateTime } from 'luxon';
+import { getClosingTime, getOpeningTime, isClosureOverride } from 'utils/lib/helpers/check-office-open';
+import { createOystehrClient } from 'utils/lib/helpers/helpers';
+import { getSecret, SecretsKeys } from 'utils/lib/secrets';
+import { WalkinAvailabilityCheckParams, WalkinAvailabilityCheckResult } from 'utils/lib/types/api/appointment.types';
+import { ScheduleOwnerFhirResource } from 'utils/lib/types/api/schedules';
+import { Closure, ServiceMode, Timezone } from 'utils/lib/types/common';
+import { TIMEZONES } from 'utils/lib/types/constants';
 import {
-  Closure,
-  createOystehrClient,
   FHIR_RESOURCE_NOT_FOUND,
-  getClosingTime,
-  getOpeningTime,
-  getScheduleExtension,
-  getSecret,
-  getServiceModeFromScheduleOwner,
-  getTimezone,
   INVALID_INPUT_ERROR,
-  isClosureOverride,
-  isValidUUID,
   MISSING_REQUEST_BODY,
   MISSING_SCHEDULE_EXTENSION_ERROR,
+  SERVICE_MODE_NOT_AVAILABLE_ERROR,
+} from 'utils/lib/types/errors';
+import {
+  getScheduleExtension,
+  getServiceModeFromScheduleOwner,
+  getTimezone,
   ScheduleExtension,
-  ScheduleOwnerFhirResource,
-  SecretsKeys,
-  ServiceMode,
-  Timezone,
-  TIMEZONES,
-  WalkinAvailabilityCheckParams,
-  WalkinAvailabilityCheckResult,
-} from 'utils';
+} from 'utils/lib/utils/scheduleUtils';
+import { isValidUUID } from 'utils/lib/validation/helper';
 import { getNameForOwner } from '../../../ehr/schedules/shared';
-import { getAuth0Token, wrapHandler, ZambdaInput } from '../../../shared';
+import { getAuth0Token } from '../../../shared/getAuth0Token';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
+import { safeJsonParse } from '../../../shared/validation';
 
 let oystehrToken: string;
 export const index = wrapHandler('check-availability', async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
   const fhirAPI = getSecret(SecretsKeys.FHIR_API, input.secrets);
   const projectAPI = getSecret(SecretsKeys.PROJECT_API, input.secrets);
   const basicInput = validateRequestParameters(input);
-
-  console.log('basicInput', JSON.stringify(basicInput));
 
   if (!oystehrToken) {
     console.log('getting m2m token for service calls');
@@ -112,7 +110,7 @@ const validateRequestParameters = (input: ZambdaInput): BasicInput => {
     throw MISSING_REQUEST_BODY;
   }
 
-  const { scheduleId, locationName } = JSON.parse(input.body);
+  const { scheduleId, locationName, serviceMode } = safeJsonParse(input.body);
 
   if (!scheduleId && !locationName) {
     throw INVALID_INPUT_ERROR('Either "scheduleId" or "scheduleName" must be provided');
@@ -126,7 +124,11 @@ const validateRequestParameters = (input: ZambdaInput): BasicInput => {
     throw INVALID_INPUT_ERROR('"scheduleName" must be a string');
   }
 
-  return { scheduleId, locationName };
+  if (serviceMode !== undefined && !Object.values(ServiceMode).includes(serviceMode)) {
+    throw INVALID_INPUT_ERROR(`"serviceMode" must be one of: ${Object.values(ServiceMode).join(', ')}`);
+  }
+
+  return { scheduleId, locationName, serviceMode };
 };
 
 interface EffectInput {
@@ -137,7 +139,7 @@ interface EffectInput {
   serviceMode?: ServiceMode;
 }
 const complexValidation = async (input: BasicInput, oystehr: Oystehr): Promise<EffectInput> => {
-  const { scheduleId, locationName } = input;
+  const { scheduleId, locationName, serviceMode: requestedServiceMode } = input;
 
   const params: SearchParam[] = [];
 
@@ -213,10 +215,22 @@ const complexValidation = async (input: BasicInput, oystehr: Oystehr): Promise<E
     }) as ScheduleOwnerFhirResource;
   }
 
-  let serviceMode: ServiceMode | undefined = undefined;
+  let serviceMode: ServiceMode | undefined = requestedServiceMode;
 
   if (scheduleOwner) {
-    serviceMode = getServiceModeFromScheduleOwner(scheduleOwner);
+    serviceMode = getServiceModeFromScheduleOwner(
+      scheduleOwner,
+      undefined,
+      requestedServiceMode ?? ServiceMode['in-person'] // walk-in links without an explicit mode prefer in-person to keep the In-Person Check-In home screen link working
+    );
+
+    if (requestedServiceMode && serviceMode !== requestedServiceMode) {
+      throw SERVICE_MODE_NOT_AVAILABLE_ERROR(
+        `${
+          requestedServiceMode === ServiceMode.virtual ? 'Virtual' : 'In-person'
+        } walk-in visits are not available at this location.`
+      );
+    }
   }
 
   const scheduleExtension = getScheduleExtension(schedule);

@@ -1,6 +1,8 @@
 import { RelatedPerson } from 'fhir/r4b';
 import { capitalize } from 'lodash-es';
-import { formatDateForDisplay, getFullName, standardizePhoneNumber } from 'utils';
+import { getFullName } from 'utils/lib/fhir/patient';
+import { formatZipcodeForDisplay, standardizePhoneNumber } from 'utils/lib/helpers/helpers';
+import { formatDateForDisplay } from 'utils/lib/utils/dateUtils';
 import { createConfiguredSection, DataComposer } from '../pdf-common';
 import { PdfSection, ResponsiblePartyInfo, ResponsiblePartyInput } from '../types';
 
@@ -35,7 +37,7 @@ export const composeResponsiblePartyData: DataComposer<ResponsiblePartyInput, Re
   const addressLineOptional = guarantorAddress?.line?.[1] ?? '';
   const city = guarantorAddress?.city ?? '';
   const state = guarantorAddress?.state ?? '';
-  const zip = guarantorAddress?.postalCode ?? '';
+  const zip = formatZipcodeForDisplay(guarantorAddress?.postalCode ?? '');
 
   return {
     relationship,

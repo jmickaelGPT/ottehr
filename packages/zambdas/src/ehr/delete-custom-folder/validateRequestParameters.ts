@@ -1,10 +1,10 @@
 import {
   DeleteCustomFolderInputSchema,
   DeleteCustomFolderInputValidated,
-  MISSING_REQUEST_BODY,
-  NOT_AUTHORIZED,
-} from 'utils';
-import { safeValidate, ZambdaInput } from '../../shared';
+} from 'utils/lib/types/data/custom-folder.types';
+import { MISSING_REQUEST_BODY, NOT_AUTHORIZED } from 'utils/lib/types/errors';
+import { ZambdaInput } from '../../shared/types/common';
+import { safeJsonParse, safeValidate } from '../../shared/validation';
 
 export function validateRequestParameters(input: ZambdaInput): DeleteCustomFolderInputValidated {
   console.group('validateRequestParameters');
@@ -19,7 +19,7 @@ export function validateRequestParameters(input: ZambdaInput): DeleteCustomFolde
 
   const userToken = input.headers.Authorization.replace('Bearer ', '');
 
-  const parsed = JSON.parse(input.body) as unknown;
+  const parsed = safeJsonParse(input.body) as unknown;
 
   const { internalName } = safeValidate(DeleteCustomFolderInputSchema, parsed);
 

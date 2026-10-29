@@ -2,30 +2,41 @@ import Oystehr, { BatchInputRequest, User } from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Operation } from 'fast-json-patch';
 import { FhirResource, Provenance, Task } from 'fhir/r4b';
+import { getEncounterStatusHistoryUpdateOp, isAnnotationFollowupEncounter } from 'utils/lib/fhir/encounter';
 import {
   extractExtensionValue,
   findExtensionIndex,
   getAppointmentLockMetaTagOperations,
   getAppointmentMetaTagOpForStatusUpdate,
-  getEncounterStatusHistoryUpdateOp,
-  getFullestAvailableName,
-  getInPersonVisitStatus,
-  getPatchBinary,
+  getEncounterLockMetaTagOperations,
+  getSkipEmailTaskInput,
   getTaskResource,
-  isAnnotationFollowupEncounter,
-  SignAppointmentInput,
-  SignAppointmentResponse,
-  TaskIndicator,
-  userMe,
+} from 'utils/lib/fhir/helpers';
+import { getFullestAvailableName } from 'utils/lib/fhir/patient';
+import { getPatchBinary } from 'utils/lib/fhir/resourcePatch';
+import { removePrefix } from 'utils/lib/helpers/helpers';
+import { getOptionalSecret, SecretsKeys } from 'utils/lib/secrets';
+import {
   visitStatusToFhirAppointmentStatusMap,
   visitStatusToFhirEncounterStatusMap,
-} from 'utils';
-import { checkOrCreateM2MClientToken, getMyPractitionerId, wrapHandler, ZambdaInput } from '../../shared';
+} from 'utils/lib/types/api/appointment.types';
+import {
+  SignAppointmentInput,
+  SignAppointmentResponse,
+} from 'utils/lib/types/api/sign-appointment/sign-appointment.types';
+import { TaskIndicator } from 'utils/lib/types/common';
+import { getInPersonVisitStatus } from 'utils/lib/utils/visitUtils';
+import { checkOrCreateM2MClientToken, getUser } from '../../shared/auth';
+import { shouldUseCandid, shouldUseOttehrBilling } from '../../shared/candid';
 import { createProvenanceForEncounter } from '../../shared/createProvenanceForEncounter';
 import { createPublishExcuseNotesOps } from '../../shared/createPublishExcuseNotesOps';
-import { createOystehrClient } from '../../shared/helpers';
+import { sendErrors } from '../../shared/errors';
+import { createClinicalOystehrClient } from '../../shared/helpers';
 import { getAppointmentAndRelatedResources } from '../../shared/pdf/visit-details-pdf/get-video-resources';
 import { FullAppointmentResourcePackage } from '../../shared/pdf/visit-details-pdf/types';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { assertAssignedProviderCanSign, assertCallerCanSign } from './helpers';
 import { validateRequestParameters } from './validateRequestParameters';
 
 // Lifting up value to outside of the handler allows it to stay in memory across warm lambda invocations
@@ -37,7 +48,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, validatedParameters.secrets);
 
-  const oystehr = createOystehrClient(m2mToken, validatedParameters.secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, validatedParameters.secrets);
   console.log('Created Oystehr client');
 
   const response = await performEffect(oystehr, validatedParameters);
@@ -54,6 +65,12 @@ export const performEffect = async (
   }
 ): Promise<SignAppointmentResponse> => {
   const { appointmentId, encounterId, timezone, supervisorApprovalEnabled, userToken, secrets } = params;
+
+  // Whether the caller may sign at all is a property of the caller, not of the visit, so it is
+  // settled before any visit data is read. The resolved user is reused below as the actor recorded
+  // on the status change and on the approval Provenance.
+  const user = await getUser(userToken, secrets);
+  assertCallerCanSign(user);
 
   const visitResources = await getAppointmentAndRelatedResources(oystehr, appointmentId, true, encounterId);
   if (!visitResources) {
@@ -76,13 +93,23 @@ export const performEffect = async (
     throw new Error(`No patient found for encounter ${encounter.id}`);
   }
 
+  // Skipped for a supervisor co-signing a visit its attender already signed: the attender was valid
+  // at signing time, the supervisor cannot undo a role change, and reassigning the slot would
+  // rewrite who the note says delivered the care — so blocking here would only strand the visit.
+  // The EHR takes the same view (ReviewAndSignButton treats awaiting-approval as completed and
+  // raises no message), and the guard still covers every first sign and every re-sign after unlock.
+  if (getInPersonVisitStatus(appointment, encounter, supervisorApprovalEnabled) !== 'awaiting supervisor approval') {
+    await assertAssignedProviderCanSign(oystehr, encounter);
+  }
+
   console.log(`appointment and encounter statuses: ${appointment.status}, ${encounter.status}`);
   const currentStatus = getInPersonVisitStatus(appointment, encounter);
 
   if (isFollowup) {
     // For follow-up encounters: only update encounter status and create PDF (no appointment updates, no email)
     if (currentStatus) {
-      const userId = await getMyPractitionerId(userToken, secrets);
+      const userId = removePrefix('Practitioner/', user.profile);
+      if (!userId) throw new Error("Can't receive practitioner resource id attached to current user");
       await changeFollowupEncounterStatusToCompleted(oystehr, userId, visitResources, supervisorApprovalEnabled);
     }
     console.debug(`Follow-up encounter status has been changed.`);
@@ -103,9 +130,11 @@ export const performEffect = async (
     const taskCreationResults = await Promise.all([visitNoteTaskPromise]);
     console.log('Follow-up task creation results ', taskCreationResults);
   } else {
+    const useCandid = shouldUseCandid(secrets);
+    const useOttehrBilling = shouldUseOttehrBilling(secrets);
+
     // For regular encounters: keep existing behavior
     if (currentStatus) {
-      const user = await userMe(userToken, secrets);
       await changeStatusToCompleted(oystehr, user, visitResources, supervisorApprovalEnabled);
     }
     console.debug(`Status has been changed.`);
@@ -113,20 +142,36 @@ export const performEffect = async (
     if (appointment.id === undefined) {
       throw new Error('Appointment ID is not defined');
     }
+    const appointmentId = appointment.id;
 
     const patientName = getFullestAvailableName(patient);
 
-    const tasks: Promise<Task>[] = [];
-    // Create Task that will kick off subscription to send the claim
-    const sendClaimTaskResource = getTaskResource(
-      TaskIndicator.sendClaim,
-      `Send claim to ${patientName}`,
-      appointment.id
-    );
-    tasks.push(oystehr.fhir.create(sendClaimTaskResource));
+    const tasks: Promise<unknown>[] = [];
+    if (useCandid) {
+      const sendClaimTaskResource = getTaskResource(
+        TaskIndicator.sendClaim,
+        `Send claim to ${patientName}`,
+        appointmentId
+      );
+      tasks.push(oystehr.fhir.create(sendClaimTaskResource));
+    }
+    if (useOttehrBilling) {
+      tasks.push(
+        oystehr.zambda.execute({ id: 'create-billing-claim-task', encounterId }).catch(async (error) => {
+          // The visit is already signed. Report billing failures without failing the sign request.
+          console.error('Failed to enqueue billing claim task', { encounterId, error });
+          await sendErrors(error, getOptionalSecret(SecretsKeys.ENVIRONMENT, secrets) ?? '', {
+            zambda: ZAMBDA_NAME,
+            encounterId,
+          }).catch((reportError) => console.error('Failed to report billing enqueue error', reportError));
+        })
+      );
+    }
 
-    // Create Task that will kick off subscription to create visit-note PDF and send an email to the patient
-    let shouldCreateVisitNoteTask = true;
+    // Determine whether this sign call is a supervisor approving a visit that was pending approval.
+    // The encounter was read before the status patch above, so the `awaiting-supervisor-approval`
+    // extension is still `true` here in that case.
+    let isSupervisorApproval = false;
     if (supervisorApprovalEnabled) {
       const extensionIndex = findExtensionIndex(
         visitResources.encounter.extension || [],
@@ -134,20 +179,14 @@ export const performEffect = async (
       );
 
       if (extensionIndex != null && extensionIndex >= 0) {
-        const awaitingSupervisorApproval = extractExtensionValue(visitResources.encounter.extension?.[extensionIndex]);
-        if (awaitingSupervisorApproval) {
-          shouldCreateVisitNoteTask = false;
-        }
+        isSupervisorApproval = !!extractExtensionValue(visitResources.encounter.extension?.[extensionIndex]);
       }
     }
-    if (shouldCreateVisitNoteTask) {
-      const visitNoteTaskResource = getTaskResource(
-        TaskIndicator.visitNotePDFAndEmail,
-        `Create visit note for ${patientName}`,
-        appointment.id
-      );
-      tasks.push(oystehr.fhir.create(visitNoteTaskResource));
-    }
+
+    // Create the Task that kicks off the visit-note PDF (and, unless suppressed, patient email)
+    // subscription. See getVisitNoteTask for why supervisor approval regenerates the PDF but skips
+    // the email.
+    tasks.push(oystehr.fhir.create(getVisitNoteTask(patientName, appointmentId, isSupervisorApproval)));
 
     const taskCreationResults = await Promise.all(tasks);
     console.log('Task creation results ', taskCreationResults);
@@ -157,6 +196,29 @@ export const performEffect = async (
     message: 'Appointment status successfully changed.',
   };
 };
+
+/**
+ * Builds the Task that triggers the visit-note PDF + patient-email subscription.
+ *
+ * On supervisor approval the PDF + email were already produced at provider-sign time; we still
+ * regenerate the PDF so the verifier's "Approved by ..." Provenance line appears, but attach a
+ * SKIP_EMAIL input so the patient is not notified a second time.
+ */
+export function getVisitNoteTask(
+  patientName: string | undefined,
+  appointmentId: string,
+  isSupervisorApproval: boolean
+): Task {
+  const task = getTaskResource(
+    TaskIndicator.visitNotePDFAndEmail,
+    isSupervisorApproval ? `Regenerate visit note for ${patientName}` : `Create visit note for ${patientName}`,
+    appointmentId
+  );
+  if (isSupervisorApproval) {
+    task.input = [getSkipEmailTaskInput()];
+  }
+  return task;
+}
 
 const changeFollowupEncounterStatusToCompleted = async (
   oystehr: Oystehr,
@@ -184,6 +246,7 @@ const changeFollowupEncounterStatusToCompleted = async (
     'completed'
   );
   encounterPatchOps.push(encounterStatusHistoryUpdate);
+  encounterPatchOps.push(...getEncounterLockMetaTagOperations(resourcesToUpdate.encounter, true));
 
   let provenanceCreate: BatchInputRequest<Provenance> | undefined;
 

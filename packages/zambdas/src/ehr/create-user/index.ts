@@ -1,17 +1,28 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { APIError, APIErrorCode, CreateUserOutput, USER_ALREADY_EXISTS_ERROR } from 'utils';
-import { checkOrCreateM2MClientToken, wrapHandler, ZambdaInput } from '../../shared';
-import { createOystehrClient } from '../../shared/helpers';
-import { validateRequestParameters } from './validateRequestParameters';
+import { CreateUserOutput } from 'utils/lib/types/api/create-user.types';
+import { APIError, APIErrorCode, USER_ALREADY_EXISTS_ERROR } from 'utils/lib/types/errors';
+import { z } from 'zod';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { validateWithSchema } from '../../shared/validation';
+
+export const CreateUserBodySchema = z.object({
+  email: z.string().email(),
+  applicationID: z.string().uuid(),
+  firstName: z.string().min(1),
+  lastName: z.string().min(1),
+});
 
 // Lifting up value to outside of the handler allows it to stay in memory across warm lambda invocations
 let m2mToken: string;
 export const index = wrapHandler('create-user', async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  const validatedInput = validateRequestParameters(input);
+  const validatedInput = validateWithSchema(CreateUserBodySchema, input);
   const { email, applicationID, firstName, lastName, secrets } = validatedInput;
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
   const roles = await oystehr.role.list();
   const staffRole = roles.find((role) => role.name === 'Staff');
   if (!staffRole) {

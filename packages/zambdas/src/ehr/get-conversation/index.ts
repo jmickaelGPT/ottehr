@@ -2,19 +2,15 @@ import Oystehr, { BatchInputGetRequest } from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Bundle, Communication, Device, Patient, Practitioner, RelatedPerson } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import {
-  BRANDING_CONFIG,
-  chunkThings,
-  GetConversationInput,
-  getFirstName,
-  getFullestAvailableName,
-  getLastName,
-  getMessageFromComm,
-  getMessageHasBeenRead,
-  Secrets,
-} from 'utils';
-import { getAuth0Token, wrapHandler, ZambdaInput } from '../../shared';
-import { createOystehrClient } from '../../shared/helpers';
+import { chunkThings, getMessageFromComm, getMessageHasBeenRead } from 'utils/lib/fhir/chat';
+import { getFirstName, getFullestAvailableName, getLastName } from 'utils/lib/fhir/patient';
+import { BRANDING_CONFIG } from 'utils/lib/ottehr-config/branding';
+import { Secrets } from 'utils/lib/secrets';
+import { GetConversationInput } from 'utils/lib/types/api/get-conversation.types';
+import { getAuth0Token } from '../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 
 export interface GetConversationInputValidated extends GetConversationInput {
   secrets: Secrets;
@@ -55,7 +51,7 @@ export const index = wrapHandler('get-conversation', async (input: ZambdaInput):
     console.log('already have token');
   }
 
-  const oystehr = createOystehrClient(oystehrToken, secrets);
+  const oystehr = createClinicalOystehrClient(oystehrToken, secrets);
 
   const relatedResults = (
     await oystehr.fhir.search<RelatedPerson>({

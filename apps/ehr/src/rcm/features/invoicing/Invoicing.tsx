@@ -7,7 +7,6 @@ import {
   Button,
   CircularProgress,
   FormHelperText,
-  Paper,
   Stack,
   Tab,
   TextField,
@@ -36,13 +35,15 @@ import {
 } from 'src/rcm/state/invoice-config/invoice-config.queries';
 import {
   buildInvoicePlaceholders,
-  DEFAULT_INVOICE_DUE_DAYS,
-  DEFAULT_INVOICE_MEMO_TEMPLATE,
-  DEFAULT_INVOICE_SMS_TEMPLATE,
   fillInvoiceTemplate,
   InvoicePlaceholderInput,
   parseInvoiceConfigFromQR,
-} from 'utils';
+} from 'utils/lib/helpers/rcm/invoice-config';
+import {
+  DEFAULT_INVOICE_DUE_DAYS,
+  DEFAULT_INVOICE_MEMO_TEMPLATE,
+  DEFAULT_INVOICE_SMS_TEMPLATE,
+} from 'utils/lib/types/constants';
 
 const SAMPLE_INPUT: InvoicePlaceholderInput = {
   patientFullName: 'Jane Smith',
@@ -356,11 +357,7 @@ export default function Invoicing(): ReactElement {
 
   return (
     <form onSubmit={handleSubmit(onSubmit)}>
-      <Paper sx={{ padding: 3, marginTop: 2 }}>
-        <Typography variant="h3" color="primary.dark" sx={{ fontWeight: '600 !important', mb: 2 }}>
-          Default Invoicing Settings
-        </Typography>
-
+      <Box>
         <Stack direction="row" alignItems="flex-start" spacing={3} sx={{ mb: 3 }}>
           <Controller
             name="invoiceDueDays"
@@ -421,7 +418,7 @@ export default function Invoicing(): ReactElement {
         </Stack>
 
         {configData?.questionnaireResponse?.id && <SettingsId value={configData.questionnaireResponse.id} />}
-      </Paper>
+      </Box>
     </form>
   );
 }

@@ -1,23 +1,45 @@
-import { Address, Coding, Coverage, CoverageEligibilityResponse, Location, Organization, Practitioner } from 'fhir/r4b';
+import {
+  Address,
+  Claim,
+  Coding,
+  Coverage,
+  CoverageEligibilityResponse,
+  Extension,
+  Location,
+  Organization,
+  Practitioner,
+  Reference,
+} from 'fhir/r4b';
 import {
   CODE_SYSTEM_CPT_MODIFIER,
-  ELIGIBILITY_BENEFIT_CODES,
+  EXTENSION_CLAIM_ASSIGNMENT_OR_PLAN_PARTICIPATION_CODE,
+  EXTENSION_CLAIM_BENEFITS_ASSIGNMENT_CERTIFICATION_INDICATOR,
+  EXTENSION_CLAIM_INSURANCE_TYPE,
+  EXTENSION_CLAIM_PROVIDER_SIGNATURE_INDICATOR,
+  EXTENSION_CLAIM_RELEASE_OF_INFORMATION_CODE,
   EXTENSION_URL_CPT_MODIFIER,
-  INSURANCE_PLAN_ID_CODING,
-} from '../main';
+} from '../helpers/rcm/constants';
+import { ELIGIBILITY_BENEFIT_CODES, INSURANCE_PLAN_ID_CODING } from '../telemed/constants';
+import { CoverageCheckCoverageDetails } from '../types/api/patient-account';
+import { BillingProviderLicense } from '../types/data/billing/billing.types';
 import {
-  APIErrorCode,
+  CLAIM_NON_INSURANCE_PAYER_EXTENSION_URL,
+  CLAIM_NON_INSURANCE_PAYER_TAG_SYSTEM,
+} from '../types/data/billing/non-insurance-org.types';
+import { InsuranceEligibilityCheckStatus } from '../types/data/paperwork/paperwork.types';
+import {
   BillingProviderData,
   BillingProviderResource,
-  CoverageCheckCoverageDetails,
   CoverageCodeToDescriptionMap,
   FinancialDetails,
   InsuranceCheckStatusWithDate,
   InsuranceDetails,
-  InsuranceEligibilityCheckStatus,
   PatientPaymentBenefit,
-} from '../types';
+} from '../types/data/telemed/eligibility.types';
+import { APIErrorCode } from '../types/errors';
+import { CPT_BILLABLE_UNITS_EXTENSION_URL } from './constants';
 import { getNPI, getTaxID } from './helpers';
+import { CANDID_PLAN_TYPE_SYSTEM, INSURANCE_CANDID_PLAN_TYPE_CODES } from './insurance';
 
 export interface GetBillingProviderInput {
   appointmentId: string;
@@ -164,35 +186,121 @@ export const parseCoverageEligibilityResponse = (
           const insuranceDetails = benefitsTemp.find(
             (benefit) => benefit.coverageCode === '1' && benefit.code === '30'
           );
+          // Payers do not reliably attach insurance_type_code / insurance_type_description to the
+          // Active Coverage / Health Benefit Plan Coverage (coverageCode '1' / code '30') benefit line.
+          // Scan the full raw benefit list for the first entry that carries insurance-type info and use
+          // it as a fallback so the insurance type surfaces even when it lives on another benefit line.
+          const benefitWithInsType = (Array.isArray(benefitList) ? benefitList : []).find(
+            (benefit: any) => benefit?.['insurance_type_code'] || benefit?.['insurance_type_description']
+          );
           details['insurance'] = {
             planNumber: benefitsResponse['elig']?.['plan_number'],
             policyNumber: insuranceDetails?.policyNumber,
-            insuranceCode: insuranceDetails?.insuranceCode,
-            insuranceDescription: insuranceDetails?.insuranceDescription,
+            insuranceCode: insuranceDetails?.insuranceCode || benefitWithInsType?.['insurance_type_code'],
+            insuranceDescription:
+              insuranceDetails?.insuranceDescription || benefitWithInsType?.['insurance_type_description'],
           };
 
+          // Payer/entity details (name, ID, address, phone, etc.) are not always attached to the same
+          // benefit line we read insurance type from. For Medicaid responses they typically live on the
+          // managed care organization (MCO) line rather than the fee-for-service line, so source the payer
+          // section from the first benefit that actually carries entity info, falling back to the code-30 line.
+          const payerSourceBenefit =
+            benefitsTemp.find((benefit) => benefit.payerName || benefit.payerID || benefit.payerAddress) ??
+            insuranceDetails;
           details['payer'] = {
-            name: insuranceDetails?.payerName,
-            payerID: insuranceDetails?.payerID,
-            address: insuranceDetails?.payerAddress,
-            website: insuranceDetails?.payerWebsite,
-            phone: insuranceDetails?.payerPhone,
-            fax: insuranceDetails?.payerFax,
+            name: payerSourceBenefit?.payerName,
+            payerID: payerSourceBenefit?.payerID,
+            address: payerSourceBenefit?.payerAddress,
+            website: payerSourceBenefit?.payerWebsite,
+            phone: payerSourceBenefit?.payerPhone,
+            fax: payerSourceBenefit?.payerFax,
           };
+
+          // Collect every active-coverage (code '30') line so the UI can list each plan the member is
+          // enrolled in (e.g. Medicaid FFS + the MCO), including the MCO entity reported on that line.
+          const plans = benefitsTemp
+            .filter((benefit) => benefit.coverageCode === '1' && benefit.code === '30')
+            .map((benefit) => ({
+              planName: benefit.insurancePlan,
+              entityName: benefit.payerName,
+              entityType: benefit.entityType,
+              phone: benefit.payerPhone,
+              payerID: benefit.payerID,
+              insuranceCode: benefit.insuranceCode,
+              insuranceDescription: benefit.insuranceDescription,
+            }))
+            .filter((plan) => plan.planName || plan.entityName);
+          if (plans.length > 0) {
+            details['plans'] = plans;
+          }
+
+          const additionalPayers = (Array.isArray(benefitList) ? benefitList : [])
+            .filter((benefit: any) => benefit?.['benefit_coverage_code'] === 'R')
+            .map((benefit: any) => {
+              const firstEntity = Array.isArray(benefit?.['entity']) ? benefit['entity'][0] : undefined;
+              return {
+                benefitRange: benefit?.['benefit'],
+                planSponsor: benefit?.['mco_name'],
+                planNetworkId: benefit?.['mco_number'],
+                payerName: firstEntity?.['entity_name'] || benefit?.['entity_name']?.[0],
+                payerID: firstEntity?.['entity_id'] || benefit?.['entity_id']?.[0],
+                payerRole: firstEntity?.['entity_description'] || benefit?.['entity_description']?.[0],
+                insuranceCode: benefit?.['insurance_type_code'],
+                insuranceDescription: benefit?.['insurance_type_description'],
+                notes: benefit?.['benefit_notes'],
+              };
+            })
+            .filter(
+              (payer) =>
+                payer.planSponsor ||
+                payer.planNetworkId ||
+                payer.payerName ||
+                payer.payerID ||
+                payer.benefitRange ||
+                payer.insuranceCode ||
+                payer.insuranceDescription ||
+                payer.notes
+            );
+
+          if (additionalPayers.length > 0) {
+            details['additionalPayers'] = additionalPayers;
+          }
 
           copay = benefitsTemp.filter((benefit) => benefit.coverageCode === 'A' || benefit.coverageCode === 'B');
           deductible = benefitsTemp.filter((benefit) => benefit.coverageCode === 'C');
 
-          const individualDeductible = deductible.filter((benefit) => benefit.levelCode === 'IND');
-          const familyDeductible = deductible.filter((benefit) => benefit.levelCode === 'FAM');
-          const outOfPocketMax = benefitsTemp.filter(
-            (benefit) => benefit.coverageCode === 'G' && benefit.levelCode === 'IND'
+          // Exclude only explicit out-of-network ('N') lines so in-network panel values aren't mixed across networks.
+          const isInNetwork = (benefit: PatientPaymentBenefit): boolean => benefit.inPlanNetworkCode !== 'N';
+
+          const individualDeductible = deductible.filter(
+            (benefit) => benefit.levelCode === 'IND' && isInNetwork(benefit)
           );
+          const familyDeductible = deductible.filter((benefit) => benefit.levelCode === 'FAM' && isInNetwork(benefit));
+          const outOfPocketMax = benefitsTemp.filter(
+            (benefit) => benefit.coverageCode === 'G' && benefit.levelCode === 'IND' && isInNetwork(benefit)
+          );
+
+          // Some payers (e.g. Medicaid FFS) report deductibles per service with no coverage-level
+          // (IND/FAM) or time-period (23/24/29) qualifiers. When no qualified individual-deductible
+          // line is present but every reported deductible line is $0, surface $0 ("no deductible
+          // applies") instead of leaving the amounts undefined (which renders as "Unknown").
+          const allDeductiblesAreZero =
+            deductible.length > 0 && deductible.every((benefit) => benefit.amountInUSD === 0);
+          const individualDeductibleFallback =
+            individualDeductible.length === 0 && allDeductiblesAreZero ? 0 : undefined;
+
           financialDetails.push({
             name: 'Individual Deductible',
-            paid: individualDeductible.find((benefit) => benefit.periodCode === '24')?.amountInUSD,
-            total: individualDeductible.find((benefit) => benefit.periodCode === '23')?.amountInUSD,
-            remaining: individualDeductible.find((benefit) => benefit.periodCode === '29')?.amountInUSD,
+            paid:
+              individualDeductible.find((benefit) => benefit.periodCode === '24')?.amountInUSD ??
+              individualDeductibleFallback,
+            total:
+              individualDeductible.find((benefit) => benefit.periodCode === '23')?.amountInUSD ??
+              individualDeductibleFallback,
+            remaining:
+              individualDeductible.find((benefit) => benefit.periodCode === '29')?.amountInUSD ??
+              individualDeductibleFallback,
           });
           financialDetails.push({
             name: 'Family Deductible',
@@ -239,14 +347,28 @@ export const parseCoverageEligibilityResponse = (
 export const parseObjectsToCopayBenefits = (input: any[]): PatientPaymentBenefit[] => {
   return input
     .map((item) => {
-      const benefitCoverageCode = item['benefit_coverage_code'] as '1' | 'A' | 'B' | 'C';
+      const benefitCoverageCode = item['benefit_coverage_code'] as '1' | 'A' | 'B' | 'C' | 'G';
+      const payerAddressParts = [
+        item['entity_addr_1']?.[0],
+        item['entity_city'],
+        item['entity_state'],
+        item['entity_zip'],
+      ].filter(Boolean);
+      const payerAddress = payerAddressParts.length
+        ? `${item['entity_addr_1']?.[0] ?? ''} ${item['entity_city'] ?? ''}, ${item['entity_state'] ?? ''} ${
+            item['entity_zip'] ?? ''
+          }`.trim()
+        : undefined;
+      const parsedAmount = Number(item['benefit_amount']);
       const CP: PatientPaymentBenefit = {
-        amountInUSD: Number(item['benefit_amount']) ?? 0,
+        amountInUSD: Number.isFinite(parsedAmount) ? parsedAmount : 0,
         percentage: item['benefit_percent'] ?? 0,
         code: item['benefit_code'] ?? '',
         description: item['benefit_description'] ?? CoverageCodeToDescriptionMap[benefitCoverageCode] ?? '',
         // cSpell:disable-next in plan network
         inNetwork: item['inplan_network'] === 'Y',
+        // cSpell:disable-next in plan network
+        inPlanNetworkCode: item['inplan_network'],
         coverageDescription: item['benefit_coverage_description'] ?? '',
         coverageCode: benefitCoverageCode,
         periodDescription: item['benefit_period_description'] ?? '',
@@ -256,16 +378,69 @@ export const parseObjectsToCopayBenefits = (input: any[]): PatientPaymentBenefit
         policyNumber: item['policy_number'] ?? '',
         insuranceCode: item['insurance_type_code'] ?? '',
         insuranceDescription: item['insurance_type_description'] ?? '',
+        benefitNotes: item['benefit_notes'] ?? '',
+        insurancePlan: item['insurance_plan'],
         payerName: item['entity_name']?.[0],
         payerID: item['entity_id']?.[0],
-        payerAddress: `${item['entity_addr_1']?.[0]} ${item['entity_city']}, ${item['entity_state']} ${item['entity_zip']}`,
+        payerAddress,
         payerWebsite: item['entity_website']?.[0],
         payerPhone: item['entity_phone']?.[0],
         payerFax: item['entity_fax']?.[0],
+        entityType: item['entity_description']?.[0],
       };
       return CP;
     })
     .filter((benefit) => !!benefit.description && !!benefit.code);
+};
+
+export function getPaymentAmountFromPatientBenefit({
+  coverage,
+  code,
+  coverageCode,
+  levelCode,
+  periodCode,
+}: {
+  coverage: PatientPaymentBenefit[];
+  code: string;
+  coverageCode: string;
+  levelCode: string;
+  periodCode: string | undefined;
+}): PatientPaymentBenefit | undefined {
+  if (!periodCode) {
+    return coverage.find(
+      (item) => item.code === code && item.coverageCode === coverageCode && item.levelCode === levelCode
+    );
+  }
+
+  return coverage.find(
+    (item) =>
+      item.code === code &&
+      item.coverageCode === coverageCode &&
+      item.levelCode === levelCode &&
+      item.periodCode === periodCode
+  );
+}
+
+export const getCopayAndRemainingDeductible = (
+  coverageCheck: { copay?: PatientPaymentBenefit[]; deductible?: PatientPaymentBenefit[] } | undefined
+): { copayAmount: PatientPaymentBenefit | undefined; remainingDeductibleAmount: PatientPaymentBenefit | undefined } => {
+  const copayAmount = getPaymentAmountFromPatientBenefit({
+    coverage: coverageCheck?.copay?.filter((item) => item.inNetwork === true) || [],
+    code: 'UC',
+    coverageCode: 'B',
+    levelCode: 'IND',
+    periodCode: undefined,
+  });
+
+  const remainingDeductibleAmount = getPaymentAmountFromPatientBenefit({
+    coverage: coverageCheck?.deductible?.filter((item) => item.inNetwork === true) || [],
+    code: '30',
+    coverageCode: 'C',
+    levelCode: 'IND',
+    periodCode: '29',
+  });
+
+  return { copayAmount, remainingDeductibleAmount };
 };
 
 export const pullCoverageIdentifyingDetails = (coverage: Coverage): CoverageCheckCoverageDetails | undefined => {
@@ -316,3 +491,200 @@ export const extractCptCodeModifiersFromCoding = (coding: Coding): { code: strin
   console.log(`Modifiers for the coding ${JSON.stringify(coding)}: `, JSON.stringify(modifiers));
   return modifiers;
 };
+
+export const getCptBillableUnitsFromCoding = (coding: Coding | undefined): number | undefined => {
+  const billableUnits = coding?.extension?.find((ext) => ext.url === CPT_BILLABLE_UNITS_EXTENSION_URL)?.valueDecimal;
+  return billableUnits != null && Number.isFinite(billableUnits) && billableUnits > 0 ? billableUnits : undefined;
+};
+
+// Maps the claim.md insurance type code returned by the eligibility check (key)
+// to the candid/availity insurance plan type code used by the insurance form dropdown (value).
+export const INSURANCE_TYPE_CODE_TO_CANDID_CODE: Record<string, string> = {
+  '12': '16',
+  '13': '16',
+  '14': 'LM',
+  '15': 'WC',
+  '16': 'OF',
+  '41': '16',
+  '42': 'VA',
+  '43': '16',
+  '47': 'LM',
+  AP: 'AM',
+  C1: 'CI',
+  CO: '11',
+  CP: 'MA',
+  D: 'DS',
+  DB: 'DS',
+  EP: '14',
+  FF: '11',
+  GP: '12',
+  HM: 'HM',
+  HN: '16',
+  HS: '11',
+  IN: '15',
+  IP: 'CI',
+  LC: '11',
+  LD: '11',
+  LI: '11',
+  LT: 'LM',
+  MA: 'MA',
+  MB: 'MB',
+  MC: 'MC',
+  MH: '11',
+  MI: '11',
+  MP: 'MA',
+  OT: 'ZZ',
+  PP: '09',
+  PR: '12',
+  PS: '13',
+};
+
+/**
+ * Maps a claim.md insurance type code (from an eligibility check) to the candid/availity
+ * insurance plan type code used by the insurance form dropdown. Returns undefined when the
+ * code is missing or has no mapping.
+ */
+export const mapInsuranceTypeCodeToCandidCode = (insuranceTypeCode: string | undefined): string | undefined => {
+  if (!insuranceTypeCode) return undefined;
+  return INSURANCE_TYPE_CODE_TO_CANDID_CODE[insuranceTypeCode.trim().toUpperCase()];
+};
+
+// The claim's non-insurance payer (e.g. the visit's occupational-medicine employer): a reference to
+// the NIO Organization in the billing workspace. Distinct from claim.insurer, which is reserved for
+// insurance payer URLs.
+export const getClaimNonInsurancePayer = (claim?: Claim): Reference | undefined =>
+  claim?.extension?.find((ext) => ext.url === CLAIM_NON_INSURANCE_PAYER_EXTENSION_URL)?.valueReference;
+
+export const claimNonInsurancePayerExtension = (payer: Reference): Extension => ({
+  url: CLAIM_NON_INSURANCE_PAYER_EXTENSION_URL,
+  valueReference: payer,
+});
+
+export const claimNonInsurancePayerTag = (nioId: string): Coding => ({
+  system: CLAIM_NON_INSURANCE_PAYER_TAG_SYSTEM,
+  code: nioId,
+});
+
+export const applyClaimNonInsurancePayerTag = (claim: Claim, nioId: string | null): void => {
+  const tags = (claim.meta?.tag ?? []).filter((tag) => tag.system !== CLAIM_NON_INSURANCE_PAYER_TAG_SYSTEM);
+  if (nioId) tags.push(claimNonInsurancePayerTag(nioId));
+  claim.meta = { ...claim.meta, tag: tags };
+};
+
+export const getDefaultClaimSubmissionExtensions = (): Extension[] => [
+  { url: EXTENSION_CLAIM_PROVIDER_SIGNATURE_INDICATOR, valueBoolean: true },
+  { url: EXTENSION_CLAIM_ASSIGNMENT_OR_PLAN_PARTICIPATION_CODE, valueString: 'A' },
+  { url: EXTENSION_CLAIM_BENEFITS_ASSIGNMENT_CERTIFICATION_INDICATOR, valueString: 'Y' },
+  { url: EXTENSION_CLAIM_RELEASE_OF_INFORMATION_CODE, valueString: 'Y' },
+];
+
+export const getCoveragePlanType = (coverage?: Coverage): string | undefined => {
+  const candidates = [
+    coverage?.extension?.find((ext) => ext.url === EXTENSION_CLAIM_INSURANCE_TYPE)?.valueString,
+    coverage?.type?.coding?.find((coding) => coding.system === CANDID_PLAN_TYPE_SYSTEM)?.code,
+  ];
+  return candidates.find((code) => !!code && INSURANCE_CANDID_PLAN_TYPE_CODES.includes(code));
+};
+
+export const setCoveragePlanType = (coverage: Coverage, candidCode: string): Coverage => {
+  const otherExtensions = (coverage.extension ?? []).filter((ext) => ext.url !== EXTENSION_CLAIM_INSURANCE_TYPE);
+  const otherTypeCodings = (coverage.type?.coding ?? []).filter((coding) => coding.system !== CANDID_PLAN_TYPE_SYSTEM);
+  return {
+    ...coverage,
+    type: {
+      ...coverage.type,
+      coding: [
+        ...otherTypeCodings,
+        {
+          system: CANDID_PLAN_TYPE_SYSTEM,
+          code: candidCode,
+        },
+      ],
+    },
+    extension: [
+      ...otherExtensions,
+      {
+        url: EXTENSION_CLAIM_INSURANCE_TYPE,
+        valueString: candidCode,
+      },
+    ],
+  };
+};
+
+export function commaFormattedName(resource?: { firstName: string; lastName: string } | null): string {
+  if (!resource) return '';
+  return `${resource.lastName}, ${resource.firstName}`.trim();
+}
+
+// Claim.MD's "no specific type" attachment report code, used when the caller names nothing better.
+export const DEFAULT_CLAIM_ATTACHMENT_REPORT_TYPE_CODE = 'OZ';
+
+export const CLAIM_ATTACHMENT_REPORT_TYPE_CODES = [
+  { code: DEFAULT_CLAIM_ATTACHMENT_REPORT_TYPE_CODE, label: 'Support Data for Claim' },
+  { code: '03', label: 'Report Justifying Treatment Beyond Utilization Guidelines' },
+  { code: '04', label: 'Drugs Administered' },
+  { code: '05', label: 'Treatment Diagnosis' },
+  { code: '06', label: 'Initial Assessment' },
+  { code: '07', label: 'Functional Goals' },
+  { code: '08', label: 'Plan of Treatment' },
+  { code: '09', label: 'Progress Report' },
+  { code: '10', label: 'Continued Treatment' },
+  { code: '11', label: 'Chemical Analysis' },
+  { code: '13', label: 'Certified Test Report' },
+  { code: '15', label: 'Justification for Admission' },
+  { code: '21', label: 'Recovery Plan' },
+  { code: 'A3', label: 'Allergies/Sensitivities Document' },
+  { code: 'A4', label: 'Autopsy Report' },
+  { code: 'AM', label: 'Ambulance Certification' },
+  { code: 'AS', label: 'Admission Summary' },
+  { code: 'B2', label: 'Prescription' },
+  { code: 'B3', label: 'Physician Order' },
+  { code: 'B4', label: 'Referral Form' },
+  { code: 'BR', label: 'Benchmark Testing Results' },
+  { code: 'BS', label: 'Baseline' },
+  { code: 'BT', label: 'Blanket Test Results' },
+  { code: 'CB', label: 'Chiropractic Justification' },
+  { code: 'CK', label: 'Consent Form(s)' },
+  { code: 'CT', label: 'Certification' },
+  { code: 'D2', label: 'Drug Profile Document' },
+  { code: 'DA', label: 'Dental Models' },
+  { code: 'DB', label: 'Durable Medical Equipment Prescription' },
+  { code: 'DG', label: 'Diagnostic Report' },
+  { code: 'DJ', label: 'Discharge Monitoring Report' },
+  { code: 'DS', label: 'Discharge Summary' },
+  { code: 'EB', label: 'Explanation of Benefits (Coordination of Benefits or Medicare Secondary Payor)' },
+  { code: 'HC', label: 'Health Certificate' },
+  { code: 'HR', label: 'Health Clinic Records' },
+  { code: 'I5', label: 'Immunization Record' },
+  { code: 'IR', label: 'State School Immunization Records' },
+  { code: 'LA', label: 'Laboratory Results' },
+  { code: 'M1', label: 'Medical Record Attachment' },
+  { code: 'MT', label: 'Models' },
+  { code: 'NN', label: 'Nursing Notes' },
+  { code: 'OB', label: 'Operative Note' },
+  { code: 'OC', label: 'Oxygen Content Averaging Report' },
+  { code: 'OD', label: 'Orders and Treatments Document' },
+  { code: 'OE', label: 'Objective Physical Examination (including vital signs) Document' },
+  { code: 'OX', label: 'Oxygen Therapy Certification' },
+  { code: 'P4', label: 'Pathology Report' },
+  { code: 'P5', label: 'Patient Medical History Document' },
+  { code: 'PE', label: 'Parenteral or Enteral Certification' },
+  { code: 'PN', label: 'Physical Therapy Notes' },
+  { code: 'PO', label: 'Prosthetics or Orthotic Certification' },
+  { code: 'PQ', label: 'Paramedical Results' },
+  { code: 'PY', label: "Physician's Report" },
+  { code: 'PZ', label: 'Physical Therapy Certification' },
+  { code: 'RB', label: 'Radiology Films' },
+  { code: 'RR', label: 'Radiology Reports' },
+  { code: 'RT', label: 'Report of Tests and Analysis Report' },
+  { code: 'RX', label: 'Renewable Oxygen Content Averaging Report' },
+  { code: 'SG', label: 'Symptoms Document' },
+  { code: 'V5', label: 'Death Notification' },
+  { code: 'XP', label: 'Photographs' },
+];
+
+export function formatBillingProviderLicense(license: BillingProviderLicense | undefined): string {
+  if (!license) return '';
+  const { type, number, state } = license;
+  return [type, number && `#${number}`, state && `(${state})`].filter(Boolean).join(' ');
+}

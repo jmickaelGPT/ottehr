@@ -1,10 +1,10 @@
 import { Typography } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
-import type { DisplayTextDef } from 'config-types';
+import type { DisplayTextDef } from 'config-types/config/display-text';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
-import { getLegalCompositionForLocation } from 'utils';
+import { getLegalCompositionForLocation } from 'utils/lib/ottehr-config/legal';
 
 interface TermsAndConditionsProps {
   pageId: string;

@@ -2,14 +2,22 @@ import Oystehr from '@oystehr/sdk';
 import { Encounter, Task } from 'fhir/r4b';
 import { DateTime } from 'luxon';
 import Stripe from 'stripe';
-import { Secrets } from 'utils';
-import { getStripeClient } from '../../../../shared';
+import { Secrets } from 'utils/lib/secrets';
+import { getStripeClient, STRIPE_METADATA_KEYS } from '../../../../shared/stripeIntegration';
 import {
   getOrCreateOutreachConfig,
+  OutreachAction,
   parseConfiguredAt,
   parsePlanDefinitionToActions,
 } from '../../../scheduled-outreach-config/helpers';
-import { OUTREACH_TASK_TAG_SYSTEM, produceOutreachTasks } from './produce-outreach-tasks';
+import { listOutreachStripeAccounts } from './list-outreach-stripe-accounts';
+import {
+  calculateDueDateTime,
+  OUTREACH_PLATFORM_STRIPE_ACCOUNT,
+  OUTREACH_STRIPE_ACCOUNT_INPUT,
+  OUTREACH_TASK_TAG_SYSTEM,
+  produceOutreachTasks,
+} from './produce-outreach-tasks';
 
 export interface ProduceInvoiceDueOutreachResult {
   invoicesEvaluated: number;
@@ -45,9 +53,30 @@ export async function produceInvoiceDueOutreach(
     );
   }
 
-  const pastDueInvoices = await findPastDueStripeInvoices(stripe, todayUnix, earliestDueDateUnix);
+  const stripeAccounts = await listOutreachStripeAccounts(oystehr, stripe);
 
-  console.log(`produceInvoiceDueOutreach: Found ${pastDueInvoices.length} past-due Stripe invoices to evaluate`);
+  const pastDueInvoices = (
+    await Promise.all(
+      stripeAccounts.map(async (stripeAccount) =>
+        (await findPastDueStripeInvoices(stripe, todayUnix, earliestDueDateUnix, stripeAccount)).map((invoice) => ({
+          invoice,
+          stripeAccount,
+        }))
+      )
+    )
+  ).flat();
+
+  console.log(
+    `produceInvoiceDueOutreach: Found ${pastDueInvoices.length} past-due Stripe invoices to evaluate across ${stripeAccounts.length} Stripe account(s)`
+  );
+
+  // Load the configured invoice-due actions once. send-notification actions are edge-triggered
+  // (fire only on the exact milestone day); other types (e.g. charge-card) keep the single
+  // most-recent already-elapsed milestone per type. See selectApplicableInvoiceDueActionIds.
+  const planDefinition = await getOrCreateOutreachConfig(oystehr);
+  const invoiceDueActions = parsePlanDefinitionToActions(planDefinition).filter(
+    (a) => a.trigger.event === 'invoice-due' && a.enabled !== false
+  );
 
   // Collect encounter IDs that still have open invoices so we can cancel stale tasks
   const openEncounterIds = new Set<string>();
@@ -56,17 +85,17 @@ export async function produceInvoiceDueOutreach(
   let tasksSkipped = 0;
   let errors = 0;
 
-  for (const invoice of pastDueInvoices) {
-    const patientId = invoice.metadata?.oystehr_patient_id;
-    const encounterId = invoice.metadata?.oystehr_encounter_id;
+  for (const { invoice, stripeAccount } of pastDueInvoices) {
+    const patientId = invoice.metadata?.[STRIPE_METADATA_KEYS.patientId];
+    const encounterId = invoice.metadata?.[STRIPE_METADATA_KEYS.encounterId];
 
     if (!patientId) {
-      console.warn(`Stripe invoice ${invoice.id} has no oystehr_patient_id in metadata, skipping`);
+      console.warn(`Stripe invoice ${invoice.id} has no ${STRIPE_METADATA_KEYS.patientId} in metadata, skipping`);
       continue;
     }
 
     if (!encounterId) {
-      console.warn(`Stripe invoice ${invoice.id} has no oystehr_encounter_id in metadata, skipping`);
+      console.warn(`Stripe invoice ${invoice.id} has no ${STRIPE_METADATA_KEYS.encounterId} in metadata, skipping`);
       continue;
     }
 
@@ -86,6 +115,10 @@ export async function produceInvoiceDueOutreach(
         console.warn(`Could not fetch Encounter ${encounterId} for appointment lookup:`, err);
       }
 
+      // Choose which actions fire today: send-notification only on its exact milestone day,
+      // other types on their most-recent already-elapsed milestone. See the selection helper.
+      const applicableActionIds = selectApplicableInvoiceDueActionIds(invoiceDueActions, dueDate);
+
       const result = await produceOutreachTasks({
         triggerEvent: 'invoice-due',
         patient: { reference: `Patient/${patientId}` },
@@ -93,6 +126,8 @@ export async function produceInvoiceDueOutreach(
         appointment: appointmentRef ? { reference: appointmentRef } : undefined,
         eventTimestamp: dueDate,
         oystehr,
+        stripeAccount: stripeAccount ?? OUTREACH_PLATFORM_STRIPE_ACCOUNT,
+        actionFilter: (action) => applicableActionIds.has(action.id),
       });
 
       tasksCreated += result.created.length;
@@ -108,7 +143,7 @@ export async function produceInvoiceDueOutreach(
   );
 
   // Cancel any pending invoice-due tasks for encounters whose invoices have been paid
-  const tasksCancelled = await cancelTasksForPaidInvoices(oystehr, openEncounterIds);
+  const tasksCancelled = await cancelTasksForPaidInvoices(oystehr, openEncounterIds, stripeAccounts);
 
   console.log(`produceInvoiceDueOutreach: Cancelled ${tasksCancelled} stale tasks for paid invoices`);
 
@@ -119,6 +154,59 @@ export async function produceInvoiceDueOutreach(
     tasksCancelled,
     errors,
   };
+}
+
+/**
+ * For a single invoice, choose which actions fire today. Selection differs by action type:
+ *
+ * - `send-notification` actions are EDGE-triggered: an action fires only on the exact calendar day
+ *   its milestone falls (today === dueDate + offset). This makes notifications naturally idempotent
+ *   — a cancelled or completed message is never regenerated on a later day because the trigger is
+ *   true for one day only. The deliberate tradeoff is no catch-up: if the cron misses its run on the
+ *   milestone day, that notification is permanently skipped (accepted per product decision).
+ *
+ * - All other action types (e.g. `charge-card`) remain LEVEL-triggered: the most-recent
+ *   already-elapsed milestone per type is kept, so a past-due invoice first seen after a milestone
+ *   still gets actioned (self-healing catch-up). Future milestones are excluded; a later cron run
+ *   creates them when they become due. Ties (same-type actions at the same offset) are all kept.
+ *
+ * Selection is scoped per action type, so a notification never suppresses a charge-card and vice versa.
+ */
+export function selectApplicableInvoiceDueActionIds(actions: OutreachAction[], eventTimestamp: string): Set<string> {
+  const now = DateTime.now();
+  const nowMs = now.toMillis();
+  const today = now.startOf('day');
+
+  const survivors = new Set<string>();
+  const elapsedByType = new Map<string, { actionId: string; dueMs: number }[]>();
+
+  for (const action of actions) {
+    const dueIso = calculateDueDateTime(eventTimestamp, action);
+
+    if (action.actionType === 'send-notification') {
+      // Edge-triggered: fire only on the exact day the milestone lands.
+      if (DateTime.fromISO(dueIso).startOf('day').equals(today)) {
+        survivors.add(action.id);
+      }
+      continue;
+    }
+
+    // Level-triggered: collect elapsed milestones; the latest per type is kept below.
+    const dueMs = DateTime.fromISO(dueIso).toMillis();
+    if (dueMs <= nowMs) {
+      const group = elapsedByType.get(action.actionType) ?? [];
+      group.push({ actionId: action.id, dueMs });
+      elapsedByType.set(action.actionType, group);
+    }
+  }
+
+  for (const group of elapsedByType.values()) {
+    const maxDueMs = Math.max(...group.map((g) => g.dueMs));
+    for (const g of group) {
+      if (g.dueMs === maxDueMs) survivors.add(g.actionId);
+    }
+  }
+  return survivors;
 }
 
 /**
@@ -153,14 +241,16 @@ async function calculateEarliestEligibleDueDate(oystehr: Oystehr): Promise<numbe
 }
 
 /**
- * Find Stripe invoices that are open and past their due date.
+ * Find Stripe invoices that are open and past their due date on one Stripe account
+ * (the platform account when `stripeAccount` is undefined).
  * Paginates through all results using auto-pagination.
  * @param dueDateGteUnix - Optional minimum due date to filter out old invoices
  */
 async function findPastDueStripeInvoices(
   stripe: Stripe,
   dueDateLteUnix: number,
-  dueDateGteUnix?: number
+  dueDateGteUnix: number | undefined,
+  stripeAccount: string | undefined
 ): Promise<Stripe.Invoice[]> {
   const invoices: Stripe.Invoice[] = [];
   let hasMore = true;
@@ -172,12 +262,15 @@ async function findPastDueStripeInvoices(
   }
 
   while (hasMore) {
-    const response = await stripe.invoices.list({
-      status: 'open',
-      due_date: dueDateFilter,
-      limit: 100,
-      starting_after: startingAfter,
-    });
+    const response = await stripe.invoices.list(
+      {
+        status: 'open',
+        due_date: dueDateFilter,
+        limit: 100,
+        starting_after: startingAfter,
+      },
+      { stripeAccount }
+    );
 
     invoices.push(...response.data);
     hasMore = response.has_more;
@@ -194,7 +287,11 @@ async function findPastDueStripeInvoices(
  * encounter is no longer associated with an open Stripe invoice (i.e. the
  * invoice has been paid since the task was created).
  */
-async function cancelTasksForPaidInvoices(oystehr: Oystehr, openEncounterIds: Set<string>): Promise<number> {
+async function cancelTasksForPaidInvoices(
+  oystehr: Oystehr,
+  openEncounterIds: Set<string>,
+  scannedStripeAccounts: (string | undefined)[]
+): Promise<number> {
   const pendingTasks = await oystehr.fhir.search<Task>({
     resourceType: 'Task',
     params: [
@@ -210,6 +307,15 @@ async function cancelTasksForPaidInvoices(oystehr: Oystehr, openEncounterIds: Se
   for (const task of tasks) {
     const encounterId = task.focus?.reference?.replace('Encounter/', '');
     if (!encounterId) continue;
+
+    const stampedAccount = task.input?.find((i) => i.type?.text === OUTREACH_STRIPE_ACCOUNT_INPUT)?.valueString;
+    if (
+      stampedAccount &&
+      stampedAccount !== OUTREACH_PLATFORM_STRIPE_ACCOUNT &&
+      !scannedStripeAccounts.includes(stampedAccount)
+    ) {
+      continue;
+    }
 
     if (!openEncounterIds.has(encounterId)) {
       console.log(

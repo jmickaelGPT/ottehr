@@ -2,15 +2,18 @@ import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Operation } from 'fast-json-patch';
 import { Medication } from 'fhir/r4b';
+import { getMedicationName } from 'utils/lib/fhir/medication-administration';
+import { CODE_SYSTEM_NDC } from 'utils/lib/helpers/rcm/constants';
+import { UpdateInHouseMedicationInput } from 'utils/lib/types/api/config/in-house-medications';
 import {
-  CODE_SYSTEM_NDC,
-  getMedicationName,
   MEDICATION_DISPENSABLE_DRUG_ID,
   MEDICATION_DISPENSABLE_DRUG_ID_FOR_INTERACTIONS,
   MEDICATION_IDENTIFIER_NAME_SYSTEM,
-  UpdateInHouseMedicationInput,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../../shared';
+} from 'utils/lib/types/api/medication-administration.constants';
+import { checkOrCreateM2MClientToken } from '../../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../../shared/helpers';
+import { wrapHandler } from '../../../../shared/sentry';
+import { ZambdaInput } from '../../../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 let m2mToken: string;
@@ -22,7 +25,7 @@ export const index = wrapHandler(
       validateRequestParameters(input);
     m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
 
-    const oystehr = createOystehrClient(m2mToken, secrets);
+    const oystehr = createClinicalOystehrClient(m2mToken, secrets);
     console.log('Created Oystehr client');
 
     const response = await performEffect(oystehr, {

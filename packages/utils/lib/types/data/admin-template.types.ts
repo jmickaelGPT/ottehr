@@ -1,4 +1,6 @@
-import { RosFindingState } from 'utils';
+import { RosFindingState } from '../../ottehr-config/review-of-systems/in-person.config';
+import type { StructuredFacts } from '../../procedure-coding/structured-fields';
+import { TemplateWarning } from './apply-template.types';
 
 // ── admin-create-template ──
 
@@ -10,6 +12,7 @@ export interface AdminCreateTemplateInput {
 export interface AdminCreateTemplateOutput {
   templateName: string;
   templateId: string;
+  warnings: TemplateWarning[];
 }
 
 // ── admin-rename-template ──
@@ -47,6 +50,11 @@ export interface TemplateRosFinding {
   findingState: RosFindingState | undefined;
   stale: boolean;
 }
+export interface TemplateRosComment {
+  fieldName: string;
+  systemLabel: string;
+  note: string;
+}
 export interface TemplateExamFinding {
   fieldName: string;
   label: string;
@@ -65,6 +73,7 @@ export interface TemplateCptModifier {
 }
 export interface TemplateCptCodeInfo extends TemplateCodeInfo {
   modifiers: TemplateCptModifier[];
+  billableUnits?: number;
 }
 
 export function isTemplateCptCodeInfo(input: TemplateCodeInfo | TemplateCptCodeInfo): input is TemplateCptCodeInfo {
@@ -106,6 +115,31 @@ export interface TemplateInHouseLabPlanDetail {
   missing: boolean;
 }
 
+// Each external lab plan saved on a template carries the inputs the external
+// create-lab-order flow needs at apply time: the lab + test combo (lab GUID,
+// lab name, and the orderable item code), the Dx reason codes, the optional
+// clinical info note, and the PSC flag. The ordering office and payment
+// method are NOT stored - both are visit-specific: the office is derived from
+// the encounter the template is applied to, and the payment method defaults
+// from that visit's payment details in the preview dialog.
+//
+// `missing: true` indicates the test could not be found in the lab's current
+// compendium via the orderable item search - the admin UI surfaces this so a
+// human can fix the template; apply-template skips the plan with a warning.
+export interface TemplateExternalLabPlanDetail {
+  // ServiceRequest.id of the plan inside the template's contained resources.
+  planId: string;
+  labGuid: string;
+  labName: string;
+  testName: string;
+  testCode: string;
+  diagnoses: TemplateCodeInfo[];
+  note: string | null;
+  psc: boolean;
+  missing: boolean;
+  cptCodes: TemplateCptCodeInfo[];
+}
+
 // Each in-office procedure plan saved on a template captures everything the
 // chart UI's procedure form exposes - the procedure type, body site/side,
 // performer, technique, and the rest of the form's checkbox/dropdown answers -
@@ -126,6 +160,11 @@ export interface TemplateProcedurePlan {
   medicationUsed: string | undefined;
   suppliesUsed: string | undefined;
   procedureDetails: string | undefined;
+  structuredFacts?: StructuredFacts;
+  lengthCm: number | undefined;
+  repairDepth: string | undefined;
+  infusionStartTime: string | undefined;
+  infusionStopTime: string | undefined;
   specimenSent: boolean | undefined;
   complications: string | undefined;
   patientResponse: string | undefined;
@@ -141,6 +180,24 @@ export interface TemplateProcedurePlan {
   cptCodes: TemplateCptCodeInfo[];
 }
 
+// Each in-house medication plan saved on a template carries the inputs needed
+// to recreate the order at apply time: the drug identity (as a CodeableConcept),
+// the dosage (amount, units, route, site), instructions, free-text notes
+// (reason / other reason), any CPT/HCPCS codes, and the ICD-10 diagnoses
+// that were associated with the original order.
+// Patient-specific fields (performer, effectiveDateTime, associated Dx Condition)
+// are NOT stored on the plan — they're visit-specific.
+export interface TemplateInHouseMedicationDetail {
+  planId: string;
+  medicationName: string;
+  dose: number | undefined;
+  units: string | undefined;
+  route: string | undefined;
+  instructions: string | undefined;
+  cptCodes: TemplateCptCodeInfo[];
+  diagnoses: TemplateCodeInfo[];
+}
+
 export interface AdminGetTemplateDetailOutput {
   templateName: string;
   templateId: string;
@@ -151,6 +208,7 @@ export interface AdminGetTemplateDetailOutput {
     moiNote: string | null;
     rosNote: string | null;
     rosFindings: TemplateRosFinding[];
+    rosComments: TemplateRosComment[];
     examFindings: TemplateExamFinding[];
     mdm: string | null;
     diagnoses: TemplateCodeInfo[];
@@ -159,6 +217,8 @@ export interface AdminGetTemplateDetailOutput {
     emCode: TemplateCodeInfo | null;
     accident: TemplateAccidentInfo | null;
     inHouseLabs: TemplateInHouseLabPlanDetail[];
+    externalLabs: TemplateExternalLabPlanDetail[];
     procedures: TemplateProcedurePlan[];
+    inHouseMedications: TemplateInHouseMedicationDetail[];
   };
 }

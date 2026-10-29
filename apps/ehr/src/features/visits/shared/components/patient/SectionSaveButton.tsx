@@ -7,16 +7,19 @@ import { FC, useCallback, useMemo } from 'react';
 import { useFormContext } from 'react-hook-form';
 import { updatePatientVisitDetails } from 'src/api/api';
 import { useApiClients } from 'src/hooks/useAppClients';
-import {
-  createQuestionnaireItemsMap,
-  PATIENT_RECORD_CONFIG,
-  PATIENT_RECORD_QUESTIONNAIRE,
-  pruneEmptySections,
-  UpdateVisitDetailsInput,
-} from 'utils';
+import { pruneEmptySections } from 'utils/lib/helpers/paperwork/paperwork';
+import { PATIENT_RECORD_CONFIG, PATIENT_RECORD_QUESTIONNAIRE } from 'utils/lib/ottehr-config/patient-record';
+import { UpdateVisitDetailsInput } from 'utils/lib/types/api/update-visit-details.types';
+import { createQuestionnaireItemsMap } from 'utils/lib/types/data/paperwork/createQuestionnaireItemsMap';
 import { structureQuestionnaireResponse } from '../../../../../helpers/qr-structure';
 import { useUpdatePatientAccount } from '../../../../../hooks/useGetPatient';
-import { buildVisitEmployerUpdate, OCCUPATIONAL_MEDICINE_EMPLOYER_FIELD_KEY } from '../../visitEmployer';
+import {
+  applyVisitEmployerToVisitDetailsCache,
+  buildVisitEmployerUpdate,
+  OCCUPATIONAL_MEDICINE_EMPLOYER_FIELD_KEY,
+} from '../../visitEmployer';
+import { useConfirmSave } from './SaveConfirmationContext';
+import { scrollToFirstInvalidField } from './scrollToFirstInvalidField';
 
 const questionnaire = PATIENT_RECORD_QUESTIONNAIRE();
 const questionnaireItemsMap = createQuestionnaireItemsMap(questionnaire.item ?? []);
@@ -52,7 +55,6 @@ const collectLogicalControlFields = (fieldKeys: string[]): string[] => {
 
 interface SectionSaveButtonProps {
   fieldKeys: string[];
-  requiredFieldKeys: string[];
   patientId: string | undefined;
   encounterId?: string;
   appointmentId?: string;
@@ -63,7 +65,6 @@ interface SectionSaveButtonProps {
 
 export const SectionSaveButton: FC<SectionSaveButtonProps> = ({
   fieldKeys,
-  requiredFieldKeys,
   patientId,
   encounterId,
   appointmentId,
@@ -72,8 +73,11 @@ export const SectionSaveButton: FC<SectionSaveButtonProps> = ({
 }) => {
   const queryClient = useQueryClient();
   const { oystehrZambda } = useApiClients();
-  const { watch, formState, resetField, getValues, trigger } = useFormContext();
-  const { dirtyFields, errors } = formState;
+  const { watch, formState, resetField, getValues, trigger, getFieldState } = useFormContext();
+  const { dirtyFields } = formState;
+  // Set by the visit page, which reminds staff that consent is not signed before writing any of the
+  // patient record. A no-op everywhere else, so the standalone patient-info page is unaffected.
+  const confirmSave = useConfirmSave();
 
   const employerFieldDirty = Boolean(dirtyFields[OCCUPATIONAL_MEDICINE_EMPLOYER_FIELD_KEY]);
   const saveEmployerViaVisitDetails = useUpdateVisitDetailsForEmployer && Boolean(appointmentId) && employerFieldDirty;
@@ -92,7 +96,13 @@ export const SectionSaveButton: FC<SectionSaveButtonProps> = ({
       }
       await updatePatientVisitDetails(oystehrZambda, input);
     },
-    onSuccess: async () => {
+    onSuccess: async (_data, variables) => {
+      // Writing to the cache prevents flickering the old value on save
+      applyVisitEmployerToVisitDetailsCache(
+        queryClient,
+        variables.appointmentId,
+        variables.bookingDetails?.visitOccupationalMedicineEmployer
+      );
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['get-visit-details'] }),
         queryClient.invalidateQueries({ queryKey: ['patient-account-get'] }),
@@ -110,92 +120,92 @@ export const SectionSaveButton: FC<SectionSaveButtonProps> = ({
     [fieldKeys, dirtyFields, watchedValues]
   );
 
-  const hasRequiredFieldErrors = useMemo(
-    () => requiredFieldKeys.some((key) => !watch(key) || errors[key]),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [requiredFieldKeys, errors, watchedValues]
-  );
-
   const handleSave = useCallback(async () => {
     if (!patientId) return;
 
-    // Conditionally-required fields (e.g. PCP "Practice name") aren't in the static
-    // requiredFieldKeys, so the disabled-state guard misses them; validate here so their
-    // errors surface inline instead of failing at the server.
+    // The Save button is enabled as soon as the section is edited (not gated on
+    // required fields). Validate on click so any invalid/empty required fields
+    // surface inline as red highlights, then jump the user to the first one.
     const isValid = await trigger(fieldKeys);
     if (!isValid) {
       enqueueSnackbar('Please fix all field validation errors and try again', { variant: 'error' });
+      scrollToFirstInvalidField(fieldKeys, (key) => Boolean(getFieldState(key).error));
       return;
     }
 
-    const allValues = getValues();
-    const sectionValues: Record<string, any> = {};
-    // Include the logical control fields this section's fields depend on so the
-    // backend's enableWhen filtering keeps the fields they gate (e.g. SSN). They are
-    // never dirty, so they are not added to sectionDirtyFields below.
-    [...fieldKeys, ...collectLogicalControlFields(fieldKeys)].forEach((key) => {
-      sectionValues[key] = allValues[key];
-    });
+    // Everything from here on is what the guard controls: on the visit page an unsigned
+    // consent opens a reminder dialog first and only writes once the user confirms. Validation
+    // stays outside it so field errors surface without a dialog getting in the way.
+    await confirmSave(async () => {
+      const allValues = getValues();
+      const sectionValues: Record<string, any> = {};
+      // Include the logical control fields this section's fields depend on so the
+      // backend's enableWhen filtering keeps the fields they gate (e.g. SSN). They are
+      // never dirty, so they are not added to sectionDirtyFields below.
+      [...fieldKeys, ...collectLogicalControlFields(fieldKeys)].forEach((key) => {
+        sectionValues[key] = allValues[key];
+      });
 
-    const sectionDirtyFields: Record<string, boolean> = {};
-    fieldKeys.forEach((key) => {
-      if (dirtyFields[key]) {
-        sectionDirtyFields[key] = true;
-      }
-    });
+      const sectionDirtyFields: Record<string, boolean> = {};
+      fieldKeys.forEach((key) => {
+        if (dirtyFields[key]) {
+          sectionDirtyFields[key] = true;
+        }
+      });
 
-    try {
-      if (saveEmployerViaVisitDetails && appointmentId) {
-        // Pre-op: visit-level employer is saved on the Encounter, not the patient Account.
-        const employerValue = allValues[OCCUPATIONAL_MEDICINE_EMPLOYER_FIELD_KEY] as Reference | null | undefined;
-        await visitDetailsEmployerMutation.mutateAsync(buildVisitEmployerUpdate(appointmentId, employerValue));
+      try {
+        if (saveEmployerViaVisitDetails && appointmentId) {
+          // Pre-op: visit-level employer is saved on the Encounter, not the patient Account.
+          const employerValue = allValues[OCCUPATIONAL_MEDICINE_EMPLOYER_FIELD_KEY] as Reference | null | undefined;
+          await visitDetailsEmployerMutation.mutateAsync(buildVisitEmployerUpdate(appointmentId, employerValue));
 
-        // Other dirty fields in this section still go through the usual QR path, employer excluded.
-        const remainingFieldKeys = fieldKeys.filter((key) => key !== OCCUPATIONAL_MEDICINE_EMPLOYER_FIELD_KEY);
-        const remainingDirtyKeys = remainingFieldKeys.filter((key) => dirtyFields[key]);
+          // Other dirty fields in this section still go through the usual QR path, employer excluded.
+          const remainingFieldKeys = fieldKeys.filter((key) => key !== OCCUPATIONAL_MEDICINE_EMPLOYER_FIELD_KEY);
+          const remainingDirtyKeys = remainingFieldKeys.filter((key) => dirtyFields[key]);
 
-        if (remainingDirtyKeys.length > 0) {
-          const remainingValues: Record<string, unknown> = {};
+          if (remainingDirtyKeys.length > 0) {
+            const remainingValues: Record<string, unknown> = {};
 
-          [...remainingFieldKeys, ...collectLogicalControlFields(remainingFieldKeys)].forEach((key) => {
-            remainingValues[key] = allValues[key];
-          });
+            [...remainingFieldKeys, ...collectLogicalControlFields(remainingFieldKeys)].forEach((key) => {
+              remainingValues[key] = allValues[key];
+            });
 
-          const remainingDirty: Record<string, boolean> = {};
+            const remainingDirty: Record<string, boolean> = {};
 
-          remainingDirtyKeys.forEach((key) => {
-            remainingDirty[key] = true;
-          });
+            remainingDirtyKeys.forEach((key) => {
+              remainingDirty[key] = true;
+            });
 
+            const qr = pruneEmptySections(
+              structureQuestionnaireResponse(questionnaire, remainingValues, patientId, remainingDirty)
+            );
+
+            if (encounterId) {
+              qr.encounter = { reference: `Encounter/${encounterId}` };
+            }
+
+            await submitQR.mutateAsync(qr);
+          }
+        } else {
           const qr = pruneEmptySections(
-            structureQuestionnaireResponse(questionnaire, remainingValues, patientId, remainingDirty)
+            structureQuestionnaireResponse(questionnaire, sectionValues, patientId, sectionDirtyFields)
           );
-
           if (encounterId) {
             qr.encounter = { reference: `Encounter/${encounterId}` };
           }
-
           await submitQR.mutateAsync(qr);
         }
-      } else {
-        const qr = pruneEmptySections(
-          structureQuestionnaireResponse(questionnaire, sectionValues, patientId, sectionDirtyFields)
-        );
-        if (encounterId) {
-          qr.encounter = { reference: `Encounter/${encounterId}` };
-        }
-        await submitQR.mutateAsync(qr);
+      } catch {
+        return;
       }
-    } catch {
-      return;
-    }
-    // Clear dirty state only for this section's fields so unsaved edits in other
-    // sections keep their dirty markers (and their Save buttons).
-    const currentValues = getValues();
-    fieldKeys.forEach((key) => {
-      resetField(key, { defaultValue: currentValues[key], keepError: false });
+      // Clear dirty state only for this section's fields so unsaved edits in other
+      // sections keep their dirty markers (and their Save buttons).
+      const currentValues = getValues();
+      fieldKeys.forEach((key) => {
+        resetField(key, { defaultValue: currentValues[key], keepError: false });
+      });
+      onSaveSuccess?.();
     });
-    onSaveSuccess?.();
   }, [
     patientId,
     encounterId,
@@ -209,6 +219,8 @@ export const SectionSaveButton: FC<SectionSaveButtonProps> = ({
     visitDetailsEmployerMutation,
     onSaveSuccess,
     trigger,
+    getFieldState,
+    confirmSave,
   ]);
 
   if (!isDirty) return null;
@@ -218,7 +230,7 @@ export const SectionSaveButton: FC<SectionSaveButtonProps> = ({
       variant="outlined"
       size="small"
       startIcon={isSaving ? <CircularProgress size={14} /> : <Save fontSize="small" />}
-      disabled={hasRequiredFieldErrors || isSaving}
+      disabled={isSaving}
       onClick={handleSave}
       sx={{ textTransform: 'none', fontSize: '13px', py: 0.25, px: 1.5 }}
     >

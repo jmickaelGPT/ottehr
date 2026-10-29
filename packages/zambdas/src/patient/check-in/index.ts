@@ -3,28 +3,31 @@ import { APIGatewayProxyResult } from 'aws-lambda';
 import { Operation } from 'fast-json-patch';
 import { Appointment, Encounter, Location, Patient, QuestionnaireResponse, Task } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import {
-  APPOINTMENT_NOT_FOUND_ERROR,
-  CheckInInput,
-  CheckInZambdaOutput,
-  FHIR_EXTENSION,
-  formatPhoneNumberDisplay,
-  getAppointmentMetaTagOpForStatusUpdate,
-  getEncounterStatusHistoryIdx,
-  getFullestAvailableName,
-  getLocationInformation,
-  getPatchBinary,
-  getTaskResource,
-  isAnnotationFollowupEncounter,
-  isNonPaperworkQuestionnaireResponse,
-  Secrets,
-  TaskIndicator,
-  VisitType,
-} from 'utils';
-import { checkPaperworkComplete, createOystehrClient, getAuth0Token, wrapHandler, ZambdaInput } from '../../shared';
+import { FHIR_EXTENSION } from 'utils/lib/fhir/constants';
+import { isAnnotationFollowupEncounter } from 'utils/lib/fhir/encounter';
+import { getAppointmentMetaTagOpForStatusUpdate, getTaskResource } from 'utils/lib/fhir/helpers';
+import { getEncounterStatusHistoryIdx, getLocationInformation } from 'utils/lib/fhir/location';
+import { getFullestAvailableName } from 'utils/lib/fhir/patient';
+import { getPatchBinary } from 'utils/lib/fhir/resourcePatch';
+import { formatPhoneNumberDisplay } from 'utils/lib/helpers/helpers';
+import { isNonPaperworkQuestionnaireResponse } from 'utils/lib/helpers/paperwork/paperwork';
+import { Secrets } from 'utils/lib/secrets';
+import { CheckInInput, CheckInZambdaOutput } from 'utils/lib/types/api/check-in.types';
+import { TaskIndicator } from 'utils/lib/types/common';
+import { VisitType } from 'utils/lib/types/data/telemed/appointments/create-appointment.types';
+import { APPOINTMENT_NOT_FOUND_ERROR } from 'utils/lib/types/errors';
+import { z } from 'zod';
 import { getUser } from '../../shared/auth';
+import { getAuth0Token } from '../../shared/getAuth0Token';
+import { checkPaperworkComplete, createClinicalOystehrClient } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import { AuditableZambdaEndpoints, createAuditEvent } from '../../shared/userAuditLog';
-import { validateRequestParameters } from './validateRequestParameters';
+import { validateWithSchema } from '../../shared/validation';
+
+export const CheckInBodySchema = z.object({
+  appointmentId: z.string().uuid(),
+});
 
 export interface CheckInInputValidated extends CheckInInput {
   secrets: Secrets;
@@ -42,7 +45,7 @@ export const index = wrapHandler('check-in', async (input: ZambdaInput): Promise
   const user = userToken && (await getUser(userToken, input.secrets));
   const formattedUserNumber = formatPhoneNumberDisplay(user?.name?.replace('+1', ''));
   const checkedInBy = `Patient${formattedUserNumber ? ` ${formattedUserNumber}` : ''}`;
-  const validatedParameters = validateRequestParameters(input);
+  const validatedParameters = validateWithSchema(CheckInBodySchema, input);
   const { appointmentId: appointmentID, secrets } = validatedParameters;
   console.groupEnd();
   console.debug('validateRequestParameters success');
@@ -54,7 +57,7 @@ export const index = wrapHandler('check-in', async (input: ZambdaInput): Promise
     console.log('already have token');
   }
 
-  const oystehr = createOystehrClient(oystehrToken, secrets);
+  const oystehr = createClinicalOystehrClient(oystehrToken, secrets);
 
   console.log('getting all fhir resources');
   console.time('resource search for check in');

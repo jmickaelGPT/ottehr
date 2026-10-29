@@ -2,20 +2,7 @@ import { CandidApiClient, CandidApiEnvironment } from 'candidhealth';
 import { InventoryRecord } from 'candidhealth/api/resources/patientAr/resources/v1';
 import fs from 'fs';
 import { DateTime } from 'luxon';
-import { getCandidInventoryPages } from 'utils';
-
-// async function createOyst(zambdaEnv: Record<string, string>, token: string): Promise<Oystehr> {
-//   const oystehr = new Oystehr({
-//     accessToken: token,
-//     projectId: zambdaEnv.PROJECT_ID,
-//     services: {
-//       fhirApiUrl: zambdaEnv.FHIR_API,
-//       projectApiUrl: zambdaEnv.PROJECT_API,
-//     },
-//   });
-//   console.log(`Created Oystehr client`);
-//   return oystehr;
-// }
+import { getCandidInventoryPages } from 'utils/lib/helpers/candidApi';
 
 async function createCandid(
   zambdaEnv: Record<string, string>,

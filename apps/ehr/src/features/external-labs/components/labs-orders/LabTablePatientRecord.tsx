@@ -8,11 +8,13 @@ import { ReactElement, useMemo, useState } from 'react';
 import { dataTestIds } from 'src/constants/data-test-ids';
 import { buildFollowUpAppointmentLookup } from 'src/features/visits/in-person/routing/helpers';
 import { useGetPatientVisitHistory } from 'src/hooks/useGetPatientVisitHistory';
-import { getColumnHeader, getColumnWidth, LabOrdersSearchBy, LabsTableColumn, OrderableItemSearchResult } from 'utils';
+import { getColumnHeader, getColumnWidth } from 'utils/lib/helpers/labs/helpers';
+import { LabOrdersSearchBy, LabsTableColumn, OrderableItemSearchResult } from 'utils/lib/types/data/labs/labs.types';
 import { LabsAutocompleteForPatient } from '../LabsAutocompleteForPatient';
 import { LabOrderLoading } from './LabOrderLoading';
 import { LabsTable } from './LabsTable';
 import { UnsolicitedLabsTable } from './UnsolicitedLabsTable';
+import { useLabOrderRowNavigation } from './useLabOrderRowNavigation';
 import { usePatientLabOrders } from './usePatientLabOrders';
 
 interface LabsTablePatientRecordProps {
@@ -49,6 +51,8 @@ export const LabsTablePatientRecord = ({
     () => buildFollowUpAppointmentLookup(visitHistory?.visits),
     [visitHistory?.visits]
   );
+
+  const { openOrder, openDrDrivenResult } = useLabOrderRowNavigation(followUpAppointmentLookup);
 
   const submitFilterByDate = (date?: DateTime | null): void => {
     const dateToSet = date || tempDateFilter;
@@ -150,7 +154,8 @@ export const LabsTablePatientRecord = ({
                   allowDelete={false}
                   showDeleteLabOrderDialog={showDeleteLabOrderDialog}
                   dataTestId={dataTestIds.externalLabs.labsTable.patientRecordExternalLabsPage}
-                  followUpAppointmentLookup={followUpAppointmentLookup}
+                  onRowClick={openOrder}
+                  onDrDrivenRowClick={openDrDrivenResult}
                 />
               )}
 

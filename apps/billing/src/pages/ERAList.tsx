@@ -1,4 +1,9 @@
-import { Clear as ClearIcon, Search as SearchIcon } from '@mui/icons-material';
+import {
+  Clear as ClearIcon,
+  EditNote as EditNoteIcon,
+  NoteAddOutlined as NoteAddIcon,
+  Search as SearchIcon,
+} from '@mui/icons-material';
 import {
   Alert,
   Autocomplete,
@@ -16,27 +21,30 @@ import {
 import { DataGridPro, GridColDef, GridPaginationModel } from '@mui/x-data-grid-pro';
 import { ReactElement, useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import {
-  BillingOrganizationOption,
-  BillingPatientOption,
-  chooseJson,
-  ClaimsQueueItemStatuses,
-  EraListItem,
-} from 'utils';
+import { getApiError } from 'utils/lib/helpers/oystehrApi';
+import { ClaimsQueueItemStatuses } from 'utils/lib/types/api/rcm-claims/claim.types';
+import { ERA_SOURCE } from 'utils/lib/types/data/billing/billing.constants';
+import { SearchErasInput } from 'utils/lib/types/data/billing/billing.schemas';
+import { BillingPatientOption, BillingPayerOption, EraListItem } from 'utils/lib/types/data/billing/billing.types';
+import { formatAntCaseString } from 'utils/lib/types/data/billing/claim-status';
+import { formatCurrency } from 'utils/lib/utils/convert';
+import { searchBillingEras } from '../api/api';
+import { AddMenuButton } from '../components/AddMenuButton';
 import { dataGridSlots, dataGridSx } from '../components/BillingDataGrid';
-import { formatClaimStatus } from '../constants/claimStatus';
+import { DateRangeInput } from '../components/DateInput';
+import { ImportEraDialog } from '../components/ImportEraDialog';
+import { usePayerSearch } from '../components/PayerSelect';
+import { ERA_SOURCE_LABELS } from '../constants/era';
 import { useApiClients } from '../hooks/useAppClients';
 import { useDebounce } from '../hooks/useDebounce';
-import { formatCurrency } from '../utils/format';
 
 interface Filters {
   // ERA-level
   checkNumber?: string;
-  eraId?: string;
   eraDateFrom?: string;
   eraDateTo?: string;
-  eraStatus?: string;
   payerId?: string;
+  matchingStatus?: string;
   // Claim-level
   searchText?: string;
   claimStatus?: string;
@@ -45,36 +53,59 @@ interface Filters {
   patientId?: string;
 }
 
-const columns: GridColDef[] = [
-  { field: 'checkNumber', headerName: 'Check No.', width: 120 },
+const claimsMatchedLabel = (row: EraListItem): string =>
+  row.claimCount === 0 ? 'No claims' : `${row.matchedCount}/${row.claimCount} matched`;
+
+const columns: GridColDef<EraListItem>[] = [
+  { field: 'checkNumber', headerName: 'Check No.', width: 170 },
   { field: 'paymentDate', headerName: 'Check Date', width: 120 },
   {
     field: 'paymentAmount',
     headerName: 'Amount',
-    width: 110,
+    width: 120,
     align: 'right',
     headerAlign: 'right',
     valueFormatter: (params: { value: number }) => formatCurrency(params.value),
   },
   { field: 'payerName', headerName: 'Payer', flex: 1, minWidth: 200 },
-  { field: 'eraId', headerName: 'ERA ID', width: 180 },
   {
-    field: 'status',
-    headerName: 'Status',
-    width: 130,
-    renderCell: ({ value }) => (
+    field: 'billingProviderName',
+    headerName: 'Billing Provider',
+    flex: 1,
+    minWidth: 180,
+    valueFormatter: (params: { value: string }) => params.value || '-',
+  },
+  {
+    field: 'source',
+    headerName: 'Source',
+    width: 170,
+    valueGetter: (params: { row: EraListItem }) => ERA_SOURCE_LABELS[params.row.source] ?? params.row.source,
+    renderCell: ({ row }) => (
       <Chip
-        label={String(value ?? '')}
-        color={value === 'complete' ? 'success' : 'warning'}
+        label={ERA_SOURCE_LABELS[row.source] ?? row.source}
+        color={row.source === ERA_SOURCE.clearingHouse ? 'default' : 'primary'}
         variant="outlined"
         size="small"
         sx={{ borderRadius: '4px', fontSize: 12 }}
       />
     ),
   },
-  { field: 'claimCount', headerName: 'Claims', width: 80, align: 'right', headerAlign: 'right' },
-  { field: 'matchedCount', headerName: 'Matched', width: 90, align: 'right', headerAlign: 'right' },
-  { field: 'unmatchedCount', headerName: 'Unmatched', width: 100, align: 'right', headerAlign: 'right' },
+  {
+    field: 'claimCount',
+    headerName: 'Claims',
+    width: 140,
+    align: 'right',
+    headerAlign: 'right',
+    valueGetter: (params: { row: EraListItem }) => claimsMatchedLabel(params.row),
+    renderCell: ({ row }) => (
+      <Typography
+        variant="body2"
+        color={row.matchedCount < row.claimCount ? 'error.main' : row.claimCount === 0 ? 'text.secondary' : undefined}
+      >
+        {claimsMatchedLabel(row)}
+      </Typography>
+    ),
+  },
 ];
 
 export default function ERAList(): ReactElement {
@@ -86,15 +117,15 @@ export default function ERAList(): ReactElement {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ page: 0, pageSize: 25 });
+  const [showImportDialog, setShowImportDialog] = useState(false);
 
   // ERA-level filters
   const [checkNumber, setCheckNumber] = useState('');
-  const [eraId, setEraId] = useState('');
   const [eraDateFrom, setEraDateFrom] = useState('');
   const [eraDateTo, setEraDateTo] = useState('');
-  const [eraStatus, setEraStatus] = useState('');
-  const [selectedPayer, setSelectedPayer] = useState<BillingOrganizationOption | null>(null);
-  const [payerOptions, setPayerOptions] = useState<BillingOrganizationOption[]>([]);
+  const [selectedPayer, setSelectedPayer] = useState<BillingPayerOption | null>(null);
+  const { options: payerOptions, search: searchPayers } = usePayerSearch();
+  const [matchingStatus, setMatchingStatus] = useState('');
 
   // Claim-level filters
   const [searchText, setSearchText] = useState('');
@@ -102,7 +133,6 @@ export default function ERAList(): ReactElement {
   const [dosFrom, setDosFrom] = useState('');
   const [dosTo, setDosTo] = useState('');
   const [selectedPatient, setSelectedPatient] = useState<BillingPatientOption | null>(null);
-  const [patientOptions, setPatientOptions] = useState<BillingPatientOption[]>([]);
 
   const { debounce } = useDebounce();
 
@@ -112,68 +142,30 @@ export default function ERAList(): ReactElement {
       setLoading(true);
       setError(null);
       try {
-        const body: Record<string, unknown> = {
+        const params: SearchErasInput = {
           pageSize: pagination.pageSize,
           offset: pagination.page * pagination.pageSize,
         };
-        if (filters.checkNumber) body.checkNumber = filters.checkNumber;
-        if (filters.eraId) body.eraId = filters.eraId;
-        if (filters.eraDateFrom) body.eraDateFrom = filters.eraDateFrom;
-        if (filters.eraDateTo) body.eraDateTo = filters.eraDateTo;
-        if (filters.eraStatus) body.eraStatus = filters.eraStatus;
-        if (filters.payerId) body.payerId = filters.payerId;
-        if (filters.searchText) body.searchText = filters.searchText;
-        if (filters.claimStatus) body.claimStatus = filters.claimStatus;
-        if (filters.dosFrom) body.dosFrom = filters.dosFrom;
-        if (filters.dosTo) body.dosTo = filters.dosTo;
-        if (filters.patientId) body.patientId = filters.patientId;
-        const response = await oystehrZambda.zambda.execute({ id: 'search-billing-eras', ...body });
-        const data = chooseJson(response);
+        if (filters.checkNumber) params.checkNumber = filters.checkNumber;
+        if (filters.eraDateFrom) params.eraDateFrom = filters.eraDateFrom;
+        if (filters.eraDateTo) params.eraDateTo = filters.eraDateTo;
+        if (filters.payerId) params.payerId = filters.payerId;
+        if (filters.matchingStatus) params.matchingStatus = filters.matchingStatus;
+        if (filters.searchText) params.searchText = filters.searchText;
+        if (filters.claimStatus) params.claimStatus = filters.claimStatus;
+        if (filters.dosFrom) params.dosFrom = filters.dosFrom;
+        if (filters.dosTo) params.dosTo = filters.dosTo;
+        if (filters.patientId) params.patientId = filters.patientId;
+        const data = await searchBillingEras(oystehrZambda, params);
         setEras(data.eras ?? []);
         setTotalRows(data.total ?? 0);
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(getApiError({ error: err, defaultError: 'Failed to load ERAs' }));
       } finally {
         setLoading(false);
       }
     },
     [oystehrZambda]
-  );
-
-  const searchPayers = useCallback(
-    (query: string): void => {
-      if (!oystehrZambda) return;
-      debounce(async () => {
-        try {
-          const res = await oystehrZambda.zambda.execute({
-            id: 'search-billing-organizations',
-            ...(query ? { name: query } : {}),
-          });
-          setPayerOptions(chooseJson(res).organizations ?? []);
-        } catch {
-          setPayerOptions([]);
-        }
-      }, 'payer');
-    },
-    [oystehrZambda, debounce]
-  );
-
-  const searchPatients = useCallback(
-    (query: string): void => {
-      if (!oystehrZambda) return;
-      debounce(async () => {
-        try {
-          const res = await oystehrZambda.zambda.execute({
-            id: 'search-billing-patients',
-            ...(query ? { name: query, includeWorkingCopies: true } : {}),
-          });
-          setPatientOptions(chooseJson(res).patients ?? []);
-        } catch {
-          setPatientOptions([]);
-        }
-      }, 'patient');
-    },
-    [oystehrZambda, debounce]
   );
 
   const initialLoadDone = useRef(false);
@@ -186,11 +178,10 @@ export default function ERAList(): ReactElement {
   const currentFilters = useCallback(
     (overrides?: Filters): Filters => ({
       checkNumber: overrides?.checkNumber ?? checkNumber,
-      eraId: overrides?.eraId ?? eraId,
       eraDateFrom: overrides?.eraDateFrom ?? eraDateFrom,
       eraDateTo: overrides?.eraDateTo ?? eraDateTo,
-      eraStatus: overrides?.eraStatus ?? eraStatus,
-      payerId: overrides?.payerId ?? selectedPayer?.id,
+      payerId: overrides?.payerId ?? selectedPayer?.payerId,
+      matchingStatus: overrides?.matchingStatus ?? matchingStatus,
       searchText: overrides?.searchText ?? searchText,
       claimStatus: overrides?.claimStatus ?? claimStatus,
       dosFrom: overrides?.dosFrom ?? dosFrom,
@@ -199,11 +190,10 @@ export default function ERAList(): ReactElement {
     }),
     [
       checkNumber,
-      eraId,
       eraDateFrom,
       eraDateTo,
-      eraStatus,
       selectedPayer,
+      matchingStatus,
       searchText,
       claimStatus,
       dosFrom,
@@ -234,10 +224,8 @@ export default function ERAList(): ReactElement {
 
   const clearFilters = (): void => {
     setCheckNumber('');
-    setEraId('');
     setEraDateFrom('');
     setEraDateTo('');
-    setEraStatus('');
     setSelectedPayer(null);
     setSearchText('');
     setClaimStatus('');
@@ -251,11 +239,10 @@ export default function ERAList(): ReactElement {
 
   const hasFilters =
     checkNumber ||
-    eraId ||
     eraDateFrom ||
     eraDateTo ||
-    eraStatus ||
     selectedPayer ||
+    matchingStatus ||
     searchText ||
     claimStatus ||
     dosFrom ||
@@ -264,14 +251,32 @@ export default function ERAList(): ReactElement {
 
   return (
     <Box sx={{ p: 0 }}>
-      <Typography variant="h4" color="primary.dark" fontWeight={600} sx={{ mb: 3 }}>
-        ERAs
-      </Typography>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 3 }}>
+        <Typography variant="h4" color="primary.dark" fontWeight={600}>
+          ERAs
+        </Typography>
+        <AddMenuButton
+          options={[
+            {
+              label: 'Import 835',
+              description: 'Paste an ERA in X12 format',
+              icon: <NoteAddIcon fontSize="small" />,
+              onSelect: () => setShowImportDialog(true),
+            },
+            {
+              label: 'Enter Manually',
+              description: 'Key in a paper or PDF remit',
+              icon: <EditNoteIcon fontSize="small" />,
+              onSelect: () => navigate('/eras/new'),
+            },
+          ]}
+        />
+      </Box>
 
       <TextField
         fullWidth
         size="small"
-        placeholder="Search by patient name..."
+        placeholder="Search by patient name or PCN..."
         value={searchText}
         onChange={(e) => handleDebouncedFilter(setSearchText, 'searchText')(e.target.value)}
         InputProps={{
@@ -293,34 +298,8 @@ export default function ERAList(): ReactElement {
           label="Check Number"
           value={checkNumber}
           onChange={(e) => handleDebouncedFilter(setCheckNumber, 'checkNumber')(e.target.value)}
-          InputLabelProps={{ shrink: true }}
           sx={{ minWidth: 140 }}
         />
-        <TextField
-          size="small"
-          label="ERA ID"
-          value={eraId}
-          onChange={(e) => handleDebouncedFilter(setEraId, 'eraId')(e.target.value)}
-          InputLabelProps={{ shrink: true }}
-          sx={{ minWidth: 160 }}
-        />
-        <FormControl size="small" sx={{ minWidth: 140 }}>
-          <InputLabel>ERA Status</InputLabel>
-          <Select
-            value={eraStatus}
-            label="ERA Status"
-            onChange={(e) => {
-              setEraStatus(e.target.value);
-              applyFilters({ eraStatus: e.target.value });
-            }}
-          >
-            <MenuItem value="">All</MenuItem>
-            <MenuItem value="queued">Queued</MenuItem>
-            <MenuItem value="complete">Complete</MenuItem>
-            <MenuItem value="error">Error</MenuItem>
-            <MenuItem value="partial">Partial</MenuItem>
-          </Select>
-        </FormControl>
         <Autocomplete
           size="small"
           options={payerOptions}
@@ -333,35 +312,38 @@ export default function ERAList(): ReactElement {
           value={selectedPayer}
           onChange={(_, v) => {
             setSelectedPayer(v);
-            applyFilters({ payerId: v?.id ?? '' });
+            applyFilters({ payerId: v?.payerId ?? '' });
           }}
           renderInput={(params) => <TextField {...params} label="Payer" />}
           isOptionEqualToValue={(o, v) => o.id === v.id}
           sx={{ minWidth: 200 }}
         />
-        <TextField
-          size="small"
-          type="date"
-          label="ERA Date From"
-          value={eraDateFrom}
-          onChange={(e) => {
-            setEraDateFrom(e.target.value);
-            applyFilters({ eraDateFrom: e.target.value });
+        <FormControl size="small" sx={{ minWidth: 200 }}>
+          <InputLabel>Matching Status</InputLabel>
+          <Select
+            value={matchingStatus}
+            label="Matching Status"
+            onChange={(e) => {
+              setMatchingStatus(e.target.value);
+              applyFilters({ matchingStatus: e.target.value });
+            }}
+          >
+            <MenuItem value="">All</MenuItem>
+            <MenuItem value="anyUnmatched">Any Unmatched</MenuItem>
+          </Select>
+        </FormControl>
+        <DateRangeInput
+          label="ERA Date"
+          valueFrom={eraDateFrom}
+          valueTo={eraDateTo}
+          onChange={(from, to) => {
+            setEraDateFrom(from);
+            setEraDateTo(to);
+            applyFilters({
+              eraDateFrom: from,
+              eraDateTo: to,
+            });
           }}
-          InputLabelProps={{ shrink: true }}
-          sx={{ minWidth: 150 }}
-        />
-        <TextField
-          size="small"
-          type="date"
-          label="ERA Date To"
-          value={eraDateTo}
-          onChange={(e) => {
-            setEraDateTo(e.target.value);
-            applyFilters({ eraDateTo: e.target.value });
-          }}
-          InputLabelProps={{ shrink: true }}
-          sx={{ minWidth: 150 }}
         />
       </Box>
 
@@ -382,52 +364,23 @@ export default function ERAList(): ReactElement {
             <MenuItem value="">All</MenuItem>
             {ClaimsQueueItemStatuses.map((s) => (
               <MenuItem key={s} value={s}>
-                {formatClaimStatus(s)}
+                {formatAntCaseString(s)}
               </MenuItem>
             ))}
           </Select>
         </FormControl>
-        <Autocomplete
-          size="small"
-          options={patientOptions}
-          getOptionLabel={(o) => o.name || `${o.firstName} ${o.lastName}`}
-          onInputChange={(_, value, reason) => {
-            if (reason === 'input') searchPatients(value);
+        <DateRangeInput
+          label="Service Date"
+          valueFrom={dosFrom}
+          valueTo={dosTo}
+          onChange={(from, to) => {
+            setDosFrom(from);
+            setDosTo(to);
+            applyFilters({
+              dosFrom: from,
+              dosTo: to,
+            });
           }}
-          onOpen={() => searchPatients('')}
-          filterOptions={(x) => x}
-          value={selectedPatient}
-          onChange={(_, v) => {
-            setSelectedPatient(v);
-            applyFilters({ patientId: v?.id ?? '' });
-          }}
-          renderInput={(params) => <TextField {...params} label="Patient" />}
-          isOptionEqualToValue={(o, v) => o.id === v.id}
-          sx={{ minWidth: 200 }}
-        />
-        <TextField
-          size="small"
-          type="date"
-          label="DOS From"
-          value={dosFrom}
-          onChange={(e) => {
-            setDosFrom(e.target.value);
-            applyFilters({ dosFrom: e.target.value });
-          }}
-          InputLabelProps={{ shrink: true }}
-          sx={{ minWidth: 150 }}
-        />
-        <TextField
-          size="small"
-          type="date"
-          label="DOS To"
-          value={dosTo}
-          onChange={(e) => {
-            setDosTo(e.target.value);
-            applyFilters({ dosTo: e.target.value });
-          }}
-          InputLabelProps={{ shrink: true }}
-          sx={{ minWidth: 150 }}
         />
 
         {hasFilters && (
@@ -455,9 +408,18 @@ export default function ERAList(): ReactElement {
         disableRowSelectionOnClick
         disableColumnMenu
         pageSizeOptions={[25, 50, 100]}
-        slots={dataGridSlots}
+        slots={dataGridSlots({ showCsvExport: true, csvFileName: 'eras' })}
+        pagination={true}
         sx={{ ...dataGridSx, height: 'calc(100vh - 430px)' }}
       />
+      {showImportDialog && (
+        <ImportEraDialog
+          onClose={() => {
+            setShowImportDialog(false);
+            void fetchEras({}, paginationModel);
+          }}
+        />
+      )}
     </Box>
   );
 }

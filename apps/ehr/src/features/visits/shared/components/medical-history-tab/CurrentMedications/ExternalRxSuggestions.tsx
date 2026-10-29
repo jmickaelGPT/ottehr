@@ -14,8 +14,15 @@ import {
 import { ErxSearchMedicationsResponse } from '@oystehr/sdk';
 import { FC, useCallback, useMemo, useState } from 'react';
 import { RoundedButton } from 'src/components/RoundedButton';
-import { formatDateForDisplay, MedicationDTO } from 'utils';
-import { ExternalMedication, useExternalMedicationHistory } from '../../../hooks/useExternalMedicationHistory';
+import { MedicationDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
+import { formatDateForDisplay } from 'utils/lib/utils/dateUtils';
+import {
+  EXTERNAL_HISTORY_EMPTY_MESSAGE,
+  EXTERNAL_HISTORY_FAILED_MESSAGE,
+  EXTERNAL_HISTORY_FORBIDDEN_MESSAGE,
+  ExternalMedication,
+  useExternalMedicationHistory,
+} from '../../../hooks/useExternalMedicationHistory';
 import { ExtractObjectType } from '../../../stores/appointment/appointment.queries';
 
 const COLLAPSED_COUNT = 5;
@@ -35,7 +42,8 @@ interface ExternalRxSuggestionsProps {
 }
 
 export const ExternalRxSuggestions: FC<ExternalRxSuggestionsProps> = ({ chartedMedications, onSelectMedication }) => {
-  const { isLoading, isAvailable, externalMedications } = useExternalMedicationHistory(chartedMedications);
+  const { isLoading, isAvailable, isPermissionDenied, externalMedications } =
+    useExternalMedicationHistory(chartedMedications);
   const [expanded, setExpanded] = useState(false);
   // Track medication IDs that were just clicked (optimistic hide).
   const [addedIds, setAddedIds] = useState<Set<number>>(new Set());
@@ -150,11 +158,11 @@ export const ExternalRxSuggestions: FC<ExternalRxSuggestionsProps> = ({ chartedM
           </Box>
         ) : !isAvailable ? (
           <Typography variant="body2" color="text.secondary">
-            Not available
+            {isPermissionDenied ? EXTERNAL_HISTORY_FORBIDDEN_MESSAGE : EXTERNAL_HISTORY_FAILED_MESSAGE}
           </Typography>
         ) : visibleMedications.length === 0 ? (
           <Typography variant="body2" color="text.secondary">
-            No external medications found, or all have been reconciled.
+            {EXTERNAL_HISTORY_EMPTY_MESSAGE}
           </Typography>
         ) : (
           <>
@@ -253,7 +261,7 @@ const ExternalMedicationItem: FC<ExternalMedicationItemProps> = ({ medication, o
   const detailLine = detailParts.join(' | ');
 
   const dateParts = [
-    medication.writtenDate ? `Prescribed: ${formatDateForDisplay(medication.writtenDate)}` : null,
+    medication.writtenDate ? `Prescribed: ${formatDateForDisplay(medication.writtenDate)}` : 'Prescribed: Date unknown',
     medication.lastFillDate ? `Last filled: ${formatDateForDisplay(medication.lastFillDate)}` : null,
     `${medication.refills} refills`,
   ].filter(Boolean);

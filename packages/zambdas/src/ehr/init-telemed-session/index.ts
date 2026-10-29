@@ -1,26 +1,35 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Appointment, Encounter } from 'fhir/r4b';
-import { getSecret, InitTelemedSessionResponse, MeetingData, Secrets, SecretsKeys } from 'utils';
-import { checkOrCreateM2MClientToken, wrapHandler, ZambdaInput } from '../../shared';
-import { createOystehrClient, getVideoRoomResourceExtension } from '../../shared/helpers';
-import { validateRequestParameters } from './validateRequestParameters';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { InitTelemedSessionResponse } from 'utils/lib/types/api/init-telemed-session/init-telemed-session.types';
+import { MeetingData } from 'utils/lib/types/data/telemed/join-call.types';
+import { z } from 'zod';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient, getVideoRoomResourceExtension } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { validateWithSchema } from '../../shared/validation';
 import { createVideoRoom } from './video-room-creation';
+
+export const InitTelemedSessionSchema = z.object({
+  appointmentId: z.string().uuid(),
+  userId: z.string().uuid(),
+});
 
 // Lifting up value to outside of the handler allows it to stay in memory across warm lambda invocations
 let m2mToken: string;
 
 const ZAMBDA_NAME = 'init-telemed-session';
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`Input: ${JSON.stringify(input)}`);
   console.log('Validating input');
-  const { appointmentId, secrets } = validateRequestParameters(input);
+  const { appointmentId, secrets } = validateWithSchema(InitTelemedSessionSchema, input);
 
   console.log('Getting token');
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
   console.log('token', m2mToken);
 
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   console.log(`Getting appointment ${appointmentId}`);
   const { appointment, encounters } = await getAppointmentWithEncounters({ appointmentId, oystehr });

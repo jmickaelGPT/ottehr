@@ -1,19 +1,22 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Appointment as FhirAppointment, HealthcareService, Location, Practitioner, Schedule, Slot } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import {
-  APPOINTMENT_NOT_FOUND_ERROR,
-  AvailableLocationInformation,
-  GetAppointmentDetailsResponse,
-  getAvailableSlotsForSchedules,
-  getLocationInformation,
-  getSecret,
-  SCHEDULE_NOT_FOUND_ERROR,
-  Secrets,
-  SecretsKeys,
-} from 'utils';
-import { createOystehrClient, getAuth0Token, wrapHandler, ZambdaInput } from '../../shared';
-import { validateRequestParameters } from './validateRequestParameters';
+import { getLocationInformation } from 'utils/lib/fhir/location';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { GetAppointmentDetailsResponse } from 'utils/lib/types/api/appointment.types';
+import { AvailableLocationInformation } from 'utils/lib/types/common';
+import { APPOINTMENT_NOT_FOUND_ERROR, SCHEDULE_NOT_FOUND_ERROR } from 'utils/lib/types/errors';
+import { getAvailableSlotsForSchedules } from 'utils/lib/utils/scheduleUtils';
+import { z } from 'zod';
+import { getAuth0Token } from '../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { validateWithSchema } from '../../shared/validation';
+
+export const bodySchema = z.object({
+  appointmentID: z.string().uuid(),
+});
 
 export interface GetAppointmentDetailInput {
   appointmentID: string;
@@ -25,7 +28,7 @@ let oystehrToken: string;
 const ZAMBDA_NAME = 'get-appointment-details';
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
   console.group('validateRequestParameters');
-  const validatedParameters = validateRequestParameters(input);
+  const validatedParameters = validateWithSchema(bodySchema, input);
   const { appointmentID, secrets } = validatedParameters;
   console.groupEnd();
   console.debug('validateRequestParameters success');
@@ -37,7 +40,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     console.log('already have token');
   }
 
-  const oystehr = createOystehrClient(oystehrToken, secrets);
+  const oystehr = createClinicalOystehrClient(oystehrToken, secrets);
 
   const DISPLAY_TOMORROW_SLOTS_AT_HOUR = parseInt(
     getSecret(SecretsKeys.IN_PERSON_PREBOOK_DISPLAY_TOMORROW_SLOTS_AT_HOUR, secrets)

@@ -1,38 +1,34 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { Operation } from 'fast-json-patch';
 import { Account, Appointment, Encounter, Location, Patient, Schedule, Task, TaskOutput } from 'fhir/r4b';
 import { DateTime } from 'luxon';
 import Stripe from 'stripe';
+import { PATIENT_BILLING_ACCOUNT_TYPE, RcmTaskCodings } from 'utils/lib/fhir/constants';
 import {
-  FHIR_RESOURCE_NOT_FOUND,
-  fillInvoiceTemplate,
-  formatDateToMDYWithTime,
   getPatientReferenceFromAccount,
-  getSecret,
-  getStripeAccountForAppointmentOrEncounter,
   getStripeCustomerIdFromAccount,
-  mapDisplayToInvoiceTaskStatus,
-  PATIENT_BILLING_ACCOUNT_TYPE,
-  RcmTaskCodings,
-  removePrefix,
-  RESOURCE_INCOMPLETE_FOR_OPERATION_ERROR,
-  Secrets,
-  SecretsKeys,
-} from 'utils';
+  getTaskResource,
+} from 'utils/lib/fhir/helpers';
+import { getFullestAvailableName } from 'utils/lib/fhir/patient';
+import { getStripeAccountForAppointmentOrEncounter } from 'utils/lib/fhir/payments';
+import { removePrefix } from 'utils/lib/helpers/helpers';
+import { fillInvoiceTemplate } from 'utils/lib/helpers/rcm/invoice-config';
+import { getInvoiceTaskSource, mapDisplayToInvoiceTaskStatus } from 'utils/lib/helpers/tasks/invoices-tasks';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { TaskIndicator } from 'utils/lib/types/common';
+import { FHIR_RESOURCE_NOT_FOUND, RESOURCE_INCOMPLETE_FOR_OPERATION_ERROR } from 'utils/lib/types/errors';
+import { formatDateToMDYWithTime } from 'utils/lib/utils/date';
 import { accountMatchesType } from '../../../ehr/shared/harvest';
-import { produceOutreachTasks } from '../../../rcm/scheduled-outreach/producers/shared';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  getCandidEncounterIdFromEncounter,
-  getStripeClient,
-  resolveTemplatePlaceholders,
-  resolveTimezone,
-  sendSmsForPatient,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+import { produceOutreachTasks } from '../../../rcm/scheduled-outreach/producers/shared/produce-outreach-tasks';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { getCandidEncounterIdFromEncounter } from '../../../shared/candid';
+import { sendSmsForPatient } from '../../../shared/communication';
+import { createClinicalOystehrClient, resolveTimezone } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ensureStripeCustomerId, getStripeClient, stripeEncounterMetadata } from '../../../shared/stripeIntegration';
+import { resolveTemplatePlaceholders } from '../../../shared/template-placeholders';
+import { ZambdaInput } from '../../../shared/types/common';
+import { addErrorToInvoicingTaskOutput, getTaskAndSecretsFromInput, updateTaskStatusAndOutput } from '../../helpers';
 import { validateRequestParameters } from './validateRequestParameters';
 
 let m2mToken: string;
@@ -40,27 +36,52 @@ let m2mToken: string;
 const ZAMBDA_NAME = 'sub-send-invoice-to-patient';
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  const validatedParams = validateRequestParameters(input);
-  const { secrets, encounterId, invoiceTaskInput, task } = validatedParams;
-  const { amountCents, dueDate, memo, smsTextMessage } = invoiceTaskInput;
-  console.log('Input task id: ', task.id);
-
+  const { task, secrets } = getTaskAndSecretsFromInput(input);
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
-  const stripe = getStripeClient(secrets);
 
   try {
+    const validatedParams = validateRequestParameters(task);
+    const { encounterId, invoiceTaskInput } = validatedParams;
+    const { amountCents, dueDate, memo, smsTextMessage } = invoiceTaskInput;
+    console.log('Input task id: ', task.id);
+
+    const oystehr = createClinicalOystehrClient(m2mToken, secrets);
+    const stripe = getStripeClient(secrets);
+
     console.log('Fetching fhir resources');
     const fhirResources = await getFhirResources(oystehr, encounterId);
     const { patient, encounter, account, appointment, location, schedule, stripeAccountId } = fhirResources;
     console.log('Fhir resources fetched');
 
-    console.log('Getting stripe and candid ids');
-    const stripeCustomerId = getStripeCustomerIdFromAccount(account, stripeAccountId);
-    if (!stripeCustomerId) throw new Error('StripeCustomerId is not found');
-    const candidEncounterId = getCandidEncounterIdFromEncounter(encounter);
-    if (!candidEncounterId) throw new Error('CandidEncounterId is not found');
-    console.log('Stripe and candid ids retrieved');
+    const source = getInvoiceTaskSource(task);
+    console.log(`Resolving Stripe customer id for ${source} invoice task`);
+    let stripeCustomerId = getStripeCustomerIdFromAccount(account, stripeAccountId);
+    if (!stripeCustomerId) {
+      console.log('No Stripe customer ID on account, creating one now');
+      const { customerId } = await ensureStripeCustomerId(
+        {
+          guarantorResource: patient,
+          account,
+          patientId: patient.id!,
+          stripeClient: stripe,
+          stripeAccount: stripeAccountId,
+        },
+        oystehr
+      );
+      stripeCustomerId = customerId;
+    }
+
+    const stripeCustomer = await stripe.customers.retrieve(stripeCustomerId, { stripeAccount: stripeAccountId });
+    if (stripeCustomer.deleted || !stripeCustomer.email) {
+      throw new Error(
+        'In order to create invoices that are sent to the customer, the responsible party must have a valid email.'
+      );
+    }
+
+    if (source === 'candid' && !getCandidEncounterIdFromEncounter(encounter)) {
+      throw new Error('CandidEncounterId is not found');
+    }
+    console.log('Stripe customer id resolved');
 
     const timezone = resolveTimezone(schedule, location);
     const visitDate = formatDateToMDYWithTime(appointment.start, timezone)?.date;
@@ -87,6 +108,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
       oystehrEncounterId: encounterId,
       oystehrPatientId: patientId,
       dueDate,
+      timezone,
       filledMemo,
     });
     await createInvoiceItem(stripe, stripeCustomerId, stripeAccountId, invoiceResponse, amountCents, filledMemo);
@@ -116,9 +138,43 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     console.log('Sms sent to patient');
 
     console.log('Setting task status to completed');
-    const taskCopy = addInvoiceIdToTaskOutput(task, invoiceResponse.id);
-    await updateTaskStatusAndOutput(oystehr, task, mapDisplayToInvoiceTaskStatus('sent'), taskCopy.output);
+    const invoiceEntry: TaskOutput = {
+      type: RcmTaskCodings.sendInvoiceOutputInvoiceId,
+      valueString: invoiceResponse.id,
+    };
+    const stripeStatusEntry: TaskOutput = {
+      type: RcmTaskCodings.stripeInvoiceStatus,
+      valueString: sendInvoiceResponse.status ?? 'open',
+    };
+    await updateTaskStatusAndOutput({
+      oystehr,
+      task,
+      status: mapDisplayToInvoiceTaskStatus('sent'),
+      outputToAppend: [invoiceEntry, stripeStatusEntry],
+    });
     console.log('Task status and output updated');
+
+    // Trigger statement generation explicitly so it only runs on a real send, not on refreshes.
+    // Refreshes cycle the task through completed status too, which would retrigger the old
+    // subscription-based approach on every refresh.
+    try {
+      const appointmentDate = appointment.start
+        ? DateTime.fromISO(appointment.start, { setZone: true }).toFormat('yyyy-MM-dd')
+        : 'unknown-date';
+      const generateStatementTask: Task = {
+        ...getTaskResource(
+          TaskIndicator.generatePatientStatement,
+          `Generate statement for ${getFullestAvailableName(patient)} visit on ${appointmentDate}`,
+          appointment.id!,
+          encounterId
+        ),
+        for: { reference: `Patient/${patient.id}` },
+      };
+      await oystehr.fhir.create<Task>(generateStatementTask);
+      console.log('Generate-statement task created');
+    } catch (err) {
+      console.error('Failed to create generate-statement task:', err);
+    }
 
     // Produce outreach tasks triggered by invoice issuance
     try {
@@ -134,10 +190,19 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
       console.error('Failed to produce invoice-issued outreach tasks:', err);
     }
   } catch (error) {
-    const oystehr = createOystehrClient(m2mToken, secrets);
+    const oystehr = createClinicalOystehrClient(m2mToken, secrets);
     console.log('updating task status to failed and output');
-    const taskCopy = addErrorToTaskOutput(task, error instanceof Error ? error.message : 'Unknown error');
-    await updateTaskStatusAndOutput(oystehr, task, mapDisplayToInvoiceTaskStatus('error'), taskCopy.output);
+    const errorEntry = addErrorToInvoicingTaskOutput(error instanceof Error ? error.message : 'Unknown error');
+    await updateTaskStatusAndOutput({
+      oystehr,
+      task,
+      status: mapDisplayToInvoiceTaskStatus('error'),
+      outputToAppend: [errorEntry],
+    });
+    if (isInvalidEmailError(error)) {
+      console.warn('Invoice not sent due to invalid patient email; task updated but error suppressed from Sentry');
+      return { statusCode: 200, body: JSON.stringify({ message: 'Invoice skipped: invalid patient email' }) };
+    }
     throw error;
   }
 
@@ -182,21 +247,22 @@ async function createInvoice(
     oystehrPatientId: string;
     filledMemo?: string;
     dueDate: string;
+    timezone: string;
   }
 ): Promise<Stripe.Invoice> {
   try {
-    const { oystehrEncounterId, oystehrPatientId, filledMemo, dueDate } = params;
+    const { oystehrEncounterId, oystehrPatientId, filledMemo, dueDate, timezone } = params;
 
     const invoiceParams: Stripe.InvoiceCreateParams = {
       customer: stripeCustomerId,
       collection_method: 'send_invoice',
       description: filledMemo,
-      metadata: {
-        oystehr_patient_id: oystehrPatientId,
-        oystehr_encounter_id: oystehrEncounterId,
-      },
+      metadata: stripeEncounterMetadata({
+        encounterId: oystehrEncounterId,
+        patientId: oystehrPatientId,
+      }),
       currency: 'USD',
-      due_date: DateTime.fromISO(dueDate).toUnixInteger(),
+      due_date: DateTime.fromISO(dueDate, { zone: timezone }).toUnixInteger(),
       pending_invoice_items_behavior: 'exclude', // Start with a blank invoice
       auto_advance: false, // Ensure it stays a draft
     };
@@ -306,61 +372,12 @@ async function getFhirResources(
   };
 }
 
-async function updateTaskStatusAndOutput(
-  oystehr: Oystehr,
-  task: Task,
-  status: Task['status'],
-  newOutput?: TaskOutput[]
-): Promise<void> {
-  const patchOperations: Operation[] = [
-    {
-      op: 'replace',
-      path: '/status',
-      value: status,
-    },
-  ];
-  if (newOutput) {
-    patchOperations.push({
-      op: task.output ? 'replace' : 'add',
-      path: '/output',
-      value: newOutput,
-    });
+function isInvalidEmailError(error: unknown): boolean {
+  if (error instanceof Error && error.message.includes('must have a valid email')) {
+    return true;
   }
-  await oystehr.fhir.patch({
-    resourceType: 'Task',
-    id: task.id!,
-    operations: patchOperations,
-  });
-}
-
-function addInvoiceIdToTaskOutput(task: Task, invoiceId: string): Task {
-  const taskCopy = { ...task };
-  if (!taskCopy.output) taskCopy.output = [];
-  const invoiceIdCoding = RcmTaskCodings.sendInvoiceOutputInvoiceId;
-
-  const existingInvoiceId = taskCopy.output.find((output) => output.valueString === invoiceId);
-  if (existingInvoiceId) {
-    return taskCopy;
-  } else {
-    const newInvoiceId: TaskOutput = {
-      type: invoiceIdCoding,
-      valueString: invoiceId,
-    };
-    taskCopy.output?.push(newInvoiceId);
-    return taskCopy;
-  }
-}
-
-function addErrorToTaskOutput(task: Task, error: string): Task {
-  const taskCopy = { ...task };
-  if (!taskCopy.output) taskCopy.output = [];
-  const taskError = RcmTaskCodings.sendInvoiceOutputError;
-
-  taskCopy.output?.push({
-    type: taskError,
-    valueString: error,
-  });
-  return taskCopy;
+  const stripeError = error as any;
+  return stripeError?.type === 'StripeInvalidRequestError' && stripeError?.param === 'email';
 }
 
 async function sendInvoiceSmsToPatient(

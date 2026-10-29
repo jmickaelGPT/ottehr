@@ -2,23 +2,27 @@ import Oystehr, { SearchParam } from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Appointment, Attachment, CodeableConcept, Encounter, List, Patient } from 'fhir/r4b';
 import { DateTime } from 'luxon';
+import { CreateDocumentReferenceInput, createFilesDocumentReferences } from 'utils/lib/fhir/helpers';
+import { Secrets } from 'utils/lib/secrets';
 import {
-  CreateDocumentReferenceInput,
-  createFilesDocumentReferences,
   EHRImageUploadType,
+  UpdateVisitFilesInput,
+  UpdateVisitFilesOutput,
+  ValidEHRUploadTypes,
+} from 'utils/lib/types/api/update-visit-details.types';
+import { INSURANCE_CARD_CODE, PHOTO_ID_CARD_CODE } from 'utils/lib/types/data/paperwork/paperwork.constants';
+import {
   FHIR_RESOURCE_NOT_FOUND,
   FHIR_RESOURCE_NOT_FOUND_CUSTOM,
-  INSURANCE_CARD_CODE,
   INVALID_INPUT_ERROR,
-  isValidUUID,
   MISSING_REQUEST_BODY,
   MISSING_REQUIRED_PARAMETERS,
-  PHOTO_ID_CARD_CODE,
-  Secrets,
-  UpdateVisitFilesInput,
-  ValidEHRUploadTypes,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../shared';
+} from 'utils/lib/types/errors';
+import { isValidUUID } from 'utils/lib/validation/helper';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 
 const ZAMBDA_NAME = 'update-visit-files';
 
@@ -28,17 +32,16 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   console.group('validateRequestParameters');
   const validatedParameters = validateRequestParameters(input);
   console.groupEnd();
-  console.debug('validateRequestParameters success', JSON.stringify(validatedParameters));
   const { secrets } = validatedParameters;
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
   const effectInput = await complexValidation(validatedParameters, oystehr);
 
-  const files = await performEffect(effectInput, oystehr);
+  const result = await performEffect(effectInput, oystehr);
 
   return {
     statusCode: 200,
-    body: JSON.stringify(files),
+    body: JSON.stringify(result),
   };
 });
 
@@ -64,8 +67,7 @@ const PHOTO_ID_CARD_TYPE_CODING = {
   text: 'Photo ID cards',
 };
 
-const performEffect = async (input: EffectInput, oystehr: Oystehr): Promise<void> => {
-  // no-op for now
+const performEffect = async (input: EffectInput, oystehr: Oystehr): Promise<UpdateVisitFilesOutput> => {
   const { fileType, attachment, patientId, listResources } = input;
 
   console.log('performEffect called with:', { fileType, attachment, patientId });
@@ -98,7 +100,12 @@ const performEffect = async (input: EffectInput, oystehr: Oystehr): Promise<void
 
   console.log('Created DocumentReferences:', JSON.stringify(docRefs, null, 2));
 
-  return;
+  const documentReferenceId = docRefs[0]?.id;
+  if (!documentReferenceId) {
+    throw new Error('createFilesDocumentReferences did not return a DocumentReference id');
+  }
+
+  return { documentReferenceId };
 };
 
 interface EffectInput extends Omit<Input, 'appointmentId' | 'patientId'> {
@@ -172,7 +179,6 @@ const validateRequestParameters = (input: ZambdaInput): Input => {
     throw MISSING_REQUEST_BODY;
   }
 
-  console.log('input', JSON.stringify(input, null, 2));
   const { secrets } = input;
   const {
     fileType: maybeFileType,

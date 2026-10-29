@@ -1,13 +1,10 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { ChargeItemDefinition } from 'fhir/r4b';
-import { orgIdMatchesReference } from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  RCM_TAG_SYSTEM,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+import { orgIdMatchesReference } from 'utils/lib/helpers/helpers';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient, RCM_TAG_SYSTEM } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 /**
@@ -40,7 +37,7 @@ export const index = wrapHandler(
       validateRequestParameters(input);
 
     m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-    const oystehr = createOystehrClient(m2mToken, secrets);
+    const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
     // Fetch all active charge masters tagged as charge-master
     const allResults = await oystehr.fhir.search<ChargeItemDefinition>({

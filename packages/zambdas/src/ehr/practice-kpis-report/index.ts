@@ -1,24 +1,17 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Appointment, Encounter, Location } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import {
-  appointmentTypeForAppointment,
-  getInPersonVisitStatus,
-  getVisitStatusHistory,
-  isAnnotationFollowupEncounter,
-  isInPersonAppointment,
-  LocationKpiMetrics,
-  OTTEHR_MODULE,
-  PracticeKpisReportZambdaOutput,
-  VisitStatusHistoryEntry,
-} from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  fetchAllPages,
-  wrapHandler,
-  ZambdaInput,
-} from '../../shared';
+import { appointmentTypeForAppointment } from 'utils/lib/fhir/appointments';
+import { isAnnotationFollowupEncounter } from 'utils/lib/fhir/encounter';
+import { isInPersonAppointment, OTTEHR_MODULE } from 'utils/lib/fhir/moduleIdentification';
+import { VisitStatusHistoryEntry } from 'utils/lib/types/api/appointment.types';
+import { LocationKpiMetrics, PracticeKpisReportZambdaOutput } from 'utils/lib/types/api/practice-kpis-report.types';
+import { getInPersonVisitStatus, getVisitStatusHistory } from 'utils/lib/utils/visitUtils';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { fetchAllPages } from '../../shared/fhir';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 let m2mToken: string;
@@ -264,7 +257,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
 
   // Get M2M token for FHIR access
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, validatedParameters.secrets);
-  const oystehr = createOystehrClient(m2mToken, validatedParameters.secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, validatedParameters.secrets);
 
   // TODO: Once billable follow-up visits are available (with their own Appointment and full visit workflow),
   // ensure this report includes them as independent visits on their follow-up date.

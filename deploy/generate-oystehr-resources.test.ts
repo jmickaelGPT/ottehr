@@ -1,18 +1,22 @@
 import fs from 'node:fs/promises';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock fs module before importing the module under test
 vi.mock('node:fs/promises');
 
-vi.mock('utils', () => ({
-  BRANDING_CONFIG: { projectName: 'test-project' },
-  SENDGRID_CONFIG: { templates: {} },
-}));
+// FEATURE_FLAGS_CONFIG is a frozen compile-time constant, so tests toggle it through this
+// hoisted mutable object. Default off: existing tests describe the flag-off deploy path.
+const featureFlags = vi.hoisted(() => ({ customOrganizationsEnabled: false }));
+
+vi.mock('utils/lib/ottehr-config/branding', () => ({ BRANDING_CONFIG: { projectName: 'test-project' } }));
+vi.mock('utils/lib/ottehr-config/sendgrid', () => ({ SENDGRID_CONFIG: { templates: {} } }));
+vi.mock('utils/lib/ottehr-config/feature-flags', () => ({ FEATURE_FLAGS_CONFIG: featureFlags }));
 
 // Import after mocks are set up
 import {
   GenerateFhirResourcesArgs,
   generateOystehrResources,
+  generateRuntimeSeedRemovals,
   isObject,
   validSchemas,
 } from './generate-oystehr-resources';
@@ -37,7 +41,7 @@ interface SpecFile {
   roles?: Record<string, unknown>;
 }
 
-type VarsFile = Record<string, string>;
+type VarsFile = Record<string, unknown>;
 
 // Helper to create mock Dirent objects
 const createMockDirent = (
@@ -60,8 +64,10 @@ const createEnoentError = (): NodeJS.ErrnoException => {
 const createTestArgs = (overrides: Partial<GenerateFhirResourcesArgs> = {}): GenerateFhirResourcesArgs => ({
   configDir: '/config/oystehr',
   coreConfigDir: '/config/oystehr-core',
+  billingCoreConfigDir: '/config/billing-app-core',
   varFile: '/config/.env/local.json',
   outputPath: '/output',
+  billingOutputPath: '/billing-output',
   env: 'local',
   ...overrides,
 });
@@ -345,5 +351,286 @@ describe('generate-oystehr-resources', () => {
         await expect(generateOystehrResources(createTestArgs())).rejects.toThrow('is not a valid JSON map');
       });
     });
+
+    describe('billing var defaults', () => {
+      const billingSpec = {
+        'schema-version': '2025-09-25',
+        apps: {
+          OTTEHR_BILLING: {
+            name: '#{var/BILLING_APP_NAME}',
+            loginRedirectUri: '#{var/BILLING_LOGIN_REDIRECT_URL}',
+            allowedCallbackUrls: ['#{var/BILLING_ALLOWED_URL_1}'],
+            logoUri: '#{var/BILLING_APP_LOGO_URI}',
+          },
+        },
+      };
+      const coreSpec = {
+        'schema-version': '2025-09-25',
+        apps: {
+          OTTEHR_CORE: {
+            name: 'Core App',
+            loginRedirectUri: 'https://localhost:3000',
+            allowedCallbackUrls: ['https://localhost:3000'],
+          },
+        },
+        secrets: {
+          BILLING_INTEGRATION_FEATURE_FLAG: { name: 'BILLING_INTEGRATION', value: '#{var/BILLING_INTEGRATION}' },
+          PATIENT_BALANCE_SOURCE: { name: 'PATIENT_BALANCE_SOURCE', value: '#{var/PATIENT_BALANCE_SOURCE}' },
+          STRIPE_WEBHOOK_SECRET: { name: 'STRIPE_WEBHOOK_SECRET', value: '#{var/STRIPE_WEBHOOK_SECRET}' },
+          STRIPE_PLATFORM_WEBHOOK_SECRET: {
+            name: 'STRIPE_PLATFORM_WEBHOOK_SECRET',
+            value: '#{var/STRIPE_PLATFORM_WEBHOOK_SECRET}',
+          },
+          STRIPE_CLINICAL_WEBHOOK_SECRET: {
+            name: 'STRIPE_CLINICAL_WEBHOOK_SECRET',
+            value: '#{var/STRIPE_CLINICAL_WEBHOOK_SECRET}',
+          },
+        },
+      };
+      const setupMocks = (vars: VarsFile): void => {
+        mockFsForSuccess();
+        vi.mocked(fs.readdir).mockImplementation(async (dirPath) => {
+          if (String(dirPath) === '/config/oystehr') {
+            return [createMockDirent('apps.json', true)] as never;
+          }
+          if (String(dirPath) === '/config/billing-app-core') {
+            return [createMockDirent('apps.json', true)] as never;
+          }
+          return [];
+        });
+        vi.mocked(fs.stat).mockRejectedValue(createEnoentError());
+        vi.mocked(fs.readFile).mockImplementation(async (filePath) => {
+          const pathStr = String(filePath);
+          if (pathStr.endsWith('apps.json')) {
+            if (pathStr.includes('billing-app-core')) {
+              return JSON.stringify(billingSpec);
+            } else {
+              return JSON.stringify(coreSpec);
+            }
+          }
+          if (pathStr.includes('.env/')) return JSON.stringify(vars);
+          throw new Error(`Unexpected file: ${pathStr}`);
+        });
+      };
+
+      const writtenJson = (fileName: string): any => {
+        const call = vi.mocked(fs.writeFile).mock.calls.find((args) => String(args[0]).endsWith(fileName));
+        expect(call).toBeDefined();
+        return JSON.parse(String(call![1]));
+      };
+
+      it('falls back to defaults for missing BILLING_* vars so unconfigured envs still deploy', async () => {
+        setupMocks({});
+
+        await generateOystehrResources(createTestArgs());
+
+        const billingApp = writtenJson('billing-output/apps.tf.json').resource.oystehr_application.OTTEHR_BILLING;
+        expect(billingApp.login_redirect_uri).toBe('https://billing-local.ottehr.com');
+        expect(billingApp.allowed_callback_urls).toEqual(['https://billing-local.ottehr.com']);
+        expect(billingApp.name).toBe('Ottehr Billing');
+        expect(writtenJson('billing-output/apps.tf.json').locals.oystehr_application_OTTEHR_BILLING_config).toEqual(
+          billingApp
+        );
+        const coreApps = writtenJson('/output/apps.tf.json');
+        expect(coreApps.locals.oystehr_application_OTTEHR_CORE_config).toEqual(
+          coreApps.resource.oystehr_application.OTTEHR_CORE
+        );
+        const billingSecret = writtenJson('secrets.tf.json').resource.oystehr_secret.BILLING_INTEGRATION_FEATURE_FLAG;
+        expect(billingSecret.value).toBe('');
+        const balanceSourceSecret = writtenJson('secrets.tf.json').resource.oystehr_secret.PATIENT_BALANCE_SOURCE;
+        expect(balanceSourceSecret.value).toBe('candid');
+        const connectedWebhookSecret = writtenJson('secrets.tf.json').resource.oystehr_secret.STRIPE_WEBHOOK_SECRET;
+        expect(connectedWebhookSecret.value).toBe('');
+        const platformWebhookSecret =
+          writtenJson('secrets.tf.json').resource.oystehr_secret.STRIPE_PLATFORM_WEBHOOK_SECRET;
+        expect(platformWebhookSecret.value).toBe('');
+        expect(writtenJson('secrets.tf.json').resource.oystehr_secret.STRIPE_CLINICAL_WEBHOOK_SECRET.value).toBe('');
+      });
+
+      it('prefers configured BILLING_* vars over defaults', async () => {
+        setupMocks({
+          BILLING_LOGIN_REDIRECT_URL: 'https://billing.example.com/',
+          BILLING_INTEGRATION: 'all',
+          PATIENT_BALANCE_SOURCE: 'ottehr',
+          STRIPE_WEBHOOK_SECRET: 'whsec_connected',
+          STRIPE_PLATFORM_WEBHOOK_SECRET: 'whsec_platform',
+          STRIPE_CLINICAL_WEBHOOK_SECRET: 'whsec_clinical',
+        });
+
+        await generateOystehrResources(createTestArgs());
+
+        const billingApp = writtenJson('billing-output/apps.tf.json').resource.oystehr_application.OTTEHR_BILLING;
+        expect(billingApp.login_redirect_uri).toBe('https://billing.example.com/');
+        expect(billingApp.name).toBe('Ottehr Billing');
+        expect(writtenJson('billing-output/apps.tf.json').locals.oystehr_application_OTTEHR_BILLING_config).toEqual(
+          billingApp
+        );
+        const coreApps = writtenJson('/output/apps.tf.json');
+        expect(coreApps.locals.oystehr_application_OTTEHR_CORE_config).toEqual(
+          coreApps.resource.oystehr_application.OTTEHR_CORE
+        );
+        const billingSecret = writtenJson('secrets.tf.json').resource.oystehr_secret.BILLING_INTEGRATION_FEATURE_FLAG;
+        expect(billingSecret.value).toBe('all');
+        const balanceSourceSecret = writtenJson('secrets.tf.json').resource.oystehr_secret.PATIENT_BALANCE_SOURCE;
+        expect(balanceSourceSecret.value).toBe('ottehr');
+        const connectedWebhookSecret = writtenJson('secrets.tf.json').resource.oystehr_secret.STRIPE_WEBHOOK_SECRET;
+        expect(connectedWebhookSecret.value).toBe('whsec_connected');
+        const platformWebhookSecret =
+          writtenJson('secrets.tf.json').resource.oystehr_secret.STRIPE_PLATFORM_WEBHOOK_SECRET;
+        expect(platformWebhookSecret.value).toBe('whsec_platform');
+        expect(writtenJson('secrets.tf.json').resource.oystehr_secret.STRIPE_CLINICAL_WEBHOOK_SECRET.value).toBe(
+          'whsec_clinical'
+        );
+      });
+
+      const webhookSecretKeys = ['STRIPE_WEBHOOK_SECRET', 'STRIPE_CLINICAL_WEBHOOK_SECRET'];
+      it.each(webhookSecretKeys)('rejects invalid %s entries', async (key) => {
+        setupMocks({ [key]: [{ accountId: 'acct_123' }] });
+
+        await expect(generateOystehrResources(createTestArgs())).rejects.toThrow('signingSecret');
+        expect(fs.writeFile).not.toHaveBeenCalled();
+      });
+
+      it.each(webhookSecretKeys)('serializes %s account entries', async (key) => {
+        const entries = [
+          { name: 'Clinic "A"', accountId: 'acct_123', signingSecret: 'whsec_first' },
+          { accountId: 'acct_456', signingSecret: 'whsec_second' },
+          { name: 'Platform', signingSecret: 'whsec_platform' },
+        ];
+        setupMocks({ [key]: entries });
+
+        await generateOystehrResources(createTestArgs());
+
+        const secret = writtenJson('secrets.tf.json').resource.oystehr_secret[key];
+        expect(secret.name).toBe(key);
+        expect(typeof secret.value).toBe('string');
+        expect(JSON.parse(secret.value)).toEqual(entries);
+      });
+    });
+
+    describe('NIO billing integration guard', () => {
+      const minimalSpec = { 'schema-version': '2025-09-25', secrets: {} };
+      const setupMocks = (vars: VarsFile): void => {
+        mockFsForSuccess();
+        vi.mocked(fs.readdir).mockImplementation(async (dirPath) => {
+          if (String(dirPath) === '/config/oystehr') {
+            return [createMockDirent('spec.json', true)] as never;
+          }
+          return [];
+        });
+        vi.mocked(fs.stat).mockRejectedValue(createEnoentError());
+        vi.mocked(fs.readFile).mockImplementation(async (filePath) => {
+          const pathStr = String(filePath);
+          if (pathStr.endsWith('spec.json')) return JSON.stringify(minimalSpec);
+          if (pathStr.includes('.env/')) return JSON.stringify(vars);
+          throw new Error(`Unexpected file: ${pathStr}`);
+        });
+      };
+
+      beforeEach(() => {
+        featureFlags.customOrganizationsEnabled = true;
+      });
+
+      afterEach(() => {
+        featureFlags.customOrganizationsEnabled = false;
+      });
+
+      it.each(['ottehr', 'all'])('accepts BILLING_INTEGRATION=%s when the NIO flag is on', async (value) => {
+        setupMocks({ BILLING_INTEGRATION: value });
+
+        await expect(generateOystehrResources(createTestArgs())).resolves.toBeUndefined();
+      });
+
+      it('rejects candid-only BILLING_INTEGRATION when the NIO flag is on', async () => {
+        setupMocks({ BILLING_INTEGRATION: 'candid' });
+
+        await expect(generateOystehrResources(createTestArgs())).rejects.toThrow(
+          'Non-insurance organizations need Ottehr billing as the system of record'
+        );
+      });
+
+      it('rejects an unset BILLING_INTEGRATION when the NIO flag is on — the runtime default is Candid', async () => {
+        setupMocks({});
+
+        await expect(generateOystehrResources(createTestArgs())).rejects.toThrow(
+          "BILLING_INTEGRATION is '(unset)' for env 'local'"
+        );
+      });
+
+      it('leaves the flag-off world alone — unset BILLING_INTEGRATION still generates', async () => {
+        featureFlags.customOrganizationsEnabled = false;
+        setupMocks({});
+
+        await expect(generateOystehrResources(createTestArgs())).resolves.toBeUndefined();
+      });
+    });
+  });
+});
+
+describe('generateRuntimeSeedRemovals', () => {
+  const OUT = '/out/removed-locations.tf.json';
+  const SEED_DIR = '/config/runtime-seed';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFsForSuccess();
+  });
+
+  const writtenRemoved = (): { removed: { from: string; lifecycle: { destroy: unknown } }[] } =>
+    JSON.parse(vi.mocked(fs.writeFile).mock.calls[0][1] as string);
+
+  it('emits exactly one destroy=false removal block per seed resource key', async () => {
+    vi.mocked(fs.readdir).mockResolvedValue([createMockDirent('locations.json', true)] as never);
+    vi.mocked(fs.readFile).mockImplementation(async () =>
+      JSON.stringify({ fhirResources: { LOCATION_A: { resource: {} }, SCHEDULE_A: { resource: {} } } })
+    );
+
+    await generateRuntimeSeedRemovals({ runtimeSeedDir: SEED_DIR, outputFile: OUT });
+
+    expect(fs.writeFile).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fs.writeFile).mock.calls[0][0]).toBe(OUT);
+    const { removed } = writtenRemoved();
+    expect(removed).toEqual([
+      { from: 'oystehr_fhir_resource.LOCATION_A', lifecycle: { destroy: false } },
+      { from: 'oystehr_fhir_resource.SCHEDULE_A', lifecycle: { destroy: false } },
+    ]);
+    // The non-destructive guarantee: every block must be destroy=false.
+    expect(removed.every((b) => b.lifecycle.destroy === false)).toBe(true);
+    expect(fs.rm).not.toHaveBeenCalled();
+  });
+
+  it('aggregates keys across seed files and ignores non-json', async () => {
+    vi.mocked(fs.readdir).mockResolvedValue([
+      createMockDirent('a.json', true),
+      createMockDirent('b.json', true),
+      createMockDirent('README.md', true),
+    ] as never);
+    vi.mocked(fs.readFile).mockImplementation(async (p) => {
+      if (String(p).endsWith('a.json')) return JSON.stringify({ fhirResources: { A: {} } });
+      if (String(p).endsWith('b.json')) return JSON.stringify({ fhirResources: { B: {} } });
+      throw new Error(`unexpected read: ${String(p)}`);
+    });
+
+    await generateRuntimeSeedRemovals({ runtimeSeedDir: SEED_DIR, outputFile: OUT });
+
+    expect(writtenRemoved().removed.map((b) => b.from)).toEqual(['oystehr_fhir_resource.A', 'oystehr_fhir_resource.B']);
+  });
+
+  it('removes the output file (no stale blocks) when there are no seed resources', async () => {
+    vi.mocked(fs.readdir).mockResolvedValue([] as never);
+
+    await generateRuntimeSeedRemovals({ runtimeSeedDir: SEED_DIR, outputFile: OUT });
+
+    expect(fs.rm).toHaveBeenCalledWith(OUT, { force: true });
+    expect(fs.writeFile).not.toHaveBeenCalled();
+  });
+
+  it('treats a missing runtime-seed dir (ENOENT) as empty', async () => {
+    vi.mocked(fs.readdir).mockRejectedValue(Object.assign(new Error('nope'), { code: 'ENOENT' }));
+
+    await generateRuntimeSeedRemovals({ runtimeSeedDir: SEED_DIR, outputFile: OUT });
+
+    expect(fs.rm).toHaveBeenCalledWith(OUT, { force: true });
+    expect(fs.writeFile).not.toHaveBeenCalled();
   });
 });

@@ -4,7 +4,7 @@ import React, { useState } from 'react';
 import { CSSProperties } from 'react';
 import { AccordionCard } from 'src/components/AccordionCard';
 import { dataTestIds } from 'src/constants/data-test-ids';
-import { ExtendedMedicationDataForResponse } from 'utils';
+import { ExtendedMedicationDataForResponse } from 'utils/lib/types/api/medication-administration.types';
 import { Loader } from '../../../../shared/components/Loader';
 import { useMedicationAPI } from '../../../hooks/useMedicationOperations';
 import { MarTableRow } from './MarTableRow';
@@ -40,7 +40,12 @@ const sortByDateTimeCreated = (
   });
 };
 
-export const MarTable: React.FC = () => {
+interface MarTableProps {
+  onPendingMedicationClick?: (medicationId: string) => void;
+  onEditOrder?: (medicationId: string) => void;
+}
+
+export const MarTable: React.FC<MarTableProps> = ({ onPendingMedicationClick, onEditOrder }) => {
   const [isPendingCollapsed, setIsPendingCollapsed] = useState(false);
   const [isCompletedCollapsed, setIsCompletedCollapsed] = useState(false);
   const { medications, cancelledMedications, isLoading } = useMedicationAPI();
@@ -110,7 +115,13 @@ export const MarTable: React.FC = () => {
                   </TableHead>
                   <TableBody>
                     {pendingMedications.map((row) => (
-                      <MarTableRow key={row.id} medication={row} columnStyles={columnStyles} />
+                      <MarTableRow
+                        key={row.id}
+                        medication={row}
+                        columnStyles={columnStyles}
+                        onPendingMedicationClick={onPendingMedicationClick}
+                        onEditOrder={onEditOrder}
+                      />
                     ))}
                   </TableBody>
                 </Table>
@@ -144,7 +155,13 @@ export const MarTable: React.FC = () => {
                   </TableHead>
                   <TableBody>
                     {completedMedications.map((row) => (
-                      <MarTableRow key={row.id} medication={row} columnStyles={columnStyles} />
+                      <MarTableRow
+                        key={row.id}
+                        medication={row}
+                        columnStyles={columnStyles}
+                        onPendingMedicationClick={onPendingMedicationClick}
+                        onEditOrder={onEditOrder}
+                      />
                     ))}
                   </TableBody>
                 </Table>

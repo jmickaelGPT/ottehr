@@ -1,17 +1,16 @@
 import Oystehr from '@oystehr/sdk';
-import { captureException } from '@sentry/aws-serverless';
+import { captureException } from '@sentry/node-core/light';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Operation } from 'fast-json-patch';
 import { Appointment, QuestionnaireResponse, Task } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import {
-  isTelemedAppointment,
-  pageHarvestStrategy,
-  TASK_INPUT_TYPE_CODES,
-  TASK_INPUT_TYPE_SYSTEM,
-  TaskIndicator,
-} from 'utils';
-import { createOystehrClient, getAuth0Token, wrapHandler, ZambdaInput } from '../../../shared';
+import { isTelemedAppointment } from 'utils/lib/fhir/moduleIdentification';
+import { TASK_INPUT_TYPE_CODES, TASK_INPUT_TYPE_SYSTEM, TaskIndicator } from 'utils/lib/types/common';
+import { pageHarvestStrategy } from '../../../../../config-types/config/intake-paperwork';
+import { getAuth0Token } from '../../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { PatchPaperworkEffectInput, validatePatchInputs } from '../validateRequestParameters';
 
 // Lifting the token out of the handler function allows it to persist across warm lambda invocations.
@@ -26,11 +25,9 @@ export const index = wrapHandler('patch-paperwork', async (input: ZambdaInput): 
     console.log('already have token');
   }
 
-  const oystehr = createOystehrClient(token, secrets);
+  const oystehr = createClinicalOystehrClient(token, secrets);
 
   const effectInput = await validatePatchInputs(input, oystehr);
-
-  console.log('effect input', JSON.stringify(effectInput));
 
   const qr = await performEffect(effectInput, oystehr);
 

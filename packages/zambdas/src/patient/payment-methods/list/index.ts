@@ -2,16 +2,16 @@ import { APIGatewayProxyResult } from 'aws-lambda';
 import { Account } from 'fhir/r4b';
 import { DateTime } from 'luxon';
 import Stripe from 'stripe';
-import {
-  checkForStripeCustomerDeletedError,
-  CreditCardInfo,
-  FHIR_RESOURCE_NOT_FOUND,
-  getStripeAccountForAppointmentOrEncounter,
-  getStripeCustomerIdFromAccount,
-  ListPaymentMethodsZambdaOutput,
-} from 'utils';
+import { getStripeCustomerIdFromAccount } from 'utils/lib/fhir/helpers';
+import { getStripeAccountForAppointmentOrEncounter } from 'utils/lib/fhir/payments';
+import { CreditCardInfo, ListPaymentMethodsZambdaOutput } from 'utils/lib/types/data/payment/payment-method-types';
+import { checkForStripeCustomerDeletedError, FHIR_RESOURCE_NOT_FOUND } from 'utils/lib/types/errors';
 import { getAccountAndCoverageResourcesForPatient } from '../../../ehr/shared/harvest';
-import { createOystehrClient, getAuth0Token, lambdaResponse, wrapHandler, ZambdaInput } from '../../../shared';
+import { getAuth0Token } from '../../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { lambdaResponse } from '../../../shared/lambda';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { getStripeClient, validateUserHasAccessToPatientAccount } from '../helpers';
 import { validateRequestParameters } from './validateRequestParameters';
 
@@ -22,7 +22,6 @@ export const index = wrapHandler('payment-list', async (input: ZambdaInput): Pro
   let validatedParameters: ReturnType<typeof validateRequestParameters>;
   try {
     validatedParameters = validateRequestParameters(input);
-    console.log(JSON.stringify(validatedParameters, null, 4));
   } catch (error: any) {
     console.log(error);
     return lambdaResponse(400, { message: error.message });
@@ -39,7 +38,7 @@ export const index = wrapHandler('payment-list', async (input: ZambdaInput): Pro
     console.log('already have a token, no need to update');
   }
 
-  const oystehrClient = createOystehrClient(oystehrM2MClientToken, secrets);
+  const oystehrClient = createClinicalOystehrClient(oystehrM2MClientToken, secrets);
   void (await validateUserHasAccessToPatientAccount(
     { beneficiaryPatientId, secrets, zambdaInput: input },
     oystehrClient

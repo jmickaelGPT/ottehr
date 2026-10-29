@@ -14,8 +14,9 @@
 
 import { expect, test } from '@playwright/test';
 import { Location, Schedule } from 'fhir/r4b';
-import { isTelemedEnabled } from 'test-utils';
-import { CanonicalUrl, ServiceMode } from 'utils';
+import { isTelemedEnabled } from 'test-utils/lib/telemed-config';
+import { FEATURE_FLAGS_CONFIG } from 'utils/lib/ottehr-config/feature-flags';
+import { CanonicalUrl, ServiceMode } from 'utils/lib/types/common';
 import { executeBookingScenario, generateBookingTestScenarios } from '../utils/booking/BookingTestFactory';
 import {
   // P1: Critical User Journeys
@@ -76,6 +77,16 @@ test.describe('Complete booking flows', () => {
     walkinLocation = walkinResult.location;
     _walkinSchedule = walkinResult.schedule;
     console.log(`✓ Created walk-in location: ${walkinLocation.name}`);
+
+    // Seed an occupational-medicine employer. In custom-organizations mode the picker lists
+    // billing-app NIOs (seeded per env by config/oystehr/env/<env>/nio-organizations.json), so a
+    // legacy clinical Organization would never appear in the dropdown.
+    if (FEATURE_FLAGS_CONFIG.customOrganizationsEnabled) {
+      console.log('⊘ Skipped legacy occupational-medicine employer - custom organizations are enabled');
+    } else {
+      const occMedEmployer = await testLocationManager.ensureOccMedEmployer();
+      console.log(`✓ Created occupational-medicine employer: ${occMedEmployer.name}`);
+    }
 
     // Create prebook in-person test location (24/7, 8 slots per hour)
     const prebookInPersonResult = await testLocationManager.ensurePrebookInPersonLocationWithSlots();

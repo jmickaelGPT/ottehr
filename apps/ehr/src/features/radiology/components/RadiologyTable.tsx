@@ -13,9 +13,10 @@ import {
 } from '@mui/material';
 import { ReactElement } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { GetRadiologyOrderListZambdaOrder } from 'utils';
+import { GetRadiologyOrderListZambdaOrder } from 'utils/lib/types/api/radiology';
 import {
   FollowUpAppointmentLookup,
+  getRadiologyExternalOrderDetailsUrl,
   getRadiologyOrderEditUrl,
   resolveOrderRoutingFromFollowUpLookup,
 } from '../../visits/in-person/routing/helpers';
@@ -34,6 +35,7 @@ type RadiologyTableProps = {
   titleText?: string;
   onCreateOrder?: () => void;
   followUpAppointmentLookup?: FollowUpAppointmentLookup;
+  onRowClick?: (order: GetRadiologyOrderListZambdaOrder) => void;
 };
 
 export const RadiologyTable = ({
@@ -44,6 +46,7 @@ export const RadiologyTable = ({
   titleText,
   onCreateOrder,
   followUpAppointmentLookup,
+  onRowClick: onRowClickOverride,
 }: RadiologyTableProps): ReactElement => {
   const navigateTo = useNavigate();
   const { id: appointmentIdFromUrl } = useParams();
@@ -65,18 +68,27 @@ export const RadiologyTable = ({
     encounterIds: encounterId,
   });
 
+  const buildDetailsUrl = (appointmentId: string, order: GetRadiologyOrderListZambdaOrder): string =>
+    order.external
+      ? getRadiologyExternalOrderDetailsUrl(appointmentId, order.serviceRequestId)
+      : getRadiologyOrderEditUrl(appointmentId, order.serviceRequestId);
+
   const onRowClick = (order: GetRadiologyOrderListZambdaOrder): void => {
+    if (onRowClickOverride) {
+      onRowClickOverride(order);
+      return;
+    }
     if (followUpAppointmentLookup) {
       const { appointmentId, encounterIdQuery } = resolveOrderRoutingFromFollowUpLookup(
         order.appointmentId,
         followUpAppointmentLookup
       );
-      const url = getRadiologyOrderEditUrl(appointmentId, order.serviceRequestId);
+      const url = buildDetailsUrl(appointmentId, order);
       navigateTo(encounterIdQuery ? `${url}?encounterId=${encounterIdQuery}` : url);
       return;
     }
     const appointmentId = appointmentIdFromUrl || order.appointmentId;
-    const url = getRadiologyOrderEditUrl(appointmentId, order.serviceRequestId);
+    const url = buildDetailsUrl(appointmentId, order);
     navigateTo(encounterIdParam ? `${url}?encounterId=${encounterIdParam}` : url);
   };
 
@@ -146,14 +158,13 @@ export const RadiologyTable = ({
   };
 
   return (
-    <Paper
+    <Box
       sx={{
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
         gap: 3,
         mt: 2,
-        p: 3,
         position: 'relative',
       }}
     >
@@ -182,7 +193,7 @@ export const RadiologyTable = ({
             )}
           </Box>
         ) : (
-          <TableContainer sx={{ border: '1px solid #e0e0e0' }}>
+          <TableContainer sx={{ border: '1px solid #e0e0e0', backgroundColor: 'background.paper' }}>
             <Table>
               <TableHead>
                 <TableRow>
@@ -242,6 +253,6 @@ export const RadiologyTable = ({
       </Box>
 
       {DeleteOrderDialog}
-    </Paper>
+    </Box>
   );
 };

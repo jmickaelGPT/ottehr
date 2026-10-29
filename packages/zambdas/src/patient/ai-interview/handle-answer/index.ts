@@ -2,23 +2,15 @@ import { BaseMessageLike } from '@langchain/core/messages';
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Questionnaire, QuestionnaireResponse } from 'fhir/r4b';
-import {
-  createOystehrClient,
-  getSecret,
-  HandleAnswerInput,
-  QUESTIONNAIRE_RESPONSE_INVALID_CUSTOM_ERROR,
-  Secrets,
-  SecretsKeys,
-} from 'utils';
-import {
-  assertDefined,
-  getAuth0Token,
-  validateJsonBody,
-  validateString,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+import { createOystehrClient } from 'utils/lib/helpers/helpers';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { HandleAnswerInput } from 'utils/lib/types/api/ai-interview.types';
+import { QUESTIONNAIRE_RESPONSE_INVALID_CUSTOM_ERROR } from 'utils/lib/types/errors';
 import { invokeChatbot } from '../../../shared/ai';
+import { getAuth0Token } from '../../../shared/getAuth0Token';
+import { assertDefined, validateJsonBody, validateString } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { INTERVIEW_COMPLETED } from '../start';
 
 const ZAMBDA_NAME = 'handle-answer';
@@ -30,13 +22,20 @@ interface Input extends HandleAnswerInput {
 }
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`Input: ${JSON.stringify(input)}`);
+  const startedAt = Date.now();
+  const logStep = (step: string): void => console.log(`[${ZAMBDA_NAME}] ${step} done at ${Date.now() - startedAt}ms`);
+
   const { questionnaireResponseId, linkId, answer, secrets } = validateInput(input);
+  console.log(`[${ZAMBDA_NAME}] start questionnaireResponseId=${questionnaireResponseId} linkId=${linkId}`);
+
   const oystehr = await createOystehr(secrets);
+  logStep('oystehr client setup');
+
   const questionnaireResponse = await oystehr.fhir.get<QuestionnaireResponse>({
     resourceType: 'QuestionnaireResponse',
     id: questionnaireResponseId,
   });
+  logStep('QuestionnaireResponse fetch');
   if (questionnaireResponse.status === 'completed') {
     throw QUESTIONNAIRE_RESPONSE_INVALID_CUSTOM_ERROR('QuestionnaireResponse is already completed.');
   }
@@ -52,8 +51,10 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   if (chatbotInput == null || chatbotInput.length === 0) {
     throw new Error(`Invalid chatbot input "${chatbotInput}"`);
   }
-  console.log(`chatbotInput: ${JSON.stringify(chatbotInput)}`);
+
   const chatbotResponse = (await invokeChatbot(chatbotInput, secrets)).content.toString();
+  logStep('chatbot call');
+
   (questionnaireResponse.contained?.[0] as Questionnaire).item?.push({
     linkId: (parseInt(linkId) + 1).toString(),
     text: chatbotResponse,
@@ -62,9 +63,12 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   if (chatbotResponse.includes(INTERVIEW_COMPLETED)) {
     questionnaireResponse.status = 'completed';
   }
+  const updated = await oystehr.fhir.update(questionnaireResponse);
+  logStep('QuestionnaireResponse update');
+
   return {
     statusCode: 200,
-    body: JSON.stringify(await oystehr.fhir.update(questionnaireResponse)),
+    body: JSON.stringify(updated),
   };
 });
 

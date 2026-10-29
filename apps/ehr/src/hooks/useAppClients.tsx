@@ -1,6 +1,7 @@
 import Oystehr from '@oystehr/sdk';
 import { useEffect } from 'react';
-import { getSelectors } from 'utils';
+import { createClinicalOystehrClient } from 'ui-components/lib/utils/oystehr';
+import { getSelectors } from 'utils/lib/store';
 import { create } from 'zustand';
 import { useAuthToken } from './useAuthToken';
 
@@ -19,35 +20,17 @@ export function useApiClients(): ApiClientsState {
   const { oystehr, oystehrZambda } = getSelectors(useApiClientsStore, ['oystehr', 'oystehrZambda']);
 
   useEffect(() => {
-    console.log('[useApiClients] FHIR Effect triggered:', {
-      hasToken: !!token,
-      hasOystehr: !!oystehr,
-      tokenMatch: oystehr?.config.accessToken === token,
-    });
-    
-    if (!oystehr || oystehr.config.accessToken !== token) {
-      console.log('[useApiClients] Creating/Updating FHIR Oystehr client with token:', {
-        tokenPreview: token?.substring(0, 20) + '...',
-        fhirApiUrl: import.meta.env.VITE_APP_FHIR_API_URL,
-      });
+    if (token && (!oystehr || oystehr.config.accessToken !== token)) {
       useApiClientsStore.setState({
-        oystehr: new Oystehr({
-          accessToken: token,
-          fhirApiUrl: import.meta.env.VITE_APP_FHIR_API_URL,
-          projectApiUrl: import.meta.env.VITE_APP_PROJECT_API_URL,
-          projectId: import.meta.env.VITE_APP_PROJECT_ID,
-        }),
+        oystehr: createClinicalOystehrClient(token),
       });
     }
   }, [oystehr, token]);
 
   useEffect(() => {
-    console.log('[useApiClients] Zambda Effect triggered:', {
-      hasToken: !!token,
-      hasOystehrZambda: !!oystehrZambda,
-      tokenMatch: oystehrZambda?.config.accessToken === token,
-    });
-    
+    if (!token) {
+      return;
+    }
     if (!oystehrZambda || oystehrZambda.config.accessToken !== token) {
       console.log('[useApiClients] Creating/Updating Zambda Oystehr client with token:', {
         tokenPreview: token?.substring(0, 20) + '...',

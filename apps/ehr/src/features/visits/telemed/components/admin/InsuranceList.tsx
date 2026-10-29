@@ -16,11 +16,11 @@ import {
 import { Organization } from 'fhir/r4b';
 import React, { ReactElement } from 'react';
 import { Link } from 'react-router-dom';
-import { INSURANCES_URL } from 'src/App';
 import Loading from 'src/components/Loading';
 import { INSURANCE_ROWS_PER_PAGE } from 'src/constants';
 import { dataTestIds } from 'src/constants/data-test-ids';
-import { getPayerId } from 'utils';
+import { INSURANCES_URL } from 'src/features/admin/adminRoutes';
+import { getPayerId } from 'utils/lib/helpers/helpers';
 import { useInsurancesQuery } from './admin.queries';
 
 export default function InsuranceList(): ReactElement {

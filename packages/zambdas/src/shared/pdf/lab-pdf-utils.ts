@@ -5,17 +5,13 @@ import { Operation } from 'fast-json-patch';
 import { DocumentReference, List, ListEntry, Meta } from 'fhir/r4b';
 import { DateTime } from 'luxon';
 import { Color, PDFFont, PDFImage, StandardFonts } from 'pdf-lib';
-import {
-  addOperation,
-  BUCKET_NAMES,
-  FOLDERS_CONFIG,
-  getSecret,
-  LAB_DOC_REF_DETAIL_TAGS,
-  LabType,
-  sanitizeStringForFhirCode,
-  Secrets,
-  SecretsKeys,
-} from 'utils';
+import { BUCKET_NAMES, FOLDERS_CONFIG } from 'utils/lib/fhir/constants';
+import { sanitizeStringForFhirCode } from 'utils/lib/fhir/helpers';
+import { PATIENT_FOLDERS_CODE } from 'utils/lib/fhir/list';
+import { addOperation } from 'utils/lib/helpers/operations';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { LAB_DOC_REF_DETAIL_TAGS } from 'utils/lib/types/data/labs/labs.constants';
+import { LabType } from 'utils/lib/types/data/labs/labs.types';
 import { sendErrors } from '../errors';
 import {
   HEADER_FONT_SIZE,
@@ -306,7 +302,7 @@ export const getLabListResource = async (
           },
           {
             name: 'code',
-            value: 'patient-docs-folder',
+            value: PATIENT_FOLDERS_CODE,
           },
           {
             name: 'identifier',

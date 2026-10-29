@@ -14,11 +14,11 @@ import { alpha, styled, useTheme } from '@mui/material/styles';
 import { FC, useCallback } from 'react';
 import { Controller, useFormContext } from 'react-hook-form';
 import { useTranslation } from 'react-i18next';
-import { getInputTypes } from 'utils';
-import { useIntakeThemeContext } from '../../contexts';
+import { useIntakeThemeContext } from 'src/contexts/IntakeThemeContext';
+import { InputMask } from 'ui-components/lib/components/InputMask';
+import { LightToolTip } from 'ui-components/lib/components/paperwork/form-components/LightToolTip';
+import { getInputTypes } from 'utils/lib/validation/helper';
 import { InputHelperText } from './InputHelperText';
-import InputMask from './InputMask';
-import { LightToolTip } from './LightToolTip';
 
 type FormInputProps = {
   name: string;

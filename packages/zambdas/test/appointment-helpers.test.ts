@@ -1,7 +1,7 @@
 import { Appointment } from 'fhir/r4b';
-import { OTTEHR_MODULE } from 'utils';
+import { OTTEHR_MODULE } from 'utils/lib/fhir/moduleIdentification';
+import { isOnDemandVirtualAppointment } from 'utils/lib/utils/visitUtils';
 import { describe, expect, test } from 'vitest';
-import { isOnDemandVirtualAppointment } from '../src/shared';
 
 const makeAppointment = (module: OTTEHR_MODULE, appointmentTypeText?: string): Appointment => ({
   resourceType: 'Appointment',

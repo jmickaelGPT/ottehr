@@ -3,9 +3,11 @@ import { Box, Chip, MenuItem, Popover, Stack, Typography } from '@mui/material';
 import React, { useState } from 'react';
 import { dataTestIds } from 'src/constants/data-test-ids';
 import styled from 'styled-components';
-import { MedicationOrderStatusesType, medicationStatusDisplayLabelMap } from 'utils';
-import { ExtendedMedicationDataForResponse } from 'utils';
+import { medicationStatusDisplayLabelMap } from 'utils/lib/fhir/medication-administration';
+import { MedicationOrderStatusesType } from 'utils/lib/types/api/medication-administration.types';
+import { ExtendedMedicationDataForResponse } from 'utils/lib/types/api/medication-administration.types';
 import { useMedicationManagement } from '../../../hooks/useMedicationManagement';
+import { formatMedicationAdministrationReason } from '../util';
 
 interface MedicationStatusChipProps {
   medication?: ExtendedMedicationDataForResponse;
@@ -84,11 +86,8 @@ export const MedicationStatusChip: React.FC<MedicationStatusChipProps> = ({
   };
 
   const availableStatuses = onClick ? getAvailableStatuses(medication?.status) : [];
-
-  const formatReason = (reason: string): string => {
-    if (!reason) return '';
-    return reason.replace(/-/g, ' ');
-  };
+  const reasonText =
+    status === 'cancelled' ? '' : formatMedicationAdministrationReason(medication?.reason, medication?.otherReason);
 
   return (
     <>
@@ -110,19 +109,24 @@ export const MedicationStatusChip: React.FC<MedicationStatusChipProps> = ({
             width: 'fit-content',
           }}
         />
-        {medication?.reason && (
+        {reasonText && (
           <Typography
             data-testid={dataTestIds.inHouseMedicationsPage.marTable.reasonCell}
             variant="caption"
+            title={reasonText}
             sx={{
               mt: 0.5,
               color: 'text.secondary',
               fontSize: '0.75rem',
               lineHeight: 1.2,
+              display: 'block',
               whiteSpace: 'nowrap',
+              maxWidth: '160px',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
             }}
           >
-            {formatReason(medication.reason)}
+            {reasonText}
           </Typography>
         )}
       </Stack>

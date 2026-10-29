@@ -4,14 +4,14 @@ import { diff, IChange } from 'json-diff-ts';
 import { DateTime } from 'luxon';
 import {
   CRITICAL_CHANGE_SYSTEM,
-  FhirAppointmentType,
-  formatDateForDisplay,
-  formatPhoneNumberDisplay,
-  getCriticalUpdateTagOp,
-  getFullName,
-  GetVisitFaxHistoryOutput,
+  FOLLOWUP_CONVERSION_TAG_SYSTEM,
   STATUS_UPDATE_TAG_SYSTEM,
-} from 'utils';
+} from 'utils/lib/fhir/helpers';
+import { getFullName } from 'utils/lib/fhir/patient';
+import { formatPhoneNumberDisplay } from 'utils/lib/helpers/helpers';
+import { GetVisitFaxHistoryOutput } from 'utils/lib/types/api/visit-details/visit-details.types';
+import { FhirAppointmentType } from 'utils/lib/types/common';
+import { formatDateForDisplay } from 'utils/lib/utils/dateUtils';
 import { HOP_QUEUE_URI } from '../constants';
 import { appointmentTypeLabels } from '../types/types';
 
@@ -25,6 +25,7 @@ export enum ActivityName {
   paperworkStarted = 'Paperwork started',
   statusChange = 'Status Update',
   faxSent = 'Fax Sent',
+  convertedToFollowUp = 'Converted to Follow-up',
 }
 export interface ActivityLogData {
   activityDateTimeISO: string | undefined;
@@ -189,6 +190,15 @@ export const formatActivityLogs = ({
             };
             logs.push(movedToNextLog);
           }
+          const convertedToFollowUp = tagChanges.find((change) => change.key === FOLLOWUP_CONVERSION_TAG_SYSTEM);
+          if (convertedToFollowUp) {
+            logs.push({
+              activityName: ActivityName.convertedToFollowUp,
+              activityDateTimeISO: curApptHistory.meta?.lastUpdated,
+              activityDateTime: formatActivityDateTime(curApptHistory.meta?.lastUpdated || '', timezone),
+              activityBy: activityBy ? activityBy : 'n/a',
+            });
+          }
           const statusUpdate = tagChanges.find((change) => change.key === STATUS_UPDATE_TAG_SYSTEM); // todo update to const
           if (statusUpdate) {
             const statusUpdateLog: ActivityLogData = {
@@ -212,7 +222,7 @@ export const formatActivityLogs = ({
       activityDateTimeISO: fax.created,
       activityDateTime: formatActivityDateTime(fax.created || '', timezone),
       activityBy: fax.sender.display || 'n/a',
-      activityLink: `/admin/employee/${fax.sender.id}`,
+      activityLink: fax.sender.id ? `/admin/employee/${fax.sender.id}` : undefined,
     });
   });
 
@@ -332,5 +342,3 @@ export const formatNotesHistory = (timezone: string, appointmentHistory: Appoint
   }
   return notes;
 };
-
-export { CRITICAL_CHANGE_SYSTEM, getCriticalUpdateTagOp };

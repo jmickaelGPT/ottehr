@@ -1,6 +1,7 @@
 import { Locator, Page, Response } from '@playwright/test';
 import { Practitioner } from 'fhir/r4b';
-import { DeleteChartDataResponse, GetChartDataResponse, SaveChartDataResponse } from 'utils';
+import { DeleteChartDataResponse } from 'utils/lib/types/api/chart-data/delete-chart-data.types';
+import { SaveChartDataResponse } from 'utils/lib/types/api/chart-data/save-chart-data.types';
 
 type ResponsePredicate<T extends object = object> = (json: T) => boolean;
 
@@ -30,19 +31,6 @@ export async function waitForResponseWithData<T extends object = object>(
       response.json().then((json) => (predicate ? predicate(json.output || json) : true)),
     { timeout }
   );
-}
-
-/**
- * Helper function to wait for Get chart data response
- * @param page Playwright page object
- * @param predicate Function to verify chart data
- * @returns Promise that resolves when matching chart data response is found
- */
-export async function waitForGetChartDataResponse(
-  page: Page,
-  predicate?: ResponsePredicate<GetChartDataResponse>
-): Promise<Response> {
-  return waitForResponseWithData(page, '/get-chart-data', predicate);
 }
 
 /**

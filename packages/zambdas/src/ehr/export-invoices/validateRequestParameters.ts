@@ -3,10 +3,10 @@ import {
   ExportInvoicesTasksCsvZambdaInputSchema,
   GetExportInvoicesCsvStatusValidatedInput,
   GetExportInvoicesCsvStatusZambdaInputSchema,
-  MISSING_REQUEST_BODY,
-  MISSING_REQUEST_SECRETS,
-} from 'utils';
-import { safeValidate, ZambdaInput } from '../../shared';
+} from 'utils/lib/types/api/invoicing.types';
+import { MISSING_REQUEST_BODY, MISSING_REQUEST_SECRETS } from 'utils/lib/types/errors';
+import { ZambdaInput } from '../../shared/types/common';
+import { safeJsonParse, safeValidate } from '../../shared/validation';
 
 export type ValidatedParams = ExportInvoicesTasksCsvValidatedInput | GetExportInvoicesCsvStatusValidatedInput;
 
@@ -14,7 +14,7 @@ export function validateRequestParameters(input: ZambdaInput): ValidatedParams {
   if (!input.body) throw MISSING_REQUEST_BODY;
   if (!input.secrets) throw MISSING_REQUEST_SECRETS;
 
-  const parsedJSON = JSON.parse(input.body) as Record<string, unknown>;
+  const parsedJSON = safeJsonParse(input.body) as Record<string, unknown>;
 
   // If taskId is present, this is a status check request
   if ('taskId' in parsedJSON && parsedJSON.taskId) {

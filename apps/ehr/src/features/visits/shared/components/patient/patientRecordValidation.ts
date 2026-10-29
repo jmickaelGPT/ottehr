@@ -1,7 +1,10 @@
-import { FormFieldsDisplayItem, FormFieldsInputItem } from 'config-types';
+import { FormFieldsDisplayItem, FormFieldsInputItem } from 'config-types/config/form-fields';
 import { DateTime } from 'luxon';
 import { FieldError, RegisterOptions } from 'react-hook-form';
-import { evaluateFieldTriggers, PATIENT_RECORD_CONFIG, REQUIRED_FIELD_ERROR_MESSAGE, zipRegex } from 'utils';
+import { evaluateFieldTriggers } from 'utils/lib/config-helpers/patient-record';
+import { PATIENT_RECORD_CONFIG } from 'utils/lib/ottehr-config/patient-record';
+import { REQUIRED_FIELD_ERROR_MESSAGE } from 'utils/lib/validation/constants';
+import { ssnRegex, zipRegex } from 'utils/lib/validation/regex';
 
 type ValidationResolver = (values: any) => Promise<{ values: any; errors: Record<string, FieldError> }>;
 
@@ -65,7 +68,7 @@ export const generateFieldValidationRules = (
 
   if (item.dataType === 'SSN') {
     rules.pattern = {
-      value: /^\d{3}-\d{2}-\d{4}$/,
+      value: ssnRegex,
       message: 'Please enter a valid SSN',
     };
   }
@@ -182,6 +185,12 @@ export const createDynamicValidationResolver = (options?: {
       // Disabled fields with disabledDisplay: 'disabled' should still be validated
       // because they're visible and auto-populated (e.g., policy holder fields when relationship is "Self")
       if (triggeredEffects.enabled === false && item.disabledDisplay === 'hidden') {
+        continue;
+      }
+
+      // Skip validation for fields excluded from submission by an active filter trigger
+      // (e.g., responsible-party-email when no-email is checked)
+      if (triggeredEffects.filtered) {
         continue;
       }
 

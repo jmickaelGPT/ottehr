@@ -1,28 +1,31 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Appointment, Bundle, BundleEntry, DocumentReference, Encounter, Patient } from 'fhir/r4b';
+import { getPaymentVariantFromEncounter, PaymentVariant } from 'utils/lib/fhir/encounter';
+import { getPatchBinary } from 'utils/lib/fhir/resourcePatch';
+import { LOINC_SYSTEM } from 'utils/lib/fhir/vitals';
+import { getPresignedURL } from 'utils/lib/helpers/presigned-file-url/helpers';
+import { Secrets } from 'utils/lib/secrets';
+import { DocumentInfo, DocumentType, VisitDocuments } from 'utils/lib/types/data/documents';
 import {
-  DocumentInfo,
-  DocumentType,
-  FHIR_RESOURCE_NOT_FOUND,
-  getPatchBinary,
-  getPaymentVariantFromEncounter,
-  getPresignedURL,
   INSURANCE_CARD_CODE,
-  INVALID_RESOURCE_ID_ERROR,
-  isValidUUID,
-  LOINC_SYSTEM,
-  MISSING_REQUEST_BODY,
-  MISSING_REQUIRED_PARAMETERS,
   PAPERWORK_CONSENT_CODE_UNIQUE,
   PAPERWORK_CONSENT_CODING_LOINC,
-  PaymentVariant,
   PHOTO_ID_CARD_CODE,
   PRIVACY_POLICY_CODE,
-  Secrets,
-  VisitDocuments,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../shared';
+} from 'utils/lib/types/data/paperwork/paperwork.constants';
+import {
+  FHIR_RESOURCE_NOT_FOUND,
+  INVALID_RESOURCE_ID_ERROR,
+  MISSING_REQUEST_BODY,
+  MISSING_REQUIRED_PARAMETERS,
+} from 'utils/lib/types/errors';
+import { isValidUUID } from 'utils/lib/validation/helper';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { assertZ3UrlInProject } from '../../../shared/presigned-file-urls/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 
 const ZAMBDA_NAME = 'get-visit-files';
 
@@ -32,13 +35,12 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   console.group('validateRequestParameters');
   const validatedParameters = validateRequestParameters(input);
   console.groupEnd();
-  console.debug('validateRequestParameters success', JSON.stringify(validatedParameters));
   const { secrets, userToken } = validatedParameters;
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
   const effectInput = await complexValidation(validatedParameters, oystehr);
 
-  const files = await getFileResources(effectInput, oystehr, userToken);
+  const files = await getFileResources(effectInput, oystehr, userToken, secrets);
 
   return {
     statusCode: 200,
@@ -50,7 +52,12 @@ interface GetFilesInput {
   patientId: string;
   appointmentId: string;
 }
-async function getFileResources(input: GetFilesInput, oystehr: Oystehr, userToken: string): Promise<VisitDocuments> {
+async function getFileResources(
+  input: GetFilesInput,
+  oystehr: Oystehr,
+  userToken: string,
+  secrets: Secrets | null
+): Promise<VisitDocuments> {
   const { patientId, appointmentId } = input;
   const documents: VisitDocuments = {
     photoIdCards: [],
@@ -90,7 +97,14 @@ async function getFileResources(input: GetFilesInput, oystehr: Oystehr, userToke
             continue;
           }
 
-          const presignedUrl = await getPresignedURL(z3Url, userToken);
+          let presignedUrl: string | undefined;
+          try {
+            assertZ3UrlInProject(z3Url, secrets);
+            presignedUrl = await getPresignedURL(z3Url, userToken);
+          } catch (error) {
+            console.error(`[${ZAMBDA_NAME}] skipping document with un-presignable url [${z3Url}]:`, error);
+            continue;
+          }
 
           if (presignedUrl) {
             z3Documents.push({
@@ -281,7 +295,6 @@ const validateRequestParameters = (input: ZambdaInput): Input => {
     throw new Error('user token unexpectedly missing');
   }
 
-  console.log('input', JSON.stringify(input, null, 2));
   const { secrets } = input;
   const { appointmentId } = JSON.parse(input.body);
 

@@ -2,6 +2,7 @@ import Oystehr, { BatchInputPostRequest } from '@oystehr/sdk';
 import { randomUUID } from 'crypto';
 import { Location, Slot } from 'fhir/r4b';
 import { DateTime } from 'luxon';
+import { SlotServiceCategory } from 'utils/lib/fhir/constants';
 import {
   getAllSlotsAsCapacityMap,
   getAvailableSlots,
@@ -12,10 +13,10 @@ import {
   GetSlotsInWindowInput,
   getTimezone,
   HourOfDay,
-  SlotServiceCategory,
-} from 'utils';
+} from 'utils/lib/utils/scheduleUtils';
 import { assert, vi } from 'vitest';
-import { getAuth0Token } from '../../src/shared';
+import { getAuth0Token } from '../../src/shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../src/shared/helpers';
 import { DEFAULT_TEST_TIMEOUT } from '../appointment-validation.test';
 import { SECRETS } from '../data/secrets';
 import {
@@ -45,15 +46,11 @@ describe('busy slots tests', () => {
       AUTH0_AUDIENCE: AUTH0_AUDIENCE,
     });
 
-    oystehr = new Oystehr({
-      accessToken: token,
-      fhirApiUrl: FHIR_API,
-      projectApiUrl: PROJECT_API,
-      services: {
-        zambdaApiUrl: PROJECT_API,
-      },
+    oystehr = createClinicalOystehrClient(token, SECRETS, {
+      services: { fhirApiUrl: FHIR_API, projectApiUrl: PROJECT_API, zambdaApiUrl: PROJECT_API },
     });
   });
+
   afterAll(async () => {
     if (!oystehr || !processId) {
       throw new Error('oystehr or processId is null! could not clean up!');

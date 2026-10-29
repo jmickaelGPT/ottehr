@@ -1,7 +1,29 @@
-import { mapVitalsToDisplay, NOTE_TYPE, VitalFieldNames } from 'utils';
-import { drawBlockHeader, drawRegularText } from '../../helpers/render';
+import { mapVitalsToDisplay } from 'utils/lib/helpers/visit-note/map-vitals-to-display.helper';
+import { VitalFieldNames } from 'utils/lib/types/api/chart-data/chart-data.constants';
+import { NOTE_TYPE } from 'utils/lib/types/api/chart-data/chart-data.types';
+import { drawBlockHeader } from '../../helpers/render/blockHeader';
+import { drawRegularText } from '../../helpers/render/regularText';
 import { createConfiguredSection, DataComposer } from '../../pdf-common';
 import { EncounterInfo, PdfSection, ProgressNoteVisitDataInput, Vitals } from '../../types';
+
+/**
+ * Display label for each vital, plus the free-text notes bucket that shares the `vitals` object.
+ * Shared by the PDF renderer and the plain-text serialization used for the AI note review, so the
+ * two can never drift apart.
+ */
+export const VITAL_LABELS: { [value in VitalFieldNames]: string } & { notes: string } = {
+  [VitalFieldNames.VitalTemperature]: 'Temperature',
+  [VitalFieldNames.VitalHeartbeat]: 'Heartbeat',
+  [VitalFieldNames.VitalRespirationRate]: 'Respiration rate',
+  [VitalFieldNames.VitalBloodPressure]: 'Blood pressure',
+  [VitalFieldNames.VitalOxygenSaturation]: 'Oxygen saturation',
+  [VitalFieldNames.VitalWeight]: 'Weight',
+  [VitalFieldNames.VitalHeight]: 'Height',
+  [VitalFieldNames.VitalBMI]: 'BMI',
+  [VitalFieldNames.VitalVision]: 'Vision',
+  [VitalFieldNames.VitalLastMenstrualPeriod]: 'Last Menstrual Period',
+  notes: 'Vitals notes',
+};
 
 export const composeVitals: DataComposer<ProgressNoteVisitDataInput, Vitals> = ({
   allChartData,
@@ -52,18 +74,7 @@ export const createVitalsSection = <TData extends { encounter?: EncounterInfo; v
       return hasVitalsValues || hasNotes;
     },
     render: (client, data, styles) => {
-      const vitalLabelMapper: { [value in VitalFieldNames]: string } & { notes: string } = {
-        [VitalFieldNames.VitalTemperature]: 'Temperature',
-        [VitalFieldNames.VitalHeartbeat]: 'Heartbeat',
-        [VitalFieldNames.VitalRespirationRate]: 'Respiration rate',
-        [VitalFieldNames.VitalBloodPressure]: 'Blood pressure',
-        [VitalFieldNames.VitalOxygenSaturation]: 'Oxygen saturation',
-        [VitalFieldNames.VitalWeight]: 'Weight',
-        [VitalFieldNames.VitalHeight]: 'Height',
-        [VitalFieldNames.VitalVision]: 'Vision',
-        [VitalFieldNames.VitalLastMenstrualPeriod]: 'Last Menstrual Period',
-        notes: 'Vitals notes',
-      };
+      const vitalLabelMapper = VITAL_LABELS;
 
       Object.keys(vitalLabelMapper)
         .filter((name) => data.vitals?.[name as VitalFieldNames] && data.vitals?.[name as VitalFieldNames]!.length > 0)
@@ -75,7 +86,10 @@ export const createVitalsSection = <TData extends { encounter?: EncounterInfo; v
             styles.textStyles.blockSubHeader
           );
           data.vitals?.[vitalName as VitalFieldNames]?.forEach((record) => {
-            drawRegularText(client, styles, record);
+            // DOT vision screening records are multi-line (MCSA-5875 layout); render each line separately.
+            record.split('\n').forEach((line) => {
+              drawRegularText(client, styles, line);
+            });
           });
         });
 

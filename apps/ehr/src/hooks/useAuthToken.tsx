@@ -2,32 +2,50 @@ import { useAuth0 } from '@auth0/auth0-react';
 import { useEffect, useState } from 'react';
 
 let _token: string | undefined = undefined;
+let _tokenPromise: Promise<string> | undefined = undefined;
 
 export function useAuthToken(): string | undefined {
   const { isAuthenticated, getAccessTokenSilently } = useAuth0();
   const [token, setToken] = useState<string | undefined>(_token);
 
   useEffect(() => {
-    console.log('[useAuthToken] Effect triggered:', { isAuthenticated, hasToken: !!_token });
-    
-    if (isAuthenticated && !_token) {
-      console.log('[useAuthToken] Retrieving token from Auth0...');
-      getAccessTokenSilently()
-        .then((newToken) => {
-          console.log('[useAuthToken] Token retrieved successfully:', {
-            tokenLength: newToken?.length,
-            tokenPreview: newToken?.substring(0, 20) + '...',
-          });
-          _token = newToken;
-          setToken(newToken);
-        })
-        .catch((error) => {
-          console.error('[useAuthToken] Failed to get token from Auth0:', error);
-        });
-    } else if (!isAuthenticated) {
-      console.log('[useAuthToken] User not authenticated');
+    if (!isAuthenticated || token) {
+      return;
     }
-  }, [isAuthenticated, getAccessTokenSilently, setToken]);
+
+    // Another consumer already resolved the token between this component's render and this
+    // effect; adopt it rather than staying undefined.
+    if (_token) {
+      setToken(_token);
+      return;
+    }
+
+    if (!_tokenPromise) {
+      _tokenPromise = getAccessTokenSilently().then(
+        (newToken) => {
+          _token = newToken;
+          return newToken;
+        },
+        (error) => {
+          _tokenPromise = undefined;
+          throw error;
+        }
+      );
+    }
+
+    let active = true;
+    _tokenPromise
+      .then((newToken) => {
+        if (active) {
+          setToken(newToken);
+        }
+      })
+      .catch(() => console.error('Unable to get auth0 token'));
+
+    return () => {
+      active = false;
+    };
+  }, [isAuthenticated, getAccessTokenSilently, token]);
 
   useEffect(() => {
     console.log('[useAuthToken] Token state updated:', { hasToken: !!token, tokenLength: token?.length });

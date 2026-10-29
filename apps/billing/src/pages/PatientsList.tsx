@@ -1,10 +1,15 @@
-import { Clear as ClearIcon, Search as SearchIcon } from '@mui/icons-material';
+import { Add as AddIcon, Clear as ClearIcon, Search as SearchIcon } from '@mui/icons-material';
 import { Alert, Box, Button, InputAdornment, TextField, Typography } from '@mui/material';
 import { DataGridPro, GridColDef } from '@mui/x-data-grid-pro';
 import { ReactElement, useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { chooseJson } from 'utils';
+import { getApiError } from 'utils/lib/helpers/oystehrApi';
+import { SearchBillingPatientsInput } from 'utils/lib/types/data/billing/billing.schemas';
+import { isValidUUID } from 'utils/lib/validation/helper';
+import { searchBillingPatients } from '../api/api';
+import { AddPatientDialog } from '../components/AddPatientDialog';
 import { dataGridSlots, dataGridSx } from '../components/BillingDataGrid';
+import { DateInput } from '../components/DateInput';
 import { useApiClients } from '../hooks/useAppClients';
 import { useDebounce } from '../hooks/useDebounce';
 
@@ -14,15 +19,16 @@ interface PatientRow {
   dob: string;
   gender: string;
   address: string;
-  friendlyId: string;
+  clinicalId: string;
+  clinicalFriendlyId: string;
 }
 
 const columns: GridColDef[] = [
   { field: 'name', headerName: 'Patient Name', flex: 1, minWidth: 180 },
   { field: 'dob', headerName: 'Date of Birth', width: 120 },
   { field: 'gender', headerName: 'Gender', width: 90 },
-  { field: 'friendlyId', headerName: 'Friendly ID', width: 140 },
-  { field: 'id', headerName: 'Patient UUID', width: 300 },
+  { field: 'clinicalFriendlyId', headerName: 'Patient Friendly ID', width: 140 },
+  { field: 'clinicalId', headerName: 'Patient MRN', width: 300 },
   { field: 'address', headerName: 'Address', flex: 1, minWidth: 200 },
 ];
 
@@ -47,6 +53,7 @@ export default function PatientsList(): ReactElement {
   const [searchDob, setSearchDob] = useState('');
   const [searchId, setSearchId] = useState('');
   const [searchUuid, setSearchUuid] = useState('');
+  const [addOpen, setAddOpen] = useState(false);
 
   const { debounce } = useDebounce();
 
@@ -56,21 +63,24 @@ export default function PatientsList(): ReactElement {
       setLoading(true);
       setError(null);
       try {
-        const hasSearch = filters.name || filters.dob || filters.identifier || filters.uuid;
-        const body: Record<string, unknown> = {
+        const params: SearchBillingPatientsInput = {
           offset: page * pageSize,
           pageSize,
         };
-        if (hasSearch) body.includeWorkingCopies = true;
-        if (filters.name) body.name = filters.name;
-        if (filters.dob) body.dob = filters.dob;
-        if (filters.identifier) body.identifier = filters.identifier;
-        if (filters.uuid) body.uuid = filters.uuid;
-        const data = chooseJson(await oystehrZambda.zambda.execute({ id: 'search-billing-patients', ...body }));
-        setPatients(data?.patients ?? []);
-        setTotal(data?.total ?? 0);
+        if (filters.name) params.name = filters.name;
+        if (filters.dob) params.dob = filters.dob;
+        if (filters.identifier) params.identifier = filters.identifier;
+        if (filters.uuid) {
+          if (!isValidUUID(filters.uuid)) {
+            throw new Error('Validation error: Patient MRN must be a valid UUID');
+          }
+          params.uuid = filters.uuid;
+        }
+        const data = await searchBillingPatients(oystehrZambda, params);
+        setPatients((data.patients ?? []).filter((p): p is typeof p & { id: string } => Boolean(p.id)));
+        setTotal(data.total ?? 0);
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(getApiError({ error: err, defaultError: 'Failed to load patients' }));
         setPatients([]);
       } finally {
         setLoading(false);
@@ -131,9 +141,14 @@ export default function PatientsList(): ReactElement {
 
   return (
     <Box sx={{ p: 0 }}>
-      <Typography variant="h4" color="primary.dark" fontWeight={600} sx={{ mb: 3 }}>
-        Patients
-      </Typography>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 3 }}>
+        <Typography variant="h4" color="primary.dark" fontWeight={600}>
+          Patients
+        </Typography>
+        <Button variant="contained" startIcon={<AddIcon />} onClick={() => setAddOpen(true)}>
+          Add Patient
+        </Button>
+      </Box>
 
       <TextField
         fullWidth
@@ -152,36 +167,32 @@ export default function PatientsList(): ReactElement {
       />
 
       <Box sx={{ display: 'flex', gap: 2, mb: 2, flexWrap: 'wrap', alignItems: 'center' }}>
-        <TextField
-          size="small"
-          type="date"
+        <DateInput
           label="Date of Birth"
           value={searchDob}
-          onChange={(e) => {
-            setSearchDob(e.target.value);
-            applyFilters({ dob: e.target.value });
+          onChange={(value) => {
+            setSearchDob(value);
+            applyFilters({
+              dob: value,
+            });
           }}
-          InputLabelProps={{ shrink: true }}
-          sx={{ minWidth: 160 }}
         />
 
         <TextField
           size="small"
-          label="Patient UUID"
-          placeholder="Patient UUID..."
+          label="Patient MRN"
+          placeholder="Patient MRN..."
           value={searchUuid}
-          onChange={(e) => handleUuidChange(e.target.value)}
-          InputLabelProps={{ shrink: true }}
+          onChange={(e) => handleUuidChange(e.target.value.trim())}
           sx={{ minWidth: 300 }}
         />
 
         <TextField
           size="small"
-          label="Friendly ID"
-          placeholder="Friendly ID..."
+          label="Patient Friendly ID"
+          placeholder="Patient Friendly ID..."
           value={searchId}
           onChange={(e) => handleIdChange(e.target.value)}
-          InputLabelProps={{ shrink: true }}
           sx={{ minWidth: 180 }}
         />
 
@@ -213,8 +224,15 @@ export default function PatientsList(): ReactElement {
         disableRowSelectionOnClick
         disableColumnMenu
         pageSizeOptions={[25, 50, 100]}
-        slots={dataGridSlots}
+        slots={dataGridSlots()}
+        pagination={true}
         sx={{ ...dataGridSx, height: 'calc(100vh - 310px)' }}
+      />
+
+      <AddPatientDialog
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        onCreated={() => void fetchPatients(currentFilters())}
       />
     </Box>
   );

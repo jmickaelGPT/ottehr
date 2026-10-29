@@ -1,13 +1,11 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Organization } from 'fhir/r4b';
-import { getSecret, SecretsKeys } from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  topLevelCatch,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+import { getSecret, SecretsKeys } from 'utils/lib/secrets';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { topLevelCatch } from '../../../shared/lambda';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { EMPLOYER_ORG_TYPE_CODE, EMPLOYER_ORG_TYPE_SYSTEM } from '../helpers';
 import { validateRequestParameters } from './validateRequestParameters';
 
@@ -17,7 +15,7 @@ export const index = wrapHandler('list-employers', async (input: ZambdaInput): P
     const { secrets } = validateRequestParameters(input);
 
     m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-    const oystehr = createOystehrClient(m2mToken, secrets);
+    const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
     const results = await oystehr.fhir.search<Organization>({
       resourceType: 'Organization',

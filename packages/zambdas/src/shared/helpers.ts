@@ -1,10 +1,12 @@
 import Oystehr, { BatchInputRequest, OystehrConfig } from '@oystehr/sdk';
-import { captureException } from '@sentry/aws-serverless';
+import { captureException } from '@sentry/node-core/light';
 import { Operation } from 'fast-json-patch';
 import {
   Appointment,
   Attachment,
+  DomainResource,
   Encounter,
+  Extension,
   FhirResource,
   Location,
   Meta,
@@ -14,32 +16,66 @@ import {
   Schedule,
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import {
-  EncounterVirtualServiceExtension,
-  findQuestionnaireResponseItemLinkId,
-  getSecret,
-  getTimezone,
-  INVALID_INPUT_ERROR,
-  pickFirstValueFromAnswerItem,
-  PRIVATE_EXTENSION_BASE_URL,
-  PUBLIC_EXTENSION_BASE_URL,
-  Secrets,
-  SecretsKeys,
-  TELEMED_VIDEO_ROOM_CODE,
-  TIMEZONES,
-} from 'utils';
-import { ZambdaInput } from './types';
+import { BILLING_RESOURCE_TAG, PRIVATE_EXTENSION_BASE_URL, PUBLIC_EXTENSION_BASE_URL } from 'utils/lib/fhir/constants';
+import { undefinedIfEmptyArray } from 'utils/lib/fhir/helpers';
+import { pickFirstValueFromAnswerItem } from 'utils/lib/helpers/paperwork/paperwork';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { TELEMED_VIDEO_ROOM_CODE, TIMEZONES } from 'utils/lib/types/constants';
+import { EncounterVirtualServiceExtension } from 'utils/lib/types/data/oystehr-api.types.ts/telemed.types';
+import { findQuestionnaireResponseItemLinkId } from 'utils/lib/types/data/paperwork/paperwork.types';
+import { INVALID_INPUT_ERROR } from 'utils/lib/types/errors';
+import { getTimezone } from 'utils/lib/utils/scheduleUtils';
+import { ZambdaInput } from './types/common';
+import { safeJsonParse } from './validation';
 
-export function createOystehrClient(
-  token: string,
+export const fhirApiUrlFromAuth0Audience = (auth0Audience: string): string => {
+  switch (auth0Audience) {
+    case 'https://dev.api.zapehr.com':
+      return 'https://dev.fhir-api.zapehr.com';
+    case 'https://dev2.api.zapehr.com':
+      return 'https://dev2.fhir-api.zapehr.com';
+    case 'https://testing.api.zapehr.com':
+      return 'https://testing.fhir-api.zapehr.com';
+    case 'https://staging.api.zapehr.com':
+      return 'https://staging.fhir-api.zapehr.com';
+    case 'https://api.zapehr.com':
+      return 'https://fhir-api.zapehr.com';
+    default:
+      throw `Unexpected auth0 audience value, could not map to a projectApiUrl. auth0Audience was: ${auth0Audience}`;
+  }
+};
+
+// todo remove code duplication with configure-secrets
+export const projectApiUrlFromAuth0Audience = (auth0Audience: string): string => {
+  switch (auth0Audience) {
+    case 'https://dev.api.zapehr.com':
+      return 'https://dev.project-api.zapehr.com/v1';
+    case 'https://dev2.api.zapehr.com':
+      return 'https://dev2.project-api.zapehr.com/v1';
+    case 'https://testing.api.zapehr.com':
+      return 'https://testing.project-api.zapehr.com/v1';
+    case 'https://staging.api.zapehr.com':
+      return 'https://staging.project-api.zapehr.com/v1';
+    case 'https://api.zapehr.com':
+      return 'https://project-api.zapehr.com/v1';
+    default:
+      throw `Unexpected auth0 audience value, could not map to a projectApiUrl. auth0Audience was: ${auth0Audience}`;
+  }
+};
+
+export function createClinicalOystehrClient(
+  token: string | undefined,
   secrets: Secrets | null,
   overrides?: Partial<OystehrConfig>
 ): Oystehr {
   return new Oystehr({
     accessToken: token,
-    fhirApiUrl: getSecret(SecretsKeys.FHIR_API, secrets).replace(/\/r4/g, ''),
-    projectApiUrl: getSecret(SecretsKeys.PROJECT_API, secrets),
+    services: {
+      fhirApiUrl: fhirApiUrlFromAuth0Audience(getSecret(SecretsKeys.AUTH0_AUDIENCE, secrets)),
+      projectApiUrl: projectApiUrlFromAuth0Audience(getSecret(SecretsKeys.AUTH0_AUDIENCE, secrets)),
+    },
     ...overrides,
+    ignoreTags: [...(overrides?.ignoreTags ?? []), BILLING_RESOURCE_TAG],
   });
 }
 
@@ -180,11 +216,19 @@ export function validateJsonBody(input: ZambdaInput): any {
     throw INVALID_INPUT_ERROR('Request body is required');
   }
   try {
-    return JSON.parse(input.body);
+    return safeJsonParse(input.body);
   } catch {
     throw INVALID_INPUT_ERROR('Invalid JSON in request body');
   }
 }
+
+/**
+ * The id of the Patient a FHIR reference points at, whether the reference is relative
+ * (`Patient/<id>`) or absolute (`https://fhir-api.zapehr.com/r4/Patient/<id>`). Undefined when the
+ * reference is missing or points at another resource type.
+ */
+export const patientIdFromReference = (reference: string | undefined): string | undefined =>
+  reference?.match(/(?:^|\/)Patient\/([^/]+)$/)?.[1];
 
 export function getParticipantFromAppointment(appointment: Appointment, participant: string): string {
   const participantTemp = appointment.participant
@@ -241,6 +285,8 @@ export function checkPaperworkComplete(questionnaireResponse: QuestionnaireRespo
     const photoIdFrontItem = findQuestionnaireResponseItemLinkId('photo-id-front', questionnaireResponse?.item ?? []);
     if (photoIdFrontItem) {
       photoIdFront = pickFirstValueFromAnswerItem(photoIdFrontItem, 'attachment');
+    } else {
+      return true;
     }
     if (photoIdFront) {
       return true;
@@ -257,4 +303,12 @@ export function resolveTimezone(schedule?: Schedule, location?: Location, fallba
     return getTimezone(location);
   }
   return fallback;
+}
+
+export function updateExtension(resource: DomainResource, extension: Extension): void {
+  resource.extension = [...(resource.extension ?? []).filter((ext) => ext.url !== extension.url), extension];
+}
+
+export function removeExtension(resource: DomainResource, url: string): void {
+  resource.extension = undefinedIfEmptyArray((resource.extension ?? []).filter((ext) => ext.url !== url));
 }

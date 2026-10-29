@@ -35,6 +35,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { ChargeItemDefinition, Organization } from 'fhir/r4b';
 import { enqueueSnackbar } from 'notistack';
 import React, { ReactElement, useMemo } from 'react';
+import { FEATURE_FLAGS } from 'src/constants/feature-flags';
 import {
   useCmAssociatePayerMutation,
   useCmDisassociatePayerMutation,
@@ -44,7 +45,8 @@ import {
   useAssociatePayerMutation,
   useDisassociatePayerMutation,
 } from 'src/rcm/state/fee-schedules/fee-schedule.queries';
-import { extractPayerIdFromUrl, isPayerUrl, ORG_TYPE_CODE_SYSTEM, ORG_TYPE_PAYER_CODE } from 'utils';
+import { extractPayerIdFromUrl, isPayerUrl } from 'utils/lib/helpers/helpers';
+import { ORG_TYPE_CODE_SYSTEM, ORG_TYPE_PAYER_CODE } from 'utils/lib/types/constants';
 import { useInsurancesQuery } from '../admin.queries';
 import { ChargeItemMode } from '../ChargeItemList';
 
@@ -102,13 +104,16 @@ export default function PayerAssociations({
 
   const queryClient = useQueryClient();
   const { data: allInsuranceOrgs, isPending: insuranceOrgsLoading } = useInsurancesQuery(undefined, true);
-  const { data: allEmployerOrgs, isPending: employerOrgsLoading } = useEmployersQuery();
-  const orgsLoading = insuranceOrgsLoading || employerOrgsLoading;
+  // In custom-organizations mode employers never associate with fee schedules or charge masters,
+  // so they aren't loaded or offered here at all.
+  const employersEnabled = !FEATURE_FLAGS.CUSTOM_ORGANIZATIONS_ENABLED;
+  const { data: allEmployerOrgs, isPending: employerOrgsLoading } = useEmployersQuery({ enabled: employersEnabled });
+  const orgsLoading = insuranceOrgsLoading || (employersEnabled && employerOrgsLoading);
 
   // Merge insurance orgs and active employers into one list
   const allOrgs = useMemo(() => {
     const insurers = allInsuranceOrgs ?? [];
-    const employers = (allEmployerOrgs ?? []).filter((e) => e.active !== false);
+    const employers = employersEnabled ? (allEmployerOrgs ?? []).filter((e) => e.active !== false) : [];
     const merged = [...insurers];
     for (const emp of employers) {
       if (!merged.some((o) => o.id === emp.id)) {
@@ -116,7 +121,7 @@ export default function PayerAssociations({
       }
     }
     return merged;
-  }, [allInsuranceOrgs, allEmployerOrgs]);
+  }, [allInsuranceOrgs, allEmployerOrgs, employersEnabled]);
 
   const fsAssociate = useAssociatePayerMutation();
   const fsDisassociate = useDisassociatePayerMutation();

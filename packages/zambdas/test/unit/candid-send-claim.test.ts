@@ -1,4 +1,4 @@
-import { MISSING_REQUEST_SECRETS } from 'utils';
+import { MISSING_REQUEST_SECRETS, RESOURCE_INCOMPLETE_FOR_OPERATION_ERROR } from 'utils/lib/types/errors';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ── Mocks ──────────────────────────────────────────────────────────────────────
@@ -21,23 +21,51 @@ const mockOystehrClient = {
     get: vi.fn(),
     create: vi.fn(),
   },
+  zambda: { execute: vi.fn() },
 };
 
 const mockGetAppointmentAndRelatedResources = vi.fn();
 
-vi.mock('../../src/shared', async (importOriginal) => {
+vi.mock('../../src/shared/candid', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   return {
     ...actual,
     createEncounterFromAppointment: mockCreateEncounterFromAppointment,
-    getAuth0Token: mockGetAuth0Token,
-    createOystehrClient: mockCreateOystehrClient,
-    wrapHandler: (_name: string, handler: any) => handler,
     CANDID_ENCOUNTER_ID_IDENTIFIER_SYSTEM: 'https://api.joincandidhealth.com/api/encounters/v4/response/encounter_id',
   };
 });
 
-vi.mock('utils', async (importOriginal) => {
+// These tests describe legacy Candid claims routing, which only exists with non-insurance
+// organizations off — flag-on, shouldUseCandid throws on candid-routing configs by design.
+vi.mock('utils/lib/ottehr-config/feature-flags', () => ({
+  FEATURE_FLAGS_CONFIG: { customOrganizationsEnabled: false },
+}));
+
+vi.mock('../../src/shared/getAuth0Token', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    getAuth0Token: mockGetAuth0Token,
+  };
+});
+
+vi.mock('../../src/shared/helpers', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    createClinicalOystehrClient: mockCreateOystehrClient,
+  };
+});
+
+vi.mock('../../src/shared/sentry', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    wrapHandler: (_name: string, handler: any) => handler,
+  };
+});
+
+vi.mock('utils/lib/helpers/candidApi', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   return {
     ...actual,
@@ -53,8 +81,14 @@ vi.mock('../../src/shared/pdf/visit-details-pdf/get-video-resources', () => ({
   getAppointmentAndRelatedResources: (...args: any[]) => mockGetAppointmentAndRelatedResources(...args),
 }));
 
-vi.mock('@sentry/aws-serverless', () => ({
-  captureException: vi.fn(),
+const { mockCaptureException, mockCaptureMessage } = vi.hoisted(() => ({
+  mockCaptureException: vi.fn(),
+  mockCaptureMessage: vi.fn(),
+}));
+
+vi.mock('@sentry/node-core/light', () => ({
+  captureException: mockCaptureException,
+  captureMessage: mockCaptureMessage,
 }));
 
 // ── Imports (after mocks) ──────────────────────────────────────────────────────
@@ -64,11 +98,15 @@ const { validateRequestParameters } = await import('../../src/subscriptions/task
 const { index: _index } = await import('../../src/subscriptions/task/sub-send-claim/index');
 const index = _index as unknown as (input: any) => Promise<{ statusCode: number; body: string }>;
 
+const { createCandidDiagnoses, buildRelatedCausesInformation } = await import('../../src/shared/candid');
+const { DiagnosisTypeCode } = await import('candidhealth/api');
+const { ACCIDENT_TYPE_SYSTEM, ACCIDENT_STATE_EXTENSION } = await import('utils/lib/fhir/constants');
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 const CANDID_ENCOUNTER_ID_SYSTEM = 'https://api.joincandidhealth.com/api/encounters/v4/response/encounter_id';
 
-function setupValidatedParams(taskId: string, appointmentId: string): void {
+function setupValidatedParams(taskId: string, appointmentId: string, billingIntegration?: string): void {
   vi.mocked(validateRequestParameters).mockReturnValue({
     task: {
       id: taskId,
@@ -80,7 +118,7 @@ function setupValidatedParams(taskId: string, appointmentId: string): void {
         reference: `Appointment/${appointmentId}`,
       },
     },
-    secrets: {} as any,
+    secrets: billingIntegration ? { BILLING_INTEGRATION: billingIntegration } : {},
   } as any);
 }
 
@@ -130,6 +168,16 @@ describe('sub-send-claim', () => {
     mockFhirPatch.mockResolvedValue({ resourceType: 'Task', id: 'task-1', status: 'completed' });
     // candid is configured by default, tests override to skip when needed
     mockGetOrCreateCandidApiClient.mockResolvedValue({} as any);
+  });
+
+  it('only processes Candid when both billing integrations are enabled', async () => {
+    setupValidatedParams('task-1', 'appt-1', 'all');
+    mockGetAppointmentAndRelatedResources.mockResolvedValue(makeVisitResources({ encounterId: 'enc-1' }));
+    mockCreateEncounterFromAppointment.mockResolvedValue('candid-claim-1');
+
+    expect((await index({ headers: {}, body: '{}', secrets: {} })).statusCode).toBe(200);
+    expect(mockCreateEncounterFromAppointment).toHaveBeenCalledTimes(1);
+    expect(mockOystehrClient.zambda.execute).not.toHaveBeenCalled();
   });
 
   it('creates a Candid encounter and patches FHIR Encounter with the Candid ID', async () => {
@@ -334,6 +382,42 @@ describe('sub-send-claim', () => {
     );
   });
 
+  it('fails the task without throwing when the claim can not be created (e.g. provider has no NPI)', async () => {
+    // Missing data is not a bug, so the handler must not throw: throwing reports it to Sentry as an
+    // exception. It goes out as a warning instead.
+    setupValidatedParams('task-10', 'appt-10');
+    mockGetAppointmentAndRelatedResources.mockResolvedValue(makeVisitResources({ encounterId: 'enc-10' }));
+    mockCreateEncounterFromAppointment.mockRejectedValue(
+      RESOURCE_INCOMPLETE_FOR_OPERATION_ERROR("Practitioner pract-1 has no NPI identifier, so a claim can't be created")
+    );
+
+    const result = await index({ headers: {}, body: '{}', secrets: {} });
+
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).message).toContain('has no NPI identifier');
+    expect(mockCaptureException).not.toHaveBeenCalled();
+    expect(mockCaptureMessage).toHaveBeenCalledWith(
+      'Claim could not be created because required data is missing',
+      expect.objectContaining({
+        level: 'warning',
+        extra: expect.objectContaining({ taskId: 'task-10', reason: expect.stringContaining('has no NPI identifier') }),
+      })
+    );
+    expect(mockFhirPatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resourceType: 'Task',
+        id: 'task-10',
+        operations: expect.arrayContaining([
+          expect.objectContaining({
+            op: 'replace',
+            path: '/status',
+            value: 'failed',
+          }),
+        ]),
+      })
+    );
+  });
+
   it('handles null candidEncounterId from createEncounterFromAppointment (no patch ops)', async () => {
     setupValidatedParams('task-9', 'appt-9');
     const visitResources = makeVisitResources({ encounterId: 'enc-9' });
@@ -357,5 +441,101 @@ describe('sub-send-claim', () => {
         operations: [],
       })
     );
+  });
+});
+
+describe('createCandidDiagnoses', () => {
+  function makeCondition(id: string, code: string): any {
+    return {
+      resourceType: 'Condition',
+      id,
+      code: { coding: [{ code }] },
+    };
+  }
+
+  it('emits the primary diagnosis as Abk and secondaries as Abf', () => {
+    const encounter: any = {
+      resourceType: 'Encounter',
+      diagnosis: [
+        { condition: { reference: 'Condition/primary' }, rank: 1 },
+        { condition: { reference: 'Condition/secondary' }, rank: 2 },
+      ],
+    };
+    const diagnoses = [makeCondition('primary', 'A00'), makeCondition('secondary', 'B00')];
+
+    const result = createCandidDiagnoses(encounter, diagnoses);
+
+    expect(result).toEqual(
+      expect.arrayContaining([
+        { codeType: DiagnosisTypeCode.Abk, code: 'A00' },
+        { codeType: DiagnosisTypeCode.Abf, code: 'B00' },
+      ])
+    );
+    expect(result).toHaveLength(2);
+  });
+
+  it('keeps the primary diagnosis (Abk) when the same code is also entered as a secondary listed first', () => {
+    // Regression: the duplicate secondary appears before the primary in encounter.diagnosis.
+    // Without the primary-first ordering, the secondary would claim the code first and the
+    // primary would be deduped away, leaving no Abk entry -> "Primary diagnosis is absent".
+    const encounter: any = {
+      resourceType: 'Encounter',
+      diagnosis: [
+        { condition: { reference: 'Condition/secondary' }, rank: 2 },
+        { condition: { reference: 'Condition/primary' }, rank: 1 },
+      ],
+    };
+    const diagnoses = [makeCondition('secondary', 'A00'), makeCondition('primary', 'A00')];
+
+    const result = createCandidDiagnoses(encounter, diagnoses);
+
+    // The duplicate code collapses to a single entry, and it must be the primary.
+    expect(result).toEqual([{ codeType: DiagnosisTypeCode.Abk, code: 'A00' }]);
+    expect(result.some((diagnosis) => diagnosis.codeType === DiagnosisTypeCode.Abk)).toBe(true);
+  });
+});
+
+describe('buildRelatedCausesInformation', () => {
+  function makeAccident(opts: { codes?: (string | undefined)[]; state?: string }): any {
+    return {
+      resourceType: 'Condition',
+      id: 'accident-1',
+      code: opts.codes ? { coding: opts.codes.map((code) => ({ system: ACCIDENT_TYPE_SYSTEM, code })) } : undefined,
+      extension: opts.state ? [{ url: ACCIDENT_STATE_EXTENSION, valueString: opts.state }] : undefined,
+    };
+  }
+
+  it('returns undefined when there is no accident condition', () => {
+    expect(buildRelatedCausesInformation(undefined)).toBeUndefined();
+  });
+
+  it('returns undefined when the accident condition has no coding (checkbox toggled on then off)', () => {
+    // Regression: an "accident"-tagged Condition can linger with an empty code ({}). Building
+    // relatedCausesInformation from it would put undefined into the required relatedCausesCode1 and
+    // Candid rejects the claim with "Expected string. Received undefined.".
+    const accident = makeAccident({});
+    accident.code = {}; // matches the observed lingering resource
+    expect(buildRelatedCausesInformation(accident)).toBeUndefined();
+  });
+
+  it('returns undefined when coding exists but carries no accident-type codes', () => {
+    const accident = makeAccident({ codes: [undefined] });
+    expect(buildRelatedCausesInformation(accident)).toBeUndefined();
+  });
+
+  it('builds relatedCausesCode1 (and optional code2 / state) when accident type codes are present', () => {
+    const result = buildRelatedCausesInformation(makeAccident({ codes: ['AA', 'EM'], state: 'CA' }));
+    expect(result).toEqual({
+      relatedCausesCode1: 'AA',
+      relatedCausesCode2: 'EM',
+      stateOrProvinceCode: 'CA',
+    });
+  });
+
+  it('leaves relatedCausesCode2 and stateOrProvinceCode undefined when only one code and no state', () => {
+    const result = buildRelatedCausesInformation(makeAccident({ codes: ['AA'] }));
+    expect(result?.relatedCausesCode1).toBe('AA');
+    expect(result?.relatedCausesCode2).toBeUndefined();
+    expect(result?.stateOrProvinceCode).toBeUndefined();
   });
 });

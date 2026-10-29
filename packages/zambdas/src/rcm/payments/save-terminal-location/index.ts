@@ -1,12 +1,15 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Device } from 'fhir/r4b';
 import {
-  findTerminalDeviceForLocation,
   STRIPE_TERMINAL_LOCATION_DEVICE_TYPE_CODE,
   STRIPE_TERMINAL_LOCATION_DEVICE_TYPE_SYSTEM,
   STRIPE_TERMINAL_LOCATION_IDENTIFIER_SYSTEM,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../shared';
+} from 'utils/lib/fhir/constants';
+import { findTerminalDeviceForLocation } from 'utils/lib/fhir/payments';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 let m2mToken: string;
@@ -16,7 +19,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   const { locationId, terminalLocationId, secrets } = validateRequestParameters(input);
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   const existingDevice = await findTerminalDeviceForLocation(locationId, oystehr);
 

@@ -2,17 +2,16 @@ import Oystehr from '@oystehr/sdk';
 import { Address, Organization } from 'fhir/r4b';
 import * as fs from 'fs';
 import * as path from 'path';
-import { Secrets } from 'utils';
+import { Secrets } from 'utils/lib/secrets';
 import { createCandidClientIfConfigured, createCandidEmployerPayer } from '../rcm/employers/candid-sync';
 import {
   buildEmployerType,
   EMPLOYER_ORG_TYPE_CODE,
   EMPLOYER_ORG_TYPE_SYSTEM,
-  normalizeAddress,
   normalizeEmployerNotesExtension,
-  normalizeTelecom,
   setOrUpdateCandidIdentifier,
 } from '../rcm/employers/helpers';
+import { normalizeAddress, normalizeTelecom } from '../shared/organization';
 import { createOystehrClientFromConfig } from './helpers';
 
 // ─── CSV row shape ──────────────────────────────────────────────────────────────

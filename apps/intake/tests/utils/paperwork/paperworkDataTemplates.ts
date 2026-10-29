@@ -1,4 +1,5 @@
-import { VALUE_SETS } from 'utils';
+import { VALUE_SETS } from 'utils/lib/ottehr-config/value-sets';
+import { logVerbose } from '../logging';
 
 /**
  * Test data template factories
@@ -53,6 +54,8 @@ const createContactInformationData = (overrides?: {
       'patient-zip': overrides?.zip || '12345',
       'patient-preferred-communication-method':
         overrides?.preferredCommunication || valueSets.preferredCommunicationMethodOptions[1].value, // 'Email'
+      'photo-id-front': 'upload',
+      'photo-id-back': 'upload',
     },
     invalid: {
       'patient-email': 'not-an-email',
@@ -197,6 +200,11 @@ const createInsuranceData = (overrides?: {
       'policy-holder-city': overrides?.city || 'InsuranceCity',
       'policy-holder-state': overrides?.state || 'CA',
       'policy-holder-zip': overrides?.zip || '12345',
+      // Attachment fields — value is a placeholder token; fillAttachmentField
+      // maps the linkId to a static test image. Skipped automatically for
+      // projects whose questionnaire omits the field.
+      'insurance-card-front': 'upload',
+      'insurance-card-back': 'upload',
     },
     invalid: {
       'policy-holder-date-of-birth': '13/32/2020', // Invalid date
@@ -530,17 +538,6 @@ const createInviteParticipantData = (): FieldTestData => {
 };
 
 /**
- * Create photo ID upload data
- */
-const createPhotoIDData = (options?: { includeFront?: boolean; includeBack?: boolean }): FieldTestData => ({
-  valid: {
-    ...(options?.includeFront !== false && { 'photo-id-front': 'upload' }),
-    ...(options?.includeBack !== false && { 'photo-id-back': 'upload' }),
-  },
-  // No invalid values for file upload
-});
-
-/**
  * Create credit card data (Stripe payment)
  *
  * This is a special case that uses Stripe iframe for PCI compliance.
@@ -608,14 +605,13 @@ const pageDataTemplateMapFactory: (context?: {
   const maybeServiceMode = context?.serviceMode;
   const maybeVisitType = context?.visitType;
   const maybeServiceCategory = context?.serviceCategory;
-  if (context) {
-    console.log('test data factory context: ');
-    console.log(`  serviceMode: ${maybeServiceMode}`);
-    console.log(`  visitType: ${maybeVisitType}`);
-    console.log(`  serviceCategory: ${maybeServiceCategory}`);
-  } else {
-    console.log('test data factory context: none');
-  }
+  // One line, not five, and only when asked for: this factory is called once per page per test, so
+  // in CI it was reprinting the same context a hundred times per run.
+  logVerbose(
+    context
+      ? `test data factory context: serviceMode=${maybeServiceMode} visitType=${maybeVisitType} serviceCategory=${maybeServiceCategory}`
+      : 'test data factory context: none'
+  );
   return {
     'contact-information-page': createContactInformationData,
     'patient-details-page': createPatientDetailsData,
@@ -629,7 +625,6 @@ const pageDataTemplateMapFactory: (context?: {
     'employer-information-page': createEmployerInformationData,
     'occupational-medicine-employer-information-page': createOccMedEmployerInformationData,
     'attorney-mva-page': () => ({ valid: {} }), // TODO: create attorney data template
-    'photo-id-page': createPhotoIDData,
     'consent-forms-page': createConsentFormsData,
     'medical-history-page': () => createMedicalHistoryData('empty'),
 

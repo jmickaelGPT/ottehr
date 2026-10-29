@@ -1,5 +1,6 @@
 import cors from 'cors';
 import express, { NextFunction, Request, Response } from 'express';
+import billingZambdasSpec from '../../../../config/billing-app-core/zambdas.json';
 import zambdasSpec from '../../../../config/oystehr-core/zambdas.json';
 import { expressLambda } from './utils';
 
@@ -17,7 +18,7 @@ app.use(cors());
 
 // Register routes lazily to avoid Vite SSR import issues during module initialization
 function registerRoutes(): void {
-  Object.entries(zambdasSpec.zambdas).forEach(([_key, spec]) => {
+  Object.entries({ ...zambdasSpec.zambdas, ...billingZambdasSpec.zambdas }).forEach(([_key, spec]) => {
     const executeOrExecutePublic = spec.type === 'http_auth' ? 'execute' : 'execute-public';
     const path = `/local/zambda/${spec.name}/${executeOrExecutePublic}`;
     app.post(path, async (req, res) => {
@@ -38,8 +39,12 @@ registerRoutes();
 
 // Only start the server if not in test environment
 if (process.env.VITEST !== 'true') {
-  app.listen(3000, () => {
-    console.log(`Zambda local server is running on port 3000`);
+  // Port defaults to 3000; override with PORT so an ephemeral server (e.g. the
+  // daily-census cron) can run on a dedicated port without colliding with the
+  // interactive dev server on 3000.
+  const port = Number(process.env.PORT) || 3000;
+  app.listen(port, () => {
+    console.log(`Zambda local server is running on port ${port}`);
   });
 }
 

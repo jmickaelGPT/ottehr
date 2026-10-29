@@ -1,15 +1,15 @@
-import { captureException } from '@sentry/aws-serverless';
+import { captureException } from '@sentry/node-core/light';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Appointment, Location, Patient, RelatedPerson } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import {
-  addWaitingMinutesToAppointment,
-  DATETIME_FULL_NO_YEAR,
-  getPatientContactEmail,
-  getWaitingMinutesAtSchedule,
-  TaskStatus,
-} from 'utils';
-import { createOystehrClient, getAuth0Token, wrapHandler, ZambdaInput } from '../../../shared';
+import { getPatientContactEmail } from 'utils/lib/fhir/patient';
+import { TaskStatus } from 'utils/lib/types/common';
+import { addWaitingMinutesToAppointment, getWaitingMinutesAtSchedule } from 'utils/lib/utils/scheduleUtils';
+import { DATETIME_FULL_NO_YEAR } from 'utils/lib/validation/constants';
+import { getAuth0Token } from '../../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { patchTaskStatus } from '../../helpers';
 import { validateRequestParameters } from '../validateRequestParameters';
 
@@ -31,7 +31,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     console.log('already have token');
   }
 
-  const oystehr = createOystehrClient(oystehrToken, secrets);
+  const oystehr = createClinicalOystehrClient(oystehrToken, secrets);
 
   const taskCodingList = task.code?.coding ?? [];
   console.log('taskCodingList', JSON.stringify(taskCodingList));

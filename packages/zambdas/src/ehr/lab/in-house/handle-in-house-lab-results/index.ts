@@ -29,44 +29,45 @@ import {
   ValueSet,
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
+import { getFullestAvailableName } from 'utils/lib/fhir/patient';
+import { getAttendingPractitionerId } from 'utils/lib/fhir/practitioners';
+import { getPatchOperationsForNewMetaTags, getPatchOperationToRemoveMetaTags } from 'utils/lib/fhir/resourcePatch';
+import {
+  activityDefinitionIsReflexTest,
+  checkIfReflexIsTriggered,
+  extractAbnormalValueSetValues,
+  extractQuantityRange,
+} from 'utils/lib/helpers/in-house-labs';
+import { NonNormalResult } from 'utils/lib/types/api/lab';
 import {
   ABNORMAL_OBSERVATION_INTERPRETATION,
   ABNORMAL_RESULT_DR_TAG,
-  activityDefinitionIsReflexTest,
-  checkIfReflexIsTriggered,
-  EntryMode,
-  extractAbnormalValueSetValues,
-  extractQuantityRange,
-  getAttendingPractitionerId,
-  getFullestAvailableName,
-  getPatchOperationsForNewMetaTags,
-  getPatchOperationToRemoveMetaTags,
-  HandleInHouseLabResultsZambdaOutput,
   IN_HOUSE_DIAGNOSTIC_REPORT_CATEGORY_CONFIG,
   IN_HOUSE_LAB_OD_NULL_OPTION_CONFIG,
   IN_HOUSE_LAB_TASK,
   IN_HOUSE_OBS_DEF_ID_SYSTEM,
   INCONCLUSIVE_RESULT_DR_TAG,
   INDETERMINATE_OBSERVATION_INTERPRETATION,
-  LabComponentValueSetConfig,
   NEUTRAL_RESULT_DR_TAG,
-  NonNormalResult,
   NORMAL_OBSERVATION_INTERPRETATION,
-  PROVENANCE_ACTIVITY_CODING_ENTITY,
   REFLEX_TEST_TO_RUN_NAME_URL,
-  ResultEntryInput,
   SERVICE_REQUEST_REFLEX_TRIGGERED_TAG_CODES,
   SERVICE_REQUEST_REFLEX_TRIGGERED_TAG_SYSTEM,
-} from 'utils';
+} from 'utils/lib/types/data/in-house/in-house.constants';
 import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  getMyPractitionerId,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../../shared';
+  EntryMode,
+  HandleInHouseLabResultsZambdaOutput,
+  LabComponentValueSetConfig,
+  ResultEntryInput,
+} from 'utils/lib/types/data/in-house/in-house.types';
+import { PROVENANCE_ACTIVITY_CODING_ENTITY } from 'utils/lib/types/data/labs/labs.constants';
+import { checkOrCreateM2MClientToken } from '../../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../../shared/helpers';
 import { createInHouseLabResultPDF } from '../../../../shared/pdf/labs-results-form-pdf';
+import { getMyPractitionerId } from '../../../../shared/practitioners';
+import { wrapHandler } from '../../../../shared/sentry';
 import { createOwnerReference } from '../../../../shared/tasks';
+import { ZambdaInput } from '../../../../shared/types/common';
 import {
   getInHouseLabTestUrlAndVersionForADFromServiceRequest,
   getRelatedServiceRequests,
@@ -78,7 +79,6 @@ let m2mToken: string;
 
 const ZAMBDA_NAME = 'handle-in-house-lab-results';
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`handle-in-house-lab-results started, input: ${JSON.stringify(input)}`);
   console.log('Validating input');
   const { serviceRequestId, data: resultsEntryData, secrets, userToken } = validateRequestParameters(input);
   console.log('validateRequestParameters success');
@@ -87,7 +87,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
   console.log('token', m2mToken);
 
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
   const curUserPractitionerId = await getMyPractitionerId(userToken, secrets);
 
   const {

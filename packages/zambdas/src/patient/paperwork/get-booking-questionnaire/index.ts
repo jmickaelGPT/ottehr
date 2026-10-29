@@ -9,30 +9,27 @@ import {
   Slot,
   ValueSet,
 } from 'fhir/r4b';
+import { prepopulateBookingForm } from 'utils/lib/config-helpers/booking';
+import { createAnswerDisplayFilterExtension } from 'utils/lib/config-helpers/shared-questionnaire';
+import { SERVICE_CATEGORY_SYSTEM, SERVICE_CATEGORY_TAG } from 'utils/lib/fhir/constants';
+import { getAllFhirSearchPages } from 'utils/lib/fhir/getAllFhirSearchPages';
+import { parseReasonsForVisit } from 'utils/lib/fhir/healthcareService';
+import { mapQuestionnaireAndValueSetsToItemsList } from 'utils/lib/helpers/paperwork/paperwork';
+import { BOOKING_CONFIG, selectBookingQuestionnaire, ServiceCategoryCode } from 'utils/lib/ottehr-config/booking';
+import { Secrets } from 'utils/lib/secrets';
 import {
-  BOOKING_CONFIG,
-  createAnswerDisplayFilterExtension,
-  FHIR_RESOURCE_NOT_FOUND,
-  getAllFhirSearchPages,
   GetBookingQuestionnaireParams,
   GetBookingQuestionnaireParamsSchema,
   GetBookingQuestionnaireResponse,
-  getServiceCategoryFromSlot,
-  getServiceModeFromSlot,
-  INVALID_INPUT_ERROR,
-  mapQuestionnaireAndValueSetsToItemsList,
-  MISSING_REQUEST_BODY,
-  parseReasonsForVisit,
-  prepopulateBookingForm,
-  Secrets,
-  selectBookingQuestionnaire,
-  SERVICE_CATEGORY_SYSTEM,
-  SERVICE_CATEGORY_TAG,
-  ServiceCategoryCode,
-  ServiceMode,
-} from 'utils';
-import { createOystehrClient, getAuth0Token, wrapHandler, ZambdaInput } from '../../../shared';
+} from 'utils/lib/types/api/get-booking-questionnaire.types';
+import { ServiceMode } from 'utils/lib/types/common';
+import { FHIR_RESOURCE_NOT_FOUND, INVALID_INPUT_ERROR, MISSING_REQUEST_BODY } from 'utils/lib/types/errors';
+import { getServiceCategoryFromSlot, getServiceModeFromSlot } from 'utils/lib/utils/scheduleUtils';
 import { getUser, userHasAccessToPatient } from '../../../shared/auth';
+import { getAuth0Token } from '../../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 
 const ZAMBDA_NAME = 'get-booking-questionnaire';
 
@@ -41,7 +38,6 @@ let oystehrToken: string;
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
   const validatedParameters = validateRequestParameters(input);
   const validatedParams = validatedParameters;
-  console.debug('validateRequestParameters success', JSON.stringify(validatedParameters));
   const { secrets } = validatedParams;
 
   if (!oystehrToken) {
@@ -51,7 +47,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     console.log('already have token');
   }
 
-  const oystehr = createOystehrClient(oystehrToken, secrets);
+  const oystehr = createClinicalOystehrClient(oystehrToken, secrets);
 
   const effectInput = await complexValidation(validatedParams, oystehr);
 

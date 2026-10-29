@@ -1,6 +1,7 @@
 import { DateTime } from 'luxon';
-import { ImmunizationOrder, searchRouteByCode } from 'utils';
-import { drawRegularText } from '../../helpers/render';
+import { searchRouteByCode } from 'utils/lib/fhir/medication-administration';
+import { ImmunizationOrder } from 'utils/lib/types/data/immunization/types';
+import { drawRegularText } from '../../helpers/render/regularText';
 import { createConfiguredSection, DataComposer } from '../../pdf-common';
 import { ImmunizationOrders, PdfSection, ProgressNoteVisitDataInput } from '../../types';
 
@@ -41,7 +42,7 @@ function immunizationOrderToString(order: ImmunizationOrder, timezone: string): 
   const administratedDateTime = order.administrationDetails?.administeredDateTime
     ? DateTime.fromISO(order.administrationDetails?.administeredDateTime)
         ?.setZone(timezone)
-        ?.toFormat('MM/dd/yyyy HH:mm a')
+        ?.toFormat('MM/dd/yyyy hh:mm a')
     : '';
   return `${order.details.medication.name} - ${order.details.dose} ${order.details.units} / ${route} - ${location}\n${administratedDateTime}`;
 }

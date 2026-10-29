@@ -9,7 +9,7 @@ import { RoundedButton } from 'src/components/RoundedButton';
 import { formatISOStringToDateAndTime } from 'src/helpers/formatDateTime';
 import { useApiClients } from 'src/hooks/useAppClients';
 import styled from 'styled-components';
-import { FOLLOWUP_SYSTEMS } from 'utils';
+import { FOLLOWUP_SYSTEMS } from 'utils/lib/fhir/encounter';
 
 type PatientEncountersGridProps = {
   patient?: Patient;
@@ -221,7 +221,7 @@ export const PatientFollowupEncountersGrid: FC<PatientEncountersGridProps> = (pr
         initialState={{
           pagination: {
             paginationModel: {
-              pageSize: 5,
+              pageSize: 20,
             },
           },
           sorting: {
@@ -232,7 +232,7 @@ export const PatientFollowupEncountersGrid: FC<PatientEncountersGridProps> = (pr
         loading={loading}
         pagination
         disableColumnMenu
-        pageSizeOptions={[5]}
+        pageSizeOptions={[20]}
         disableRowSelectionOnClick
         sx={{
           border: 0,

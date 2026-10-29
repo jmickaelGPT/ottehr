@@ -11,20 +11,18 @@ import {
   Task,
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
+import { Secrets } from 'utils/lib/secrets';
 import {
   DeleteInHouseLabOrderParameters,
   DeleteInHouseLabOrderZambdaOutput,
-  IN_HOUSE_LAB_ERROR,
-  PROVENANCE_ACTIVITY_CODING_ENTITY,
-  Secrets,
-} from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  getMyPractitionerId,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../../shared';
+} from 'utils/lib/types/data/in-house/in-house.types';
+import { PROVENANCE_ACTIVITY_CODING_ENTITY } from 'utils/lib/types/data/labs/labs.constants';
+import { IN_HOUSE_LAB_ERROR } from 'utils/lib/types/errors';
+import { checkOrCreateM2MClientToken } from '../../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../../shared/helpers';
+import { getMyPractitionerId } from '../../../../shared/practitioners';
+import { wrapHandler } from '../../../../shared/sentry';
+import { ZambdaInput } from '../../../../shared/types/common';
 import { makeSoftDeleteStatusPatchRequest } from '../../shared/helpers';
 import { validateRequestParameters } from './validateRequestParameters';
 
@@ -149,8 +147,6 @@ const getInHouseLabOrderRelatedResources = async (
 const ZAMBDA_NAME = 'delete-in-house-lab-order';
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`delete-in-house-lab-order started, input: ${JSON.stringify(input)}`);
-
   let secrets = input.secrets;
   let validatedParameters: DeleteInHouseLabOrderParameters & { secrets: Secrets | null; userToken: string };
 
@@ -171,7 +167,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   console.log('validateRequestParameters success');
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   const currentUserPractitionerId = await getMyPractitionerId(userToken, secrets);
   console.log(`User initiating delete action is Practitioner/${currentUserPractitionerId}`);

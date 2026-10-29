@@ -1,24 +1,18 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Person, RelatedPerson } from 'fhir/r4b';
-import {
-  createUserResourcesForPatient,
-  getCoding,
-  INVALID_INPUT_ERROR,
-  INVALID_RESOURCE_ID_ERROR,
-  isValidUUID,
-  PRIVATE_EXTENSION_BASE_URL,
-  Secrets,
-  UpdatePatientLoginPhoneNumbersInput,
-} from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  reportMissingUserRelatedPerson,
-  validateJsonBody,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+import { PRIVATE_EXTENSION_BASE_URL } from 'utils/lib/fhir/constants';
+import { getCoding } from 'utils/lib/fhir/helpers';
+import { createUserResourcesForPatient } from 'utils/lib/fhir/patient';
+import { Secrets } from 'utils/lib/secrets';
+import { UpdatePatientLoginPhoneNumbersInput } from 'utils/lib/types/api/patient-login-phone-numbers.types';
+import { INVALID_INPUT_ERROR, INVALID_RESOURCE_ID_ERROR } from 'utils/lib/types/errors';
+import { isValidUUID } from 'utils/lib/validation/helper';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient, validateJsonBody } from '../../../shared/helpers';
+import { reportMissingUserRelatedPerson } from '../../../shared/invariants';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { getPersonPhone } from '../get-login-phone-numbers';
 
 const ZAMBDA_NAME = 'update-login-phone-numbers';
@@ -32,7 +26,7 @@ interface Input extends UpdatePatientLoginPhoneNumbersInput {
 export const index = wrapHandler(ZAMBDA_NAME, async (zambdaInput: ZambdaInput): Promise<APIGatewayProxyResult> => {
   const input = validateRequestParameters(zambdaInput);
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, input.secrets);
-  const oystehr = createOystehrClient(m2mToken, input.secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, input.secrets);
   await updateLoginPhoneNumbers(input, oystehr);
   return {
     statusCode: 200,

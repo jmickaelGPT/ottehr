@@ -32,25 +32,24 @@ import {
   withFollowUpEncounterId,
 } from 'src/features/visits/in-person/routing/helpers';
 import { ROUTER_PATH } from 'src/features/visits/in-person/routing/routesInPerson';
-import { getVisitTypeLabelForTypeAndServiceMode } from 'src/shared/utils';
+import { getVisitTypeLabelForTypeAndServiceMode } from 'src/shared/utils/formatLabelValue';
 import { visitTypeToInPersonLabel, visitTypeToTelemedLabel } from 'src/types/types';
 import styled from 'styled-components';
+import { getAnnotationFollowupStatusLabel, getFollowUpProgressNotePathSegment } from 'utils/lib/fhir/encounter';
+import { AppointmentType, visitStatusArray } from 'utils/lib/types/api/appointment.types';
 import {
   AppointmentHistoryRow,
-  AppointmentType,
-  BOOKING_CONFIG,
   FollowUpVisitHistoryRow,
-  formatMinutes,
-  getAnnotationFollowupStatusLabel,
-  getFollowUpProgressNotePathSegment,
-  getServiceCategoryAbbreviation,
   PatientVisitListResponse,
-  ServiceMode,
-  visitStatusArray,
-} from 'utils';
+} from 'utils/lib/types/api/patient-visit-history.types';
+import { ServiceMode } from 'utils/lib/types/common';
+import { formatMinutes } from 'utils/lib/utils/visitUtils';
 import { FEATURE_FLAGS } from '../constants/feature-flags';
 import { formatISOStringToDateAndTime } from '../helpers/formatDateTime';
 import { useApiClients } from '../hooks/useAppClients';
+import { useMergedServiceCategories } from '../hooks/useMergedServiceCategories';
+import { useServiceCategoryAbbreviationResolver } from '../hooks/useServiceCategoryAbbreviation';
+import { filterVisitsByServiceCategory } from './patientEncountersFilters';
 import { RoundedButton } from './RoundedButton';
 
 type PatientEncountersGridProps = {
@@ -128,7 +127,7 @@ const columns: TableColumn[] = [
   { id: 'dateTime', label: 'Date & Time', sortable: true, width: 150 },
   { id: 'status', label: 'Status', width: 140 },
   { id: 'type', label: 'Type & Service Category', width: 180 },
-  { id: 'reason', label: 'Reason for visit', width: 150 },
+  { id: 'reason', label: "Reason for today's visit", width: 150 },
   { id: 'provider', label: 'Provider', width: 150 },
   { id: 'office', label: 'Office', width: 150 },
   { id: 'los', label: 'LOS', width: 100 },
@@ -144,12 +143,14 @@ export const PatientEncountersGrid: FC<PatientEncountersGridProps> = (props) => 
   const [period, setPeriod] = useState(0);
   const [status, setStatus] = useState('all');
   const [serviceCategory, setServiceCategory] = useState('all');
+  const serviceCategories = useMergedServiceCategories();
+  const resolveServiceCategoryAbbr = useServiceCategoryAbbreviationResolver();
   const [hideCancelled, setHideCancelled] = useState(false);
   const [hideNoShow, setHideNoShow] = useState(false);
   const [sortField, setSortField] = useState<SortField>('dateTime');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [page, setPage] = useState(0);
-  const [rowsPerPage, setRowsPerPage] = useState(5);
+  const [rowsPerPage, setRowsPerPage] = useState(20);
 
   const { oystehrZambda } = useApiClients();
   const navigate = useNavigate();
@@ -202,7 +203,7 @@ export const PatientEncountersGrid: FC<PatientEncountersGridProps> = (props) => 
     }
 
     if (serviceCategory !== 'all') {
-      filtered = filtered.filter((item) => item.serviceCategory === serviceCategory);
+      filtered = filterVisitsByServiceCategory(filtered, serviceCategory);
     }
 
     // Apply sorting
@@ -242,7 +243,7 @@ export const PatientEncountersGrid: FC<PatientEncountersGridProps> = (props) => 
         return encounter.dateTime ? formatISOStringToDateAndTime(encounter.dateTime) : '-';
       case 'type': {
         const typeText = encounter.type ?? '-';
-        const serviceCategoryAbbr = getServiceCategoryAbbreviation(encounter.serviceCategory);
+        const serviceCategoryAbbr = resolveServiceCategoryAbbr(encounter.serviceCategory);
         return (
           <Stack component="span" direction="column" spacing={0}>
             <Typography variant="body2">{typeText}</Typography>
@@ -301,7 +302,7 @@ export const PatientEncountersGrid: FC<PatientEncountersGridProps> = (props) => 
         return row.status;
       case 'type': {
         const typeLabel = getVisitTypeLabelForTypeAndServiceMode({ type: row.type, serviceMode: row.serviceMode });
-        const serviceCategoryAbbr = getServiceCategoryAbbreviation(row.serviceCategory);
+        const serviceCategoryAbbr = resolveServiceCategoryAbbr(row.serviceCategory);
         return (
           <Stack component="span" direction="column" spacing={0}>
             <Typography variant="body2">{typeLabel}</Typography>
@@ -344,7 +345,11 @@ export const PatientEncountersGrid: FC<PatientEncountersGridProps> = (props) => 
           Encounters - {totalCount}
         </Typography>
         {latestVisitDate && <Typography>Latest visit: {formatISOStringToDateAndTime(latestVisitDate)}</Typography>}
-        <RoundedButton to="/visits/add" target="_blank" variant="contained" startIcon={<AddIcon fontSize="small" />}>
+        <RoundedButton
+          to={patient?.id ? `/visits/add?patientId=${patient.id}` : '/visits/add'}
+          variant="contained"
+          startIcon={<AddIcon fontSize="small" />}
+        >
           New Visit
         </RoundedButton>
         <RoundedButton
@@ -378,9 +383,9 @@ export const PatientEncountersGrid: FC<PatientEncountersGridProps> = (props) => 
           }}
         >
           <MenuItem value="all">All</MenuItem>
-          {BOOKING_CONFIG.serviceCategories.map((sc) => (
-            <MenuItem key={sc.category.code} value={sc.category.code}>
-              {sc.category.display}
+          {serviceCategories.map((sc) => (
+            <MenuItem key={sc.code} value={sc.code}>
+              {sc.display}
             </MenuItem>
           ))}
         </TextField>
@@ -551,7 +556,7 @@ export const PatientEncountersGrid: FC<PatientEncountersGridProps> = (props) => 
       </TableContainer>
 
       <TablePagination
-        rowsPerPageOptions={[5]}
+        rowsPerPageOptions={[20]}
         component="div"
         count={filtered.length}
         rowsPerPage={rowsPerPage}

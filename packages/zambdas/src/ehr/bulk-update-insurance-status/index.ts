@@ -1,15 +1,24 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Operation } from 'fast-json-patch';
+import { chunkThings } from 'utils/lib/fhir/chat';
+import { getPatchBinary } from 'utils/lib/fhir/resourcePatch';
+import { Secrets } from 'utils/lib/secrets';
 import {
   BulkUpdateInsuranceStatusInput,
   BulkUpdateInsuranceStatusResponse,
-  chunkThings,
-  getPatchBinary,
-  Secrets,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../shared';
-import { validateRequestParameters } from './validateRequestParameters';
+} from 'utils/lib/types/api/bulk-update-insurance-status.types';
+import { z } from 'zod';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { validateWithSchema } from '../../shared/validation';
+
+export const BulkUpdateInsuranceStatusBodySchema = z.object({
+  insuranceIds: z.array(z.string().uuid()).min(1),
+  active: z.boolean(),
+});
 
 const ZAMBDA_NAME = 'bulk-update-insurance-status';
 const BATCH_SIZE = 100;
@@ -17,11 +26,11 @@ const BATCH_SIZE = 100;
 let m2mToken: string;
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  const validatedParameters = validateRequestParameters(input);
+  const validatedParameters = validateWithSchema(BulkUpdateInsuranceStatusBodySchema, input);
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, validatedParameters.secrets);
 
-  const oystehr = createOystehrClient(m2mToken, validatedParameters.secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, validatedParameters.secrets);
   console.log('Created Oystehr client');
 
   const response = await performEffect(oystehr, validatedParameters);

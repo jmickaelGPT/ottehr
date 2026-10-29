@@ -1,8 +1,8 @@
 import Oystehr from '@oystehr/sdk';
 import { AuditEvent } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import { getSecret, Secrets, SecretsKeys } from 'utils';
-import { ZambdaInput } from './types';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { ZambdaInput } from './types/common';
 
 export enum AuditableZambdaEndpoints {
   appointmentCancel = 'cancel-appointment',
@@ -12,6 +12,7 @@ export enum AuditableZambdaEndpoints {
   paperworkUpdate = 'update-paperwork-in-progress',
   submitPaperwork = 'submit-paperwork',
   patchPaperwork = 'patch-paperwork',
+  patientCreate = 'create-patient',
 }
 
 function getEventAction(endpoint: AuditableZambdaEndpoints): 'C' | 'U' {
@@ -24,6 +25,7 @@ function getEventAction(endpoint: AuditableZambdaEndpoints): 'C' | 'U' {
     case AuditableZambdaEndpoints.submitPaperwork:
       return 'U'; // update
     case AuditableZambdaEndpoints.appointmentCreate:
+    case AuditableZambdaEndpoints.patientCreate:
       return 'C'; // create
   }
 }

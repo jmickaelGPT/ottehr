@@ -1,4 +1,5 @@
 import { FhirResource } from 'fhir/r4b';
+import { FormTemplateRejection } from '../api/form-template.types';
 
 export enum APIErrorCode {
   // 40xx
@@ -27,10 +28,13 @@ export enum APIErrorCode {
   RESOURCE_INCOMPLETE_FOR_OPERATION = 4022,
   ALREADY_EXISTS = 4023,
   CONCURRENT_UPDATE = 4024,
+  RESOURCE_HAS_DEPENDENTS = 4025,
+  SERVICE_MODE_NOT_AVAILABLE = 4026,
   // 41xx
   QUESTIONNAIRE_RESPONSE_INVALID = 4100,
   QUESTIONNAIRE_NOT_FOUND_FOR_QR = 4101,
   FHIR_RESOURCE_IS_GONE = 4102,
+  FHIR_RESOURCE_VALIDATION_ERROR = 4103,
   PRECONDITION_FAILED = 4120,
   // 42xx
   MISSING_REQUEST_BODY = 4200,
@@ -38,6 +42,7 @@ export enum APIErrorCode {
   INVALID_RESOURCE_ID = 4202,
   MISSING_AUTH_TOKEN = 4203,
   MISSING_REQUEST_SECRETS = 4204,
+  PAYLOAD_TOO_LARGE = 4205,
   // 43xx
   CANNOT_JOIN_CALL_NOT_IN_PROGRESS = 4300,
   MISSING_BILLING_PROVIDER_DETAILS = 4301,
@@ -50,6 +55,10 @@ export enum APIErrorCode {
   // 434x
   INVALID_INPUT = 4340,
   APPOINTMENT_ALREADY_EXISTS = 4341,
+  PRACTITIONER_SCHEDULE_CONFLICT = 4342,
+  APPOINTMENT_SEARCH_TOO_BROAD = 4343,
+  CLAIM_SEARCH_TOO_BROAD = 4344,
+  VERSION_HISTORY_UNAVAILABLE = 4345,
   // 44xx
   EXTERNAL_LAB_GENERAL = 4400,
   MISSING_NLM_API_KEY_ERROR = 4401,
@@ -58,13 +67,31 @@ export enum APIErrorCode {
   ADMIN_IN_HOUSE_TEST_EXISTS = 4404,
   LABEL_PRINTING_GENERAL = 4405,
   RADIOLOGY_GENERAL = 4406,
+  MANAGED_QUESTIONNAIRE_GENERAL = 4407,
+  INSURANCE_CARD_IMAGE_GENERAL = 4408,
+  PAPERWORK_FLOW_GENERAL = 4409,
+  UNSOLICITED_RESULTS_ALREADY_MATCHED = 4410,
+  FILE_STORAGE_REQUEST_REJECTED = 4411,
+  // A PDF offered as a form template that cannot be used as one. The analysis itself succeeded; these
+  // say what it found, and each names a different thing the administrator has to go and fix.
+  FORM_TEMPLATE_ENCRYPTED = 4412,
+  FORM_TEMPLATE_FILLING_NOT_PERMITTED = 4413,
+  FORM_TEMPLATE_CERTIFIED = 4414,
+  FORM_TEMPLATE_DYNAMIC_XFA = 4415,
+  FORM_TEMPLATE_UNREADABLE = 4416,
 
   // 45xx
   STRIPE_PAYMENT_ERROR_GENERIC = 4500,
   STRIPE_PAYMENT_ERROR_SPECIFIC = 45001,
+  ERA_IMPORT_FAILED = 4502,
+  MANUAL_PAYMENT_CONFLICT = 4503,
+  STATEMENT_BILLING_CLAIM_NOT_FOUND = 4504,
+  MANUAL_ERA_VERSION_CONFLICT = 4505,
 
   // 50xx
   MISCONFIGURED_ENVIRONMENT = 5000,
+  REPORT_CACHE_WRITE_FAILED = 5001,
+  REPORT_REFRESH_QUEUE_FAILED = 5002,
 }
 
 export interface APIError {
@@ -72,6 +99,48 @@ export interface APIError {
   message: string;
   statusCode?: number;
 }
+
+/**
+ * Why a PDF cannot be used as a form template, keyed by what the analysis found.
+ *
+ * Server-side because the server is what knows: the client would otherwise receive `certified` and have to
+ * carry its own dictionary of what each status means, which makes the wording a product decision living in
+ * whichever app happens to call the endpoint.
+ *
+ * Thrown rather than returned. `topLevelCatch` recognises an `APIError` and returns it to the caller
+ * without paging anyone, so these reach the administrator as an explanation while staying out of Sentry —
+ * which is the distinction that matters, since an unusable PDF is a fact about the upload rather than a
+ * fault in the service.
+ *
+ * Keyed by `FormTemplateRejection`, so a rejection status added to the analysis union without a message
+ * here fails to compile.
+ */
+export const FORM_TEMPLATE_REJECTED_ERRORS: Record<FormTemplateRejection, APIError> = {
+  encrypted: {
+    code: APIErrorCode.FORM_TEMPLATE_ENCRYPTED,
+    message:
+      'This PDF needs a password to open, so its fields cannot be read. Please upload a copy that opens without one.',
+  },
+  fillingNotPermitted: {
+    code: APIErrorCode.FORM_TEMPLATE_FILLING_NOT_PERMITTED,
+    message:
+      'The publisher of this PDF has disallowed filling in its form fields, so it cannot be prefilled. Please use a copy that permits form filling.',
+  },
+  certified: {
+    code: APIErrorCode.FORM_TEMPLATE_CERTIFIED,
+    message:
+      'This PDF carries a certifying signature, and prefilling it would invalidate that signature — recipients would see the form flagged as altered. Please use an unsigned copy of the form.',
+  },
+  dynamicXfa: {
+    code: APIErrorCode.FORM_TEMPLATE_DYNAMIC_XFA,
+    message:
+      'This PDF uses Adobe’s dynamic XFA format, which browsers cannot display. Please upload a standard PDF version of the form.',
+  },
+  unreadable: {
+    code: APIErrorCode.FORM_TEMPLATE_UNREADABLE,
+    message: 'This file could not be read as a PDF. Please check the file and try again.',
+  },
+};
 
 export const isApiError = (errorObject: unknown | undefined): boolean => {
   if (!errorObject) {
@@ -112,9 +181,38 @@ export const isApiError = (errorObject: unknown | undefined): boolean => {
   return false;
 };
 
-export const NOT_AUTHORIZED = {
+export const errorHasStatusCode = (error: any, statusCode: number): boolean =>
+  error?.code === statusCode || error?.statusCode === statusCode || error?.message?.includes(`${statusCode}`);
+
+export const NOT_AUTHORIZED: APIError = {
   code: APIErrorCode.NOT_AUTHORIZED,
   message: 'You are not authorized to access this data',
+  statusCode: 401,
+};
+
+/**
+ * Returned by a guarded hard-delete when the target still has dependents and the
+ * caller didn't pass `force`. The message enumerates what's attached so the UI can
+ * show a specific destructive-action warning; a follow-up call with `force: true`
+ * proceeds.
+ */
+export const RESOURCE_HAS_DEPENDENTS_ERROR = (dependents: {
+  schedules: number;
+  practitionerRoles: number;
+  appointments: number;
+}): APIError => {
+  const parts: string[] = [];
+  const plural = (n: number, singular: string): string => `${n} ${singular}${n === 1 ? '' : 's'}`;
+  if (dependents.schedules) parts.push(plural(dependents.schedules, 'schedule'));
+  if (dependents.practitionerRoles) parts.push(plural(dependents.practitionerRoles, 'provider role'));
+  if (dependents.appointments) parts.push(plural(dependents.appointments, 'appointment'));
+  return {
+    code: APIErrorCode.RESOURCE_HAS_DEPENDENTS,
+    message:
+      `This location has ${parts.join(', ')} associated with it. Deleting it will also delete its ` +
+      `schedules and provider roles. Appointments will be kept but will reference a deleted location.`,
+    statusCode: 409,
+  };
 };
 
 export const CANT_UPDATE_CHECKED_IN_APT_ERROR = {
@@ -132,9 +230,10 @@ export const DOB_UNCONFIRMED_ERROR = {
   message: 'We could not verify the date of birth supplied for this patient',
 };
 
-export const NO_READ_ACCESS_TO_PATIENT_ERROR = {
+export const NO_READ_ACCESS_TO_PATIENT_ERROR: APIError = {
   code: APIErrorCode.NO_READ_ACCESS_TO_PATIENT,
   message: `You are not authorized to view this patient's data`,
+  statusCode: 403,
 };
 
 export const APPOINTMENT_NOT_FOUND_ERROR = {
@@ -233,6 +332,35 @@ export const SCHEDULE_NOT_FOUND_CUSTOM_ERROR = (message: string): APIError => ({
   message,
 });
 
+// Raised when a create/update/reactivate would leave more than one active
+// PractitionerRole covering the same (practitioner, location, category) tuple.
+// `categoryNames` is the list of overlapping category display names, used
+// verbatim in the message so the admin knows which schedule to reconcile.
+export const PRACTITIONER_SCHEDULE_CONFLICT_ERROR = (categoryNames: string[]): APIError => ({
+  code: APIErrorCode.PRACTITIONER_SCHEDULE_CONFLICT,
+  message: `This provider already has an active schedule at this location offering ${categoryNames.join(
+    ', '
+  )}. Remove ${categoryNames.length === 1 ? 'it' : 'them'} from that schedule first, or pick a different location.`,
+});
+
+export const APPOINTMENT_SEARCH_TOO_BROAD_ERROR: APIError = {
+  code: APIErrorCode.APPOINTMENT_SEARCH_TOO_BROAD,
+  message:
+    'This search returned too much data to load. Please narrow the date range or select fewer locations/providers and try again.',
+};
+
+export const CLAIM_SEARCH_TOO_BROAD_ERROR: APIError = {
+  code: APIErrorCode.CLAIM_SEARCH_TOO_BROAD,
+  message:
+    'This search returned too much data to load. Please lower the rows per page, or narrow the date range or other filters, and try again.',
+};
+
+export const VERSION_HISTORY_UNAVAILABLE_ERROR: APIError = {
+  code: APIErrorCode.VERSION_HISTORY_UNAVAILABLE,
+  statusCode: 503,
+  message: 'The version history is temporarily unavailable. Please try again in a few seconds.',
+};
+
 export const APPOINTMENT_CANT_BE_IN_PAST_ERROR = {
   code: APIErrorCode.APPOINTMENT_CANT_BE_IN_PAST,
   message: "An appointment can't be scheduled for a date in the past",
@@ -273,6 +401,19 @@ export const FHIR_RESOURCE_IS_GONE = (): APIError => ({
   statusCode: 410,
   message: `The requested resource is gone`,
 });
+
+export const FHIR_RESOURCE_VALIDATION_ERROR = (message: string): APIError => ({
+  code: APIErrorCode.FHIR_RESOURCE_VALIDATION_ERROR,
+  statusCode: 422,
+  message,
+});
+
+export const CLAIM_NOT_READY_FOR_X12_EXPORT: APIError = {
+  code: APIErrorCode.RESOURCE_INCOMPLETE_FOR_OPERATION,
+  statusCode: 400,
+  message:
+    "This claim isn't ready to export as X12. It may be missing required information or contain invalid references. Complete the claim and try again.",
+};
 
 export const MISSING_REQUIRED_PARAMETERS = (params: string[]): APIError => {
   return {
@@ -326,6 +467,46 @@ export const INVALID_INPUT_ERROR = (message: string): APIError => {
     message,
   };
 };
+
+export const REPORT_CACHE_WRITE_FAILED_ERROR = (message: string): APIError => {
+  return {
+    code: APIErrorCode.REPORT_CACHE_WRITE_FAILED,
+    message,
+  };
+};
+
+export const REPORT_REFRESH_QUEUE_FAILED_ERROR = (message: string): APIError => {
+  return {
+    code: APIErrorCode.REPORT_REFRESH_QUEUE_FAILED,
+    message,
+  };
+};
+
+export const ERA_IMPORT_FAILED_ERROR = (message: string, statusCode?: number): APIError => {
+  return {
+    code: APIErrorCode.ERA_IMPORT_FAILED,
+    message,
+    statusCode,
+  };
+};
+// Raised when a record-billing-manual-payment idempotency key is replayed with different payment details.
+export const MANUAL_PAYMENT_CONFLICT_ERROR = (idempotencyKey: string): APIError => ({
+  code: APIErrorCode.MANUAL_PAYMENT_CONFLICT,
+  statusCode: 409,
+  message: `A different payment was already recorded with idempotency key "${idempotencyKey}". Use a new key to record a new payment.`,
+});
+// Raised when a manual ERA is saved from a stale copy (someone else saved it in the meantime).
+export const MANUAL_ERA_VERSION_CONFLICT_ERROR: APIError = {
+  code: APIErrorCode.MANUAL_ERA_VERSION_CONFLICT,
+  statusCode: 409,
+  message: 'This remit was changed by someone else since you opened it. Reload the page to see the latest version.',
+};
+// Raised when a statement is requested for a visit that was never billed through Ottehr billing.
+export const STATEMENT_BILLING_CLAIM_NOT_FOUND_ERROR = (encounterId: string): APIError => ({
+  code: APIErrorCode.STATEMENT_BILLING_CLAIM_NOT_FOUND,
+  statusCode: 404,
+  message: `No billing claim found for Encounter/${encounterId}, so a statement cannot be generated.`,
+});
 export const MISSING_PATIENT_COVERAGE_INFO_ERROR = {
   code: APIErrorCode.MISSING_PATIENT_COVERAGE_INFO,
   message: 'No coverage information found for this patient',
@@ -339,6 +520,13 @@ export const MISSING_NLM_API_KEY_ERROR: APIError = {
 export const EXTERNAL_LAB_ERROR = (message: string): APIError => {
   return {
     code: APIErrorCode.EXTERNAL_LAB_GENERAL,
+    message,
+  };
+};
+
+export const EXTERNAL_LAB_UNSOLICITED_RESULTS_ALREADY_MATCHED = (message: string): APIError => {
+  return {
+    code: APIErrorCode.UNSOLICITED_RESULTS_ALREADY_MATCHED,
     message,
   };
 };
@@ -358,12 +546,26 @@ export const IN_HOUSE_LAB_ERROR = (message: string): APIError => {
   };
 };
 
+export const FILE_STORAGE_REQUEST_REJECTED_ERROR = (message: string): APIError => {
+  return {
+    code: APIErrorCode.FILE_STORAGE_REQUEST_REJECTED,
+    message,
+    statusCode: 400,
+  };
+};
+
 export const MISCONFIGURED_ENVIRONMENT_ERROR = (message: string): APIError => {
   return {
     code: APIErrorCode.MISCONFIGURED_ENVIRONMENT,
     message,
   };
 };
+
+export const SERVICE_MODE_NOT_AVAILABLE_ERROR = (message: string): APIError => ({
+  code: APIErrorCode.SERVICE_MODE_NOT_AVAILABLE,
+  message,
+  statusCode: 400,
+});
 
 export const SLOT_UNAVAILABLE_ERROR = {
   code: APIErrorCode.SLOT_UNAVAILABLE,
@@ -478,6 +680,29 @@ export const PRECONDITION_FAILED = (message?: string): APIError => ({
 export const RADIOLOGY_ERROR = (message: string): APIError => {
   return {
     code: APIErrorCode.RADIOLOGY_GENERAL,
+    message,
+  };
+};
+
+export const MANAGED_QUESTIONNAIRE_ERROR = (message: string): APIError => {
+  return {
+    code: APIErrorCode.MANAGED_QUESTIONNAIRE_GENERAL,
+    message,
+  };
+};
+
+/** Insurance-card image processing failure (download / rotate / re-store) — a server-side 500, not bad input. */
+export const INSURANCE_CARD_IMAGE_ERROR = (message: string): APIError => {
+  return {
+    code: APIErrorCode.INSURANCE_CARD_IMAGE_GENERAL,
+    message,
+    statusCode: 500,
+  };
+};
+
+export const PAPERWORK_FLOW_ERROR = (message: string): APIError => {
+  return {
+    code: APIErrorCode.PAPERWORK_FLOW_GENERAL,
     message,
   };
 };

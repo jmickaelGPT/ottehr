@@ -2,73 +2,83 @@ import Oystehr, { User } from '@oystehr/sdk';
 import { Appointment, Location, Practitioner, PractitionerRole, Schedule, Slot } from 'fhir/r4b';
 import { DateTime } from 'luxon';
 import {
-  AllStates,
-  APPOINTMENT_ALREADY_EXISTS_ERROR,
-  CanonicalUrl,
-  CHARACTER_LIMIT_EXCEEDED_ERROR,
-  checkSlotAvailable,
+  makeSlotAtLocationExtensionEntry,
+  parseQuestionnaireCanonicalExtension,
+  SERVICE_CATEGORY_SYSTEM,
+  SLOT_FALLBACK_REROUTED_TAG,
+  SLOT_QUESTIONNAIRE_CANONICAL_EXTENSION_URL,
+} from 'utils/lib/fhir/constants';
+import { isLocationVirtual, locationSupportsServiceMode } from 'utils/lib/fhir/location';
+import { resolveServiceCategory } from 'utils/lib/fhir/serviceCategoryResolution';
+import { isPhoneNumberValid } from 'utils/lib/helpers/helpers';
+import { BOOKING_CONFIG } from 'utils/lib/ottehr-config/booking';
+import { Secrets } from 'utils/lib/secrets';
+import {
   CreateAppointmentInputParams,
-  FHIR_RESOURCE_NOT_FOUND,
   FollowUpOptions,
+} from 'utils/lib/types/api/prebook-create-appointment/prebook-create-appointment.types';
+import { ScheduleOwnerFhirResource } from 'utils/lib/types/api/schedules';
+import { AllStates, CanonicalUrl, PersonSex, ServiceMode } from 'utils/lib/types/common';
+import { REASON_FOR_VISIT_SEPARATOR } from 'utils/lib/types/constants';
+import { PatientInfo, VisitType } from 'utils/lib/types/data/telemed/appointments/create-appointment.types';
+import {
+  APPOINTMENT_ALREADY_EXISTS_ERROR,
+  CHARACTER_LIMIT_EXCEEDED_ERROR,
+  FHIR_RESOURCE_NOT_FOUND,
+  INVALID_INPUT_ERROR,
+  MISSING_REQUIRED_PARAMETERS,
+  NO_READ_ACCESS_TO_PATIENT_ERROR,
+  SLOT_UNAVAILABLE_ERROR,
+} from 'utils/lib/types/errors';
+import {
+  checkSlotAvailable,
   getServiceModeFromScheduleOwner,
   getServiceModeFromSlot,
   getSlotIsPostTelemed,
   getSlotIsWalkin,
-  INVALID_INPUT_ERROR,
-  isLocationVirtual,
-  makeSlotAtLocationExtensionEntry,
-  MISSING_REQUIRED_PARAMETERS,
-  NO_READ_ACCESS_TO_PATIENT_ERROR,
-  parseQuestionnaireCanonicalExtension,
-  PatientInfo,
-  PersonSex,
-  REASON_FOR_VISIT_SEPARATOR,
-  REASON_MAXIMUM_CHAR_LIMIT,
-  resolveServiceCategory,
-  ScheduleOwnerFhirResource,
-  Secrets,
-  SERVICE_CATEGORY_SYSTEM,
-  ServiceMode,
-  SLOT_FALLBACK_REROUTED_TAG,
-  SLOT_QUESTIONNAIRE_CANONICAL_EXTENSION_URL,
-  SLOT_UNAVAILABLE_ERROR,
-  VisitType,
-} from 'utils';
-import {
-  checkIsEHRUser,
-  isTestUser,
-  phoneRegex,
-  resolveBookingLocationId,
-  userHasAccessToPatient,
-  ZambdaInput,
-} from '../../../shared';
+} from 'utils/lib/utils/scheduleUtils';
+import { REASON_MAXIMUM_CHAR_LIMIT } from 'utils/lib/validation/constants';
+import { z } from 'zod';
+import { checkIsEHRUser, isTestUser, userHasAccessToPatient } from '../../../shared/auth';
+import { resolveBookingLocationId } from '../../../shared/resolveBookingLocationId';
+import { ZambdaInput } from '../../../shared/types/common';
+import { safeJsonParse, safeValidate } from '../../../shared/validation';
 import { getCanonicalUrlForPrevisitQuestionnaire } from '../helpers';
 import { tryGroupMemberFallback } from './groupMemberFallback';
 
 export type CreateAppointmentBasicInput = CreateAppointmentInputParams & {
   secrets: Secrets | null;
-  user: User;
-  isEHRUser: boolean;
+  user: User | undefined;
+  isM2M: boolean;
+  isEHRUser: boolean | undefined;
   locationState?: string;
   appointmentMetadata?: Appointment['meta'];
 };
 
-export function validateCreateAppointmentParams(input: ZambdaInput, user: User): CreateAppointmentBasicInput {
+const CreateAppointmentBodySchema = z.object({
+  slotId: z.string().uuid(),
+  patient: z.record(z.unknown()),
+  language: z.string().optional(),
+  locationState: z.string().optional(),
+  appointmentMetadata: z.record(z.unknown()).optional(),
+  followUpOptions: z.unknown().optional(),
+});
+
+export function validateCreateAppointmentParams(
+  input: ZambdaInput,
+  user: User | undefined,
+  isM2M: boolean
+): CreateAppointmentBasicInput {
   if (!input.body) {
     throw new Error('No request body provided');
   }
   const isEHRUser = user && checkIsEHRUser(user);
 
-  const bodyJSON = JSON.parse(input.body);
-  const { slotId, language, patient, locationState, appointmentMetadata, followUpOptions } = bodyJSON;
+  const { slotId, language, patient, locationState, appointmentMetadata, followUpOptions } = safeValidate(
+    CreateAppointmentBodySchema,
+    safeJsonParse(input.body)
+  );
   console.log('patient:', patient, 'slotId:', slotId);
-  // Check existence of necessary fields
-  if (patient === undefined) {
-    throw MISSING_REQUIRED_PARAMETERS(['patient']);
-  }
-  if (slotId === undefined) {
-    throw MISSING_REQUIRED_PARAMETERS(['slotId']);
-  }
 
   console.log('patient input:', JSON.stringify(patient));
   // Patient details
@@ -88,37 +98,41 @@ export function validateCreateAppointmentParams(input: ZambdaInput, user: User):
   if (Boolean(patient.sex) === false) {
     missingRequiredPatientFields.push('sex');
   }
-  if (!isEHRUser && Boolean(patient.email === undefined)) {
+  if (!isM2M && !isEHRUser && !patient.email && !patient.noEmail) {
     missingRequiredPatientFields.push('email');
   }
   if (missingRequiredPatientFields.length > 0) {
     throw MISSING_REQUIRED_PARAMETERS(missingRequiredPatientFields.map((field) => `patient.${field}`));
   }
-  const isInvalidPatientDate = !DateTime.fromISO(patient.dateOfBirth).isValid;
+  const isInvalidPatientDate = !DateTime.fromISO(patient.dateOfBirth as string).isValid;
   if (isInvalidPatientDate) {
     throw INVALID_INPUT_ERROR('"patient.dateOfBirth" was not read as a valid date');
   }
 
-  if (patient.sex && !Object.values(PersonSex).includes(patient.sex)) {
+  if (patient.sex && !Object.values(PersonSex).includes(patient.sex as PersonSex)) {
     throw INVALID_INPUT_ERROR(
       `"patient.sex" must be one of the following values: ${JSON.stringify(Object.values(PersonSex))}`
     );
   }
 
   if (isEHRUser && !patient.email) {
-    patient.emailUser = undefined;
+    (patient as Record<string, unknown>).emailUser = undefined;
   }
 
-  if (patient?.phoneNumber && !phoneRegex.test(patient.phoneNumber)) {
+  // Accept any format the downstream storage step (formatPhoneNumber) can normalize.
+  // formatPhoneNumber strips separators before validating, so the gate must do the same —
+  // otherwise formatted values like "(202) 123-4567" or "202-123-4567" are rejected here
+  // even though they'd store fine as "+12021234567".
+  if (patient?.phoneNumber && !isPhoneNumberValid((patient.phoneNumber as string).replace(/[^0-9+]/g, ''))) {
     throw INVALID_INPUT_ERROR('patient phone number is not valid');
   }
 
-  patient.reasonForVisit = `${patient.reasonForVisit}${
+  (patient as Record<string, unknown>).reasonForVisit = `${patient.reasonForVisit}${
     patient?.reasonAdditional ? `${REASON_FOR_VISIT_SEPARATOR}${patient?.reasonAdditional}` : ''
   }`;
 
-  if (patient.reasonForVisit && patient.reasonForVisit.length > REASON_MAXIMUM_CHAR_LIMIT) {
-    throw CHARACTER_LIMIT_EXCEEDED_ERROR('Reason for visit', REASON_MAXIMUM_CHAR_LIMIT);
+  if (patient.reasonForVisit && (patient.reasonForVisit as string).length > REASON_MAXIMUM_CHAR_LIMIT) {
+    throw CHARACTER_LIMIT_EXCEEDED_ERROR("Reason for today's visit", REASON_MAXIMUM_CHAR_LIMIT);
   }
 
   if (language && ['en', 'es'].includes(language) === false) {
@@ -146,12 +160,13 @@ export function validateCreateAppointmentParams(input: ZambdaInput, user: User):
   return {
     slotId,
     user,
+    isM2M,
     isEHRUser,
-    patient,
+    patient: patient as unknown as PatientInfo,
     secrets: input.secrets,
     language,
     locationState,
-    appointmentMetadata,
+    appointmentMetadata: appointmentMetadata as Appointment['meta'],
     followUpOptions: validatedFollowUpOptions,
   };
 }
@@ -184,7 +199,7 @@ export interface CreateAppointmentEffectInput {
   scheduleOwner: ScheduleOwnerFhirResource;
   serviceMode: ServiceMode;
   patient: PatientInfo;
-  user: User;
+  user: User | undefined;
   questionnaireCanonical: CanonicalUrl;
   visitType: VisitType;
   locationState?: string;
@@ -251,14 +266,19 @@ export const createAppointmentComplexValidation = async (
   input: CreateAppointmentBasicInput,
   oystehrClient: Oystehr
 ): Promise<CreateAppointmentEffectInput> => {
-  const { slotId, isEHRUser, user, patient, appointmentMetadata } = input;
+  const { slotId, isM2M, isEHRUser, user, patient, appointmentMetadata } = input;
 
   console.log('createAppointmentComplexValidation metadata:', appointmentMetadata);
 
   let locationState = input.locationState;
 
   // patient input complex validation
-  if (patient.id) {
+  // M2Ms and EHR users can access any patient,
+  // Patient users can access patients they have access to.
+  if (patient.id && !isM2M) {
+    if (!user) {
+      throw NO_READ_ACCESS_TO_PATIENT_ERROR;
+    }
     const userAccess = await userHasAccessToPatient(user, patient.id, oystehrClient);
     if (!user || (!userAccess && !isEHRUser && !isTestUser(user))) {
       throw NO_READ_ACCESS_TO_PATIENT_ERROR;
@@ -312,6 +332,37 @@ export const createAppointmentComplexValidation = async (
   }
   if (appointment?.id) {
     throw APPOINTMENT_ALREADY_EXISTS_ERROR;
+  }
+
+  // Back-compat invariant enforcement on slot.serviceCategory. New Slots
+  // created via create-slot are guaranteed to carry a SERVICE_CATEGORY_SYSTEM
+  // coding (the create-slot invariant catches them at write time). But Slots
+  // persisted before that guard landed, or written directly via FHIR by
+  // admin/migration scripts, may still exist without one. The downstream
+  // Appointment.serviceCategory is derived from slot.serviceCategory, so a
+  // categoryless Slot would produce a categoryless Appointment — exactly the
+  // ambiguity downstream category-aware code (questionnaire resolution,
+  // billing, single-category-project assumptions) reads as broken.
+  //
+  // When the system supports urgent-care as a BOOKING_CONFIG category, treat
+  // it as a safe default — that matches the historical implicit behavior the
+  // codebase leaned on before the invariant was articulated. When it doesn't
+  // (genuinely category-less project — would be unusual but possible) we
+  // refuse rather than silently produce a malformed Appointment. The Slot
+  // itself isn't PATCHed — we mutate the in-memory representation so
+  // downstream code (Appointment build, capacity guard's category read) sees
+  // the resolved category without touching the persisted FHIR record.
+  const slotHasServiceCategoryCoding = (slot.serviceCategory ?? []).some((cc) =>
+    (cc.coding ?? []).some((c) => c.system === SERVICE_CATEGORY_SYSTEM)
+  );
+  if (!slotHasServiceCategoryCoding) {
+    const urgentCare = BOOKING_CONFIG.serviceCategories.find((sc) => sc.category.code === 'urgent-care');
+    if (!urgentCare) {
+      throw INVALID_INPUT_ERROR(
+        'Slot has no service category and the system does not support a default category. Cannot create an Appointment without a service category.'
+      );
+    }
+    slot.serviceCategory = [...(slot.serviceCategory ?? []), { coding: [{ ...urgentCare.category }] }];
   }
 
   // Capacity guard. Reject the booking before any FHIR writes if the
@@ -402,9 +453,11 @@ export const createAppointmentComplexValidation = async (
   // Check if the Slot has a questionnaire canonical extension
   // This allows slots to specify which questionnaire should be used for appointments booked on them
   let questionnaireCanonical: CanonicalUrl;
+
   const slotQuestionnaireExtension = slot.extension?.find(
     (ext) => ext.url === SLOT_QUESTIONNAIRE_CANONICAL_EXTENSION_URL
   );
+
   if (slotQuestionnaireExtension?.valueString) {
     questionnaireCanonical = parseQuestionnaireCanonicalExtension(slotQuestionnaireExtension.valueString);
     console.log('Using questionnaire canonical from slot extension:', questionnaireCanonical);
@@ -452,6 +505,24 @@ export const createAppointmentComplexValidation = async (
       throw INVALID_INPUT_ERROR(`Resolved booking Location is missing an id (expected ${bookingLocationId})`);
     }
     bookingLocation = resolved as ResolvedBookingLocation | undefined;
+  }
+
+  // Reconcile the slot's service mode against what the resolved booking Location
+  // can actually fulfill. A group may offer a mode that a given member's paired
+  // Location doesn't support (e.g. a virtual slot booked through a group whose
+  // provider is only paired with an in-person Location, or vice versa). This is
+  // the backstop for the surfacing filter in get-schedule: without it, the
+  // virtual mismatch fails further down with a confusing "locationState is
+  // required" error, and — worse — the in-person mismatch (in-person slot on a
+  // virtual-only Location) slips through entirely and books a broken visit.
+  // Skipped when no Location resolves (Practitioner/HS actors with no
+  // at-location stamp); mode capability is delegated to the location.ts seam.
+  if (bookingLocation && !locationSupportsServiceMode(bookingLocation, serviceMode)) {
+    throw INVALID_INPUT_ERROR(
+      `The selected time is not available for ${
+        serviceMode === ServiceMode.virtual ? 'virtual' : 'in-person'
+      } visits at this location.`
+    );
   }
 
   // When the caller didn't pass locationState explicitly, derive it from a virtual

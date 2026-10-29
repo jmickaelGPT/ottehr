@@ -1,23 +1,26 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Appointment, DocumentReference, Encounter, Patient, Schedule, Slot } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import {
-  DYMO_30334_LABEL_CONFIG,
-  getMiddleName,
-  getPatientFirstName,
-  getPatientFriendlyId,
-  getPatientLastName,
-  getPresignedURL,
-  getTimezone,
-  MIME_TYPES,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../shared';
+import { getMiddleName, getPatientFirstName, getPatientFriendlyId, getPatientLastName } from 'utils/lib/fhir/patient';
+import { getPresignedURL } from 'utils/lib/helpers/presigned-file-url/helpers';
+import { DYMO_30334_LABEL_CONFIG } from 'utils/lib/types/data/labs/labs.constants';
+import { MIME_TYPES } from 'utils/lib/utils/file';
+import { getTimezone } from 'utils/lib/utils/scheduleUtils';
+import { z } from 'zod';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient } from '../../shared/helpers';
 import {
   createVisitLabelPDF,
   VISIT_LABEL_PDF_DOC_REF_DOCTYPE,
   VisitLabelConfig,
 } from '../../shared/pdf/visit-label-pdf';
-import { validateRequestParameters } from './validateRequestParameters';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { validateWithSchema } from '../../shared/validation';
+
+export const GetVisitLabelBodySchema = z.object({
+  encounterId: z.string().uuid(),
+});
 
 // Lifting up value to outside of the handler allows it to stay in memory across warm lambda invocations
 let m2mToken: string;
@@ -25,15 +28,14 @@ let m2mToken: string;
 const ZAMBDA_NAME = 'get-or-create-visit-label-pdf';
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`Input: ${JSON.stringify(input)}`);
   console.log('Validating input');
-  const { encounterId, secrets } = validateRequestParameters(input);
+  const { encounterId, secrets } = validateWithSchema(GetVisitLabelBodySchema, input);
 
   console.log('Getting token');
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
   console.log('token', m2mToken);
 
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   const labelDocRefs = (
     await oystehr.fhir.search<DocumentReference>({

@@ -1,25 +1,27 @@
 import Oystehr, { BatchInputPostRequest, BatchInputRequest } from '@oystehr/sdk';
+import { captureException } from '@sentry/node-core/light';
 import { Operation } from 'fast-json-patch';
-import { Appointment, Encounter, List, Patient } from 'fhir/r4b';
+import { Account, Appointment, Encounter, List, Patient, Person, RelatedPerson } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import { generate as uuid } from 'short-uuid';
+import { uuid } from 'short-uuid';
 import {
   AppointmentInsuranceRelatedResourcesExtension,
-  appointmentTypeForAppointment,
-  createPatientDocumentLists,
-  createUserResourcesForPatient,
   FHIR_EXTENSION,
-  formatPhoneNumber,
-  getPatchBinary,
+  PATIENT_BILLING_ACCOUNT_TYPE,
+} from 'utils/lib/fhir/constants';
+import { createPatientDocumentLists } from 'utils/lib/fhir/list';
+import {
+  createUserResourcesForPatient,
   getPatientResourceWithVerifiedPhoneNumber,
-  isTelemedAppointment,
   makeSSNIdentifier,
-  normalizePhoneNumber,
-  PATIENT_NOT_FOUND_ERROR,
-  PatientInfo,
-  removeTimeFromDate,
-  User,
-} from 'utils';
+} from 'utils/lib/fhir/patient';
+import { getPatchBinary, normalizePhoneNumber } from 'utils/lib/fhir/resourcePatch';
+import { formatPhoneNumber } from 'utils/lib/helpers/helpers';
+import { User } from 'utils/lib/types/api/user.types';
+import { PATIENT_NO_EMAIL_URL } from 'utils/lib/types/constants';
+import { PatientInfo } from 'utils/lib/types/data/telemed/appointments/create-appointment.types';
+import { PATIENT_NOT_FOUND_ERROR } from 'utils/lib/types/errors';
+import { removeTimeFromDate } from 'utils/lib/utils/date';
 import { checkIsEHRUser } from '../auth';
 import { assertDefined } from '../helpers';
 
@@ -27,11 +29,6 @@ export function getPatientFromAppointment(appointment: Appointment): string | un
   return appointment.participant
     .find((participantTemp) => participantTemp.actor?.reference?.startsWith('Patient/'))
     ?.actor?.reference?.split('/')[1];
-}
-
-// on-demand virtual visits override so they're shown on the 'Active' tab
-export function isOnDemandVirtualAppointment(appointment: Appointment): boolean {
-  return isTelemedAppointment(appointment) && appointmentTypeForAppointment(appointment) === 'walk-in';
 }
 
 export async function patchAppointmentResource(
@@ -68,8 +65,6 @@ export async function patchEncounterResource(
     throw new Error(`Failed to patch Encounter: ${JSON.stringify(error)}`);
   }
 }
-
-export { removePrefix } from 'utils';
 
 export interface AppointmentInsuranceRelatedResRefs {
   primaryCoverage?: string;
@@ -234,15 +229,29 @@ export function creatingPatientUpdateRequest(
     ];
   }
 
+  if (patient.noEmail !== undefined) {
+    const noEmailExtIndex = patientExtension.findIndex((ext) => ext.url === PATIENT_NO_EMAIL_URL);
+    if (noEmailExtIndex >= 0) {
+      patientExtension[noEmailExtIndex] = { url: PATIENT_NO_EMAIL_URL, valueBoolean: patient.noEmail };
+    } else {
+      patientExtension.push({ url: PATIENT_NO_EMAIL_URL, valueBoolean: patient.noEmail });
+    }
+  }
+
   patientPatchOperations.push({
     op: maybeFhirPatient.extension ? 'replace' : 'add',
     path: '/extension',
     value: patientExtension,
   });
 
-  const emailPatchOps = getPatientPatchOpsPatientEmail(maybeFhirPatient, patient.email);
-  if (emailPatchOps.length >= 1) {
-    patientPatchOperations.push(...emailPatchOps);
+  // Only touch email when it was explicitly provided or noEmail was explicitly set to true.
+  // If neither is present (e.g. EHR create-visit form which doesn't collect email), leave the
+  // existing email on the patient resource untouched.
+  if (patient.email !== undefined || patient.noEmail) {
+    const emailPatchOps = getPatientPatchOpsPatientEmail(maybeFhirPatient, patient.noEmail ? undefined : patient.email);
+    if (emailPatchOps.length >= 1) {
+      patientPatchOperations.push(...emailPatchOps);
+    }
   }
 
   const fhirPatientName = assertDefined(maybeFhirPatient.name, 'patient.name');
@@ -360,50 +369,39 @@ export function creatingPatientUpdateRequest(
 
 export function getPatientPatchOpsPatientEmail(maybeFhirPatient: Patient, email: string | undefined): Operation[] {
   const patientPatchOperations: Operation[] = [];
-  // update email
+  const telecom = maybeFhirPatient.telecom;
+
   if (email) {
-    const telecom = maybeFhirPatient.telecom;
-    const curEmail = telecom?.find((telecomToCheck) => telecomToCheck.system === 'email');
-    const curEmailIndex = telecom?.findIndex((telecomToCheck) => telecomToCheck.system === 'email');
+    const curEmail = telecom?.find((t) => t.system === 'email');
+    const curEmailIndex = telecom?.findIndex((t) => t.system === 'email');
     // check email exists in telecom but is different
-    if (telecom && curEmailIndex && curEmailIndex > -1 && email !== curEmail) {
-      telecom[curEmailIndex] = {
-        system: 'email',
-        value: email,
-      };
-      patientPatchOperations.push({
-        op: 'replace',
-        path: '/telecom',
-        value: telecom,
-      });
+    if (telecom && curEmailIndex !== undefined && curEmailIndex > -1 && email !== curEmail?.value) {
+      telecom[curEmailIndex] = { system: 'email', value: email };
+      patientPatchOperations.push({ op: 'replace', path: '/telecom', value: telecom });
     }
     // check if telecom exists but without email
     if (telecom && !curEmail) {
-      telecom.push({
-        system: 'email',
-        value: email,
-      });
-      patientPatchOperations.push({
-        op: 'replace',
-        path: '/telecom',
-        value: telecom,
-      });
+      telecom.push({ system: 'email', value: email });
+      patientPatchOperations.push({ op: 'replace', path: '/telecom', value: telecom });
     }
     // add if no telecom
     if (!telecom) {
-      patientPatchOperations.push({
-        op: 'add',
-        path: '/telecom',
-        value: [
-          {
-            system: 'email',
-            value: email,
-          },
-        ],
-      });
+      patientPatchOperations.push({ op: 'add', path: '/telecom', value: [{ system: 'email', value: email }] });
+    }
+  } else {
+    // noEmail: remove the existing email ContactPoint from telecom if present
+    const curEmailIndex = telecom?.findIndex((t) => t.system === 'email');
+    if (telecom && curEmailIndex !== undefined && curEmailIndex > -1) {
+      const newTelecom = telecom.filter((_, i) => i !== curEmailIndex);
+      if (newTelecom.length > 0) {
+        patientPatchOperations.push({ op: 'replace', path: '/telecom', value: newTelecom });
+      } else {
+        patientPatchOperations.push({ op: 'remove', path: '/telecom' });
+      }
     }
   }
-  return [];
+
+  return patientPatchOperations;
 }
 
 export function creatingPatientCreateRequest(
@@ -451,7 +449,13 @@ export function creatingPatientCreateRequest(
     });
   }
 
-  if (patient.email) {
+  if (patient.noEmail) {
+    if (!patientResource.extension) patientResource.extension = [];
+    patientResource.extension.push({ url: PATIENT_NO_EMAIL_URL, valueBoolean: true });
+    if (isEHRUser && patient.phoneNumber) {
+      patientResource.telecom = [{ system: 'phone', value: normalizePhoneNumber(patient.phoneNumber) }];
+    }
+  } else if (patient.email) {
     if (isEHRUser) {
       patientResource.telecom = [
         {
@@ -502,8 +506,49 @@ export function creatingPatientCreateRequest(
   return createPatientRequest;
 }
 
+export const makePatientDocumentListRequests = (patientReference: string): BatchInputPostRequest<List>[] =>
+  createPatientDocumentLists(patientReference).map(
+    (list): BatchInputPostRequest<List> => ({
+      method: 'POST',
+      url: '/List',
+      resource: list,
+    })
+  );
+
+export const makePatientBillingAccountRequest = (patientReference: string): BatchInputPostRequest<Account> => ({
+  method: 'POST',
+  url: '/Account',
+  resource: {
+    resourceType: 'Account',
+    status: 'active',
+    type: { ...PATIENT_BILLING_ACCOUNT_TYPE },
+    subject: [{ reference: patientReference }],
+  },
+});
+
+// `patient` is undefined when the friendly id could not be generated; that does not fail the request.
+export async function linkNewPatientToAccountHolder(
+  oystehr: Oystehr,
+  patientId: string,
+  phoneNumber: string
+): Promise<{ relatedPerson: RelatedPerson; person: Person; patient: Patient | undefined }> {
+  const [userResource, patient] = await Promise.all([
+    createUserResourcesForPatient(oystehr, patientId, phoneNumber),
+    oystehr.fhir.generateFriendlyPatientId({ id: patientId }).catch((error) => {
+      console.error(`Failed to generate friendly patient ID for Patient/${patientId}:`, error);
+      captureException(error);
+      return undefined;
+    }),
+  ]);
+  return {
+    relatedPerson: userResource.relatedPerson,
+    person: userResource.person,
+    patient: patient as Patient | undefined,
+  };
+}
+
 export async function generatePatientRelatedRequests(
-  user: User,
+  user: User | undefined,
   patient: PatientInfo,
   oystehr: Oystehr
 ): Promise<{
@@ -541,14 +586,7 @@ export async function generatePatientRelatedRequests(
     createPatientRequest = creatingPatientCreateRequest(patient, isEHRUser);
 
     if (createPatientRequest?.fullUrl) {
-      const patientLists = createPatientDocumentLists(createPatientRequest.fullUrl);
-      listRequests.push(
-        ...patientLists.map((list): BatchInputPostRequest<List> => ({
-          method: 'POST',
-          url: '/List',
-          resource: list,
-        }))
-      );
+      listRequests.push(...makePatientDocumentListRequests(createPatientRequest.fullUrl));
     }
   }
 

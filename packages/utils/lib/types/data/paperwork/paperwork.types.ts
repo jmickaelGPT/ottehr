@@ -1,4 +1,4 @@
-import { type AnswerLoadingOptions } from 'config-types';
+import type { AnswerLoadingOptions } from 'config-types/config/fhir';
 import {
   QuestionnaireItem,
   QuestionnaireResponse,
@@ -41,11 +41,11 @@ export interface QuestionnaireItemTextWhen extends QuestionnaireItemConditionDef
 }
 
 // Re-export from config-types for backwards compatibility
+import type { QuestionnaireDataType as _QuestionnaireDataType } from 'config-types/config/questionnaire';
 import {
-  type QuestionnaireDataType as _QuestionnaireDataType,
   QuestionnaireDataTypes as _QuestionnaireDataTypes,
   QuestionnaireDataTypeSchema as _QuestionnaireDataTypeSchema,
-} from 'config-types';
+} from 'config-types/config/questionnaire';
 export const QuestionnaireDataTypeSchema = _QuestionnaireDataTypeSchema;
 export const QuestionnaireDataTypes = _QuestionnaireDataTypes;
 export type QuestionnaireDataType = _QuestionnaireDataType;
@@ -73,14 +73,6 @@ export enum QuestionnaireItemGroupType {
   PharmacyCollection = 'pharmacy-collection',
 }
 
-// Re-export FHIR types from config-types for backwards compatibility
-export { FhirResourceTypeSchema, AnswerOptionSourceSchema } from 'config-types';
-export type { FhirResourceType, AnswerOptionSource, AnswerLoadingOptions } from 'config-types';
-
-// Re-export harvest config from config-types
-export { pageHarvestStrategy } from 'config-types';
-export type { HarvestStrategy } from 'config-types';
-
 export type InputWidthOption = 's' | 'm' | 'l' | 'max';
 export interface QuestionnaireItemExtension {
   acceptsMultipleAnswers: boolean;
@@ -92,8 +84,17 @@ export interface QuestionnaireItemExtension {
   categoryTag?: string;
   dataType?: QuestionnaireDataType;
   disabledDisplay?: 'hidden' | 'protected';
-  filterWhen?: QuestionnaireItemConditionDefinition;
+  filterWhen?: QuestionnaireItemConditionDefinition[];
   groupType?: QuestionnaireItemGroupType;
+  /**
+   * Suppresses the "control label" — the bold-color heading rendered above
+   * the input in the intake paperwork UI. Optional-tri-state:
+   * `undefined` = no extension set (styler falls back to the hardcoded
+   * linkId list in `useStyleItems.tsx` for back-compat with pre-extension
+   * questionnaire archives); `true` = hide; `false` = force-show even if
+   * the linkId is on the legacy list.
+   */
+  hideControlLabel?: boolean;
   infoText?: string;
   inputWidth?: InputWidthOption;
   minRows?: number;
@@ -146,12 +147,20 @@ export type FullAccessPaperworkSupportingInfo = Omit<PaperworkSupportingInfo, 'p
 export interface QAndQRResponse {
   allItems: IntakeQuestionnaireItem[];
   questionnaireResponse: QuestionnaireResponse;
+  questionnaireTitle?: string;
+}
+
+export interface PatientConditionPhoto {
+  documentReferenceId?: string;
+  url: string;
+  title?: string;
 }
 
 export interface UCGetPaperworkResponse extends QAndQRResponse {
   appointment: AppointmentSummary;
   patient: PaperworkPatient;
   updateTimestamp: number | undefined;
+  patientConditionPhotos?: PatientConditionPhoto[];
 }
 export interface IntakeQuestionnaireItem
   extends QuestionnaireItemExtension,

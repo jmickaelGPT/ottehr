@@ -1,22 +1,25 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { ChargeItemDefinition, Coding } from 'fhir/r4b';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  RCM_TAG_SYSTEM,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
-import { validateRequestParameters } from './validateRequestParameters';
+import { z } from 'zod';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient, RCM_TAG_SYSTEM } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
+import { validateWithSchema } from '../../../shared/validation';
+
+export const DesignateChargeMasterEntryBodySchema = z.object({
+  chargeMasterId: z.string().uuid(),
+  designation: z.enum(['default-insurance', 'self-pay']),
+});
 
 let m2mToken: string;
 export const index = wrapHandler(
   'designate-charge-master-entry',
   async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-    const { chargeMasterId, designation, secrets } = validateRequestParameters(input);
+    const { chargeMasterId, designation, secrets } = validateWithSchema(DesignateChargeMasterEntryBodySchema, input);
 
     m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-    const oystehr = createOystehrClient(m2mToken, secrets);
+    const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
     // Set the designation tag on the target charge master and clear useContext
     const target = await oystehr.fhir.get<ChargeItemDefinition>({

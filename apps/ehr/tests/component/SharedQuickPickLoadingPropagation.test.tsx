@@ -50,21 +50,27 @@ vi.mock('../../src/features/visits/shared/hooks/useChartDataArrayValue', () => (
 }));
 
 vi.mock('../../src/features/visits/shared/stores/appointment/appointment.store', () => ({
+  useSaveChartData: () => ({ mutate: vi.fn(), isPending: false }),
+  useDeleteChartData: () => ({ mutate: vi.fn(), isPending: false }),
+  useAppointmentData: () => ({ appointment: {}, encounter: { id: 'encounter-1' } }),
+}));
+
+vi.mock('../../src/features/visits/shared/hooks/useChartData', () => ({
   useChartData: () => ({
     chartData: {},
     isLoading: false,
     setPartialChartData: vi.fn(),
     chartDataSetState: vi.fn(),
   }),
-  useSaveChartData: () => ({ mutate: vi.fn(), isPending: false }),
-  useDeleteChartData: () => ({ mutate: vi.fn(), isPending: false }),
-  useAppointmentData: () => ({ appointment: {}, encounter: { id: 'encounter-1' } }),
 }));
 
 vi.mock('../../src/features/visits/shared/stores/appointment/appointment.queries', () => ({
   useGetAllergiesSearch: () => ({ isFetching: false, data: [] }),
   useGetMedicationsSearch: () => ({ isFetching: false, data: [] }),
   useICD10SearchNew: () => ({ isFetching: false, data: { codes: [] } }),
+  useTriggerErxPatientSync: () => ({
+    triggerSync: vi.fn(),
+  }),
 }));
 
 vi.mock('../../src/hooks/useCommandPaletteSource', () => ({

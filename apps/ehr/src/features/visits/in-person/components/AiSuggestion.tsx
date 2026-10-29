@@ -1,4 +1,4 @@
-import { AddCircleOutline, CheckCircle, InfoOutlined } from '@mui/icons-material';
+import { AddCircleOutline, CheckCircle } from '@mui/icons-material';
 import {
   Box,
   Checkbox,
@@ -16,25 +16,22 @@ import {
 } from '@mui/material';
 import { DocumentReference } from 'fhir/r4b';
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { icd10Search } from 'src/api/api';
 import { HospitalizationOptions } from 'src/features/visits/in-person/components/hospitalization/hospitalizationOptions';
 import { AiSectionHeader } from 'src/features/visits/shared/components/AiSection';
 import { SURGICAL_HISTORY_OPTIONS } from 'src/features/visits/shared/components/medical-history-tab/SurgicalHistory/surgicalHistoryOptions';
 import { getSource } from 'src/features/visits/shared/components/OttehrAi';
 import { useChartDataArrayValue } from 'src/features/visits/shared/hooks/useChartDataArrayValue';
 import { useApiClients } from 'src/hooks/useAppClients';
+import { AiObservationField } from 'utils/lib/types/api/chart-data/chart-data.constants';
 import {
-  AiObservationField,
-  AiSuggestionItem,
   AllergyDTO,
   CPTCodeDTO,
-  GetChartDataResponse,
   HospitalizationDTO,
   MedicalConditionDTO,
   MedicationDTO,
-  ObservationTextFieldDTO,
-  ProcedureSuggestion,
-} from 'utils';
+} from 'utils/lib/types/api/chart-data/chart-data.types';
+import { GetChartDataResponse } from 'utils/lib/types/api/chart-data/get-chart-data.types';
+import { AiSuggestionItem, ObservationTextFieldDTO } from 'utils/lib/types/data/screening-questions/types';
 
 interface SearchResult {
   id?: number;
@@ -291,7 +288,6 @@ export interface AiSuggestionProps {
   title: string;
   chartData?: GetChartDataResponse | undefined;
   content?: ObservationTextFieldDTO[];
-  procedureSuggestions?: ProcedureSuggestion[];
   loading?: boolean;
   hideHeader?: boolean;
   onAppendToNote?: (text: string, resourceId?: string) => void;
@@ -302,13 +298,12 @@ export default function AiSuggestion({
   title,
   chartData,
   content,
-  procedureSuggestions,
   loading,
   hideHeader,
   onAppendToNote,
   appendedNoteIds,
 }: AiSuggestionProps): React.ReactElement {
-  const { oystehr, oystehrZambda } = useApiClients();
+  const { oystehr } = useApiClients();
   const theme = useTheme();
 
   const highlightFieldType: HighlightFieldType = useMemo(() => {
@@ -321,16 +316,12 @@ export default function AiSuggestion({
     return null;
   }, [content]);
 
-  const { onSubmit: addMedication } = useChartDataArrayValue('medications', undefined, {
-    _sort: '-_lastUpdated',
-    _include: 'MedicationStatement:source',
-    status: { type: 'token', value: 'active' },
-  });
+  const { onSubmit: addMedication } = useChartDataArrayValue('medications');
 
   const { onSubmit: addAllergy } = useChartDataArrayValue('allergies');
   const { onSubmit: addCondition } = useChartDataArrayValue('conditions');
-  const { onSubmit: addSurgicalHistory } = useChartDataArrayValue('surgicalHistory', undefined, {});
-  const { onSubmit: addHospitalization } = useChartDataArrayValue('episodeOfCare', undefined, {});
+  const { onSubmit: addSurgicalHistory } = useChartDataArrayValue('surgicalHistory');
+  const { onSubmit: addHospitalization } = useChartDataArrayValue('episodeOfCare');
 
   // Stable callback for searching — passed to HighlightedText
   const handleSearch = useCallback(
@@ -352,8 +343,14 @@ export default function AiSuggestion({
           results = await oystehr.erx.searchMedications({ name: term });
         } else if (fieldType === 'allergies' && oystehr) {
           results = await oystehr.erx.searchAllergens({ name: term });
-        } else if (fieldType === 'conditions' && oystehrZambda) {
-          const response = await icd10Search(oystehrZambda, { search: term });
+        } else if (fieldType === 'conditions' && oystehr) {
+          const response = await oystehr.terminology.searchIcd10({
+            query: term,
+            searchType: 'all',
+            includeSynonyms: true,
+            specialty: ['urgent-care'],
+            limit: 100,
+          });
           results = (response.codes || []).map((c) => ({ name: c.display, code: c.code }));
         } else if (fieldType === 'surgicalHistory') {
           results = filterStaticOptions(SURGICAL_HISTORY_OPTIONS, term);
@@ -373,7 +370,7 @@ export default function AiSuggestion({
       }
       return allResults;
     },
-    [oystehr, oystehrZambda]
+    [oystehr]
   );
 
   // Pre-load search results for all items across all observations.
@@ -500,24 +497,6 @@ export default function AiSuggestion({
   }
 
   function SuggestionsItem(): React.ReactElement {
-    if (procedureSuggestions) {
-      return (
-        <>
-          {procedureSuggestions.map((code) => (
-            <>
-              <Typography variant="body1">
-                <strong>{code.code}</strong> &ndash; {code.description}
-                <Tooltip title={code.useWhen}>
-                  <IconButton size="small" sx={{ marginLeft: '5px' }}>
-                    <InfoOutlined sx={{ fontSize: '17px' }} />
-                  </IconButton>
-                </Tooltip>
-              </Typography>
-            </>
-          ))}
-        </>
-      );
-    }
     return (
       <>
         {content

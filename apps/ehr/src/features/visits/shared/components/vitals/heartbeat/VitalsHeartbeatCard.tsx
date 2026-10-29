@@ -1,10 +1,12 @@
-import { Box, FormControl, Grid, InputLabel, MenuItem, Select, Typography } from '@mui/material';
+import ClearIcon from '@mui/icons-material/Clear';
+import { Box, Button, FormControl, Grid, InputLabel, MenuItem, Select, Typography } from '@mui/material';
 import React, { JSX, useCallback, useState } from 'react';
 import { AccordionCard } from 'src/components/AccordionCard';
 import { DoubleColumnContainer } from 'src/components/DoubleColumnContainer';
 import { RoundedButton } from 'src/components/RoundedButton';
 import { dataTestIds } from 'src/constants/data-test-ids';
-import { VitalHeartbeatObservationMethod, VitalsHeartbeatObservationDTO } from 'utils';
+import { VitalHeartbeatObservationMethod } from 'utils/lib/types/api/chart-data/chart-data.constants';
+import { VitalsHeartbeatObservationDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
 import { useGetAppointmentAccessibility } from '../../../hooks/useGetAppointmentAccessibility';
 import VitalsHistoryContainer from '../components/VitalsHistoryContainer';
 import VitalHistoryElement from '../components/VitalsHistoryEntry';
@@ -86,12 +88,27 @@ const VitalsHeartbeatCard: React.FC<VitalsHeartbeatCardProps> = ({ field }): JSX
   };
 
   return (
-    <Box sx={{ mt: 3 }}>
+    <Box>
       <AccordionCard
         label={`HR (/min) ${latestHeartbeatValue ?? ''}`}
         collapsed={isCollapsed}
         onSwitch={handleSectionCollapse}
         dataTestId={dataTestIds.vitalsPage.heartbeatHeader}
+        headerItem={
+          field.hasData && !isReadOnly ? (
+            <Button
+              size="small"
+              variant="text"
+              startIcon={<ClearIcon fontSize="small" />}
+              onClick={(e) => {
+                e.stopPropagation();
+                field.onClearForm?.();
+              }}
+            >
+              Clear draft
+            </Button>
+          ) : undefined
+        }
       >
         {isReadOnly ? (
           renderRightColumn()

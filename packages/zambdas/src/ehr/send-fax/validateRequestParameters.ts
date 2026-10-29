@@ -1,12 +1,9 @@
-import {
-  INVALID_INPUT_ERROR,
-  isPhoneNumberValid,
-  MISSING_AUTH_TOKEN,
-  MISSING_REQUEST_BODY,
-  SendFaxZambdaInput,
-} from 'utils';
+import { isPhoneNumberValid } from 'utils/lib/helpers/helpers';
+import { SendFaxZambdaInput } from 'utils/lib/types/api/send-fax.types';
+import { INVALID_INPUT_ERROR, MISSING_AUTH_TOKEN, MISSING_REQUEST_BODY } from 'utils/lib/types/errors';
 import { z } from 'zod';
-import { safeValidate, ZambdaInput } from '../../shared';
+import { ZambdaInput } from '../../shared/types/common';
+import { safeJsonParse, safeValidate } from '../../shared/validation';
 
 const SendFaxBodySchema = z.object({
   appointmentId: z.string().uuid(),
@@ -22,7 +19,7 @@ export function validateRequestParameters(input: ZambdaInput): SendFaxZambdaInpu
     throw MISSING_REQUEST_BODY;
   }
 
-  const data = JSON.parse(input.body);
+  const data = safeJsonParse(input.body);
   const { appointmentId, faxNumber } = safeValidate(SendFaxBodySchema, data);
 
   if (!isPhoneNumberValid(faxNumber)) {

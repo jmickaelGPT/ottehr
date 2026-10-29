@@ -22,7 +22,7 @@ import { enqueueSnackbar } from 'notistack';
 import React, { useEffect, useRef, useState } from 'react';
 import { FormProvider, useForm, useWatch } from 'react-hook-form';
 import { useNavigate, useParams } from 'react-router-dom';
-import { CustomDialog } from 'src/components/dialogs';
+import { CustomDialog } from 'src/components/dialogs/CustomDialog';
 import { CheckboxInput } from 'src/components/input/CheckboxInput';
 import { CptCodesInput } from 'src/components/input/CptCodesInput';
 import { DateInput } from 'src/components/input/DateInput';
@@ -42,15 +42,14 @@ import { useGetAppointmentAccessibility } from 'src/features/visits/shared/hooks
 import { useAppointmentData } from 'src/features/visits/shared/stores/appointment/appointment.store';
 import { cleanupProperties } from 'src/helpers/misc.helper';
 import useEvolveUser from 'src/hooks/useEvolveUser';
-import { ROUTE_OPTIONS } from 'src/shared/utils/options';
-import {
-  EMERGENCY_CONTACT_RELATIONSHIPS,
-  getApiError,
-  ImmunizationOrder,
-  REQUIRED_FIELD_ERROR_MESSAGE,
-  RoleType,
-  UNIT_OPTIONS,
-} from 'utils';
+import { BASE_ROUTE_OPTIONS } from 'src/shared/utils/options';
+import { BASE_UNIT_OPTIONS } from 'utils/lib/fhir/medication-administration';
+import { getApiError } from 'utils/lib/helpers/oystehrApi';
+import { EMERGENCY_CONTACT_RELATIONSHIPS } from 'utils/lib/types/api/medication-administration.types';
+import { RoleType } from 'utils/lib/types/api/user.types';
+import { ImmunizationOrder } from 'utils/lib/types/data/immunization/types';
+import { REQUIRED_FIELD_ERROR_MESSAGE } from 'utils/lib/validation/constants';
+import { enqueueOrderDeleteWarnings } from '../../visits/shared/utils/orderDeleteWarnings';
 import { ADMINISTERED, AdministrationType, NOT_ADMINISTERED, PARTLY_ADMINISTERED } from '../common';
 import { useImmunizationQuickPickManagement } from '../hooks/useImmunizationQuickPickManagement';
 import { AdministrationConfirmationDialog } from './AdministrationConfirmationDialog';
@@ -59,6 +58,7 @@ import { OrderStatusChip } from './OrderStatusChip';
 
 interface Props {
   order: ImmunizationOrder;
+  onFinished?: () => void;
 }
 
 const RELATIONSHIP_OPTIONS = Object.entries(EMERGENCY_CONTACT_RELATIONSHIPS).map(([_, value]) => ({
@@ -66,7 +66,7 @@ const RELATIONSHIP_OPTIONS = Object.entries(EMERGENCY_CONTACT_RELATIONSHIPS).map
   label: value.display,
 }));
 
-export const VaccineDetailsCard: React.FC<Props> = ({ order }) => {
+export const VaccineDetailsCard: React.FC<Props> = ({ order, onFinished }) => {
   const methods = useForm();
   useEffect(() => {
     methods.reset({
@@ -91,7 +91,7 @@ export const VaccineDetailsCard: React.FC<Props> = ({ order }) => {
   const { mappedData } = useAppointmentData(appointmentId);
 
   const { mutateAsync: administerOrder } = useAdministerImmunizationOrder();
-  const { mutateAsync: cancelOrder, isPending: isDeleting } = useCancelImmunizationOrder();
+  const { mutateAsync: cancelOrder, isPending: isDeleting } = useCancelImmunizationOrder(order.encounterId);
   const currentUser = useEvolveUser();
   const isAdmin = currentUser?.hasRole([RoleType.Administrator]) ?? false;
 
@@ -113,8 +113,13 @@ export const VaccineDetailsCard: React.FC<Props> = ({ order }) => {
 
   const handleDeleteOrder = async (): Promise<void> => {
     try {
-      await cancelOrder({ orderId: order.id });
-      navigate(getImmunizationMARUrl(appointmentId!));
+      const response = await cancelOrder({ orderId: order.id });
+      enqueueOrderDeleteWarnings(response);
+      if (onFinished) {
+        onFinished();
+      } else {
+        navigate(getImmunizationMARUrl(appointmentId!));
+      }
     } catch {
       enqueueSnackbar('An error occurred while deleting the immunization order. Please try again.', {
         variant: 'error',
@@ -134,7 +139,11 @@ export const VaccineDetailsCard: React.FC<Props> = ({ order }) => {
         type: administrationTypeRef.current.type,
         ...(await cleanupProperties(data)),
       });
-      navigate(getImmunizationMARUrl(appointmentId!));
+      if (onFinished) {
+        onFinished();
+      } else {
+        navigate(getImmunizationMARUrl(appointmentId!));
+      }
     } catch (error) {
       enqueueSnackbar(getApiError({ error, defaultError: 'An error occurred. Please try again.' }), {
         variant: 'error',
@@ -154,6 +163,18 @@ export const VaccineDetailsCard: React.FC<Props> = ({ order }) => {
     if (administrationTypeRef.current !== NOT_ADMINISTERED && (!value || value.length === 0)) {
       return REQUIRED_FIELD_ERROR_MESSAGE;
     }
+    return true;
+  };
+
+  const validateEmergencyContactField = (value: string | undefined): boolean | string => {
+    const contact = methods.getValues('administrationDetails.emergencyContact') ?? {};
+    const isFilled = (v: unknown): boolean => typeof v === 'string' && v.trim().length > 0;
+    const anyFilled = isFilled(contact.relationship) || isFilled(contact.fullName) || isFilled(contact.mobile);
+
+    if (anyFilled && !isFilled(value)) {
+      return 'Complete all emergency contact fields or leave them all empty';
+    }
+
     return true;
   };
 
@@ -296,6 +317,7 @@ export const VaccineDetailsCard: React.FC<Props> = ({ order }) => {
                     getOptionLabel={(option) =>
                       RELATIONSHIP_OPTIONS.find((opt) => opt.value === option)?.label ?? option
                     }
+                    validate={validateEmergencyContactField}
                     dataTestId={dataTestIds.vaccineDetailsPage.relationship}
                   />
                 </Grid>
@@ -303,6 +325,7 @@ export const VaccineDetailsCard: React.FC<Props> = ({ order }) => {
                   <TextInput
                     name="administrationDetails.emergencyContact.fullName"
                     label="Full name"
+                    validate={validateEmergencyContactField}
                     dataTestId={dataTestIds.vaccineDetailsPage.fullName}
                   />
                 </Grid>
@@ -310,6 +333,7 @@ export const VaccineDetailsCard: React.FC<Props> = ({ order }) => {
                   <PhoneInput
                     name="administrationDetails.emergencyContact.mobile"
                     label="Mobile"
+                    validate={validateEmergencyContactField}
                     dataTestId={dataTestIds.vaccineDetailsPage.mobile}
                   />
                 </Grid>
@@ -317,7 +341,7 @@ export const VaccineDetailsCard: React.FC<Props> = ({ order }) => {
                   <Stack direction="row" justifyContent="space-between" alignItems="center">
                     <Stack direction="row" spacing={1} alignItems="center">
                       <OrderStatusChip status={order.status} />
-                      {order.status === 'pending' && !isReadOnly && (
+                      {order.status !== 'cancelled' && !isReadOnly && (
                         <>
                           <LoadingButton
                             variant="outlined"
@@ -388,8 +412,8 @@ export const VaccineDetailsCard: React.FC<Props> = ({ order }) => {
             patientName={mappedData.patientName}
             medicationName={methods.getValues('details.medication.name')}
             dose={methods.getValues('details.dose')}
-            unit={UNIT_OPTIONS.find((unit) => unit.value === methods.getValues('details.units'))?.label}
-            route={ROUTE_OPTIONS.find((route) => route.code === methods.getValues('details.route'))?.name}
+            unit={BASE_UNIT_OPTIONS.find((unit) => unit.value === methods.getValues('details.units'))?.label}
+            route={BASE_ROUTE_OPTIONS.find((route) => route.code === methods.getValues('details.route'))?.name}
             open={showAdministrationConfirmationDialog}
             handleClose={() => {
               setShowAdministrationConfirmationDialog(false);

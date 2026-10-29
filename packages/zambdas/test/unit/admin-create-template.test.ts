@@ -1,14 +1,17 @@
-import { Condition, Encounter, Observation, Procedure, ServiceRequest } from 'fhir/r4b';
+import { Communication, Condition, Encounter, Observation, Procedure, ServiceRequest } from 'fhir/r4b';
+import { chartDataTagSystem } from 'utils/lib/fhir/constants';
+import { CODE_SYSTEM_ICD_10 } from 'utils/lib/helpers/rcm/constants';
 import {
-  chartDataTagSystem,
-  ICD_10_CODE_SYSTEM,
   IN_HOUSE_TEST_CODE_SYSTEM,
   REPEAT_TEST_ORDER_DETAIL_TAG_CONFIG,
-} from 'utils';
+} from 'utils/lib/types/data/in-house/in-house.constants';
+import { OYSTEHR_LAB_OI_CODE_SYSTEM } from 'utils/lib/types/data/labs/labs.constants';
 import { describe, expect, test } from 'vitest';
 import {
   deduplicateTemplateResourcesByMetaTag,
   filterEntriesToTemplateContent,
+  isInHouseMedicationCptLine,
+  isValidExternalLabServiceRequestForTemplate,
   isValidInHouseLabServiceRequest,
   isValidProcedureServiceRequest,
 } from '../../src/ehr/admin-create-template/index';
@@ -20,7 +23,7 @@ const makeDxCondition = (id: string, encounterId = 'enc-1'): Condition => ({
   subject: { reference: 'Patient/p1' },
   encounter: { reference: `Encounter/${encounterId}` },
   meta: { tag: [{ system: chartDataTagSystem('diagnosis'), code: 'diagnosis' }] },
-  code: { coding: [{ system: ICD_10_CODE_SYSTEM, code: 'J02.9' }] },
+  code: { coding: [{ system: CODE_SYSTEM_ICD_10, code: 'J02.9' }] },
 });
 
 const makeMedicalCondition = (id: string, encounterId = 'enc-1'): Condition => ({
@@ -29,7 +32,7 @@ const makeMedicalCondition = (id: string, encounterId = 'enc-1'): Condition => (
   subject: { reference: 'Patient/p1' },
   encounter: { reference: `Encounter/${encounterId}` },
   meta: { tag: [{ system: chartDataTagSystem('medical-condition'), code: 'medical-condition' }] },
-  code: { coding: [{ system: ICD_10_CODE_SYSTEM, code: 'J45.909' }] },
+  code: { coding: [{ system: CODE_SYSTEM_ICD_10, code: 'J45.909' }] },
 });
 
 const makeObservation = (id: string, tagField: string): Observation => ({
@@ -48,6 +51,22 @@ const makeEncounter = (id: string, diagnosisConditionIds: string[]): Encounter =
   diagnosis: diagnosisConditionIds.map((condId) => ({
     condition: { reference: `Condition/${condId}` },
   })),
+});
+
+const makePatientEducationCommunication = (id: string): Communication => ({
+  resourceType: 'Communication',
+  id,
+  status: 'completed',
+  meta: { tag: [{ system: chartDataTagSystem('patient-instruction'), code: 'patient-instruction' }] },
+  // about.reference starting with 'DocumentReference/' marks this as a pdf patient education Communication
+  about: [{ reference: 'DocumentReference/doc-1' }],
+});
+
+const makeRegularPatientInstruction = (id: string): Communication => ({
+  resourceType: 'Communication',
+  id,
+  status: 'completed',
+  meta: { tag: [{ system: chartDataTagSystem('patient-instruction'), code: 'patient-instruction' }] },
 });
 
 describe('filterEntriesToTemplateContent', () => {
@@ -129,6 +148,39 @@ describe('filterEntriesToTemplateContent', () => {
     expect(ids).toContain('obs-2');
     expect(ids).not.toContain('dx-stale');
     expect(ids).not.toContain('mc-1');
+  });
+
+  describe('patient education Communication filtering', () => {
+    test('excludes a patient education Communication (patient-instruction tag + about referencing DocumentReference)', () => {
+      const comm = makePatientEducationCommunication('comm-edu-1');
+      const result = filterEntriesToTemplateContent([comm as TemplateEncounterResource], new Set());
+      expect(result).toHaveLength(0);
+    });
+
+    test('still includes a regular patient instruction Communication (patient-instruction tag, no about)', () => {
+      const comm = makeRegularPatientInstruction('comm-instr-1');
+      const result = filterEntriesToTemplateContent([comm as TemplateEncounterResource], new Set());
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe('comm-instr-1');
+    });
+
+    test('still includes a patient instruction Communication whose about references a non-DocumentReference resource', () => {
+      const comm: Communication = {
+        ...makeRegularPatientInstruction('comm-non-doc'),
+        about: [{ reference: 'Communication/some-other-comm' }],
+      };
+      const result = filterEntriesToTemplateContent([comm as TemplateEncounterResource], new Set());
+      expect(result).toHaveLength(1);
+    });
+
+    test('mixed bundle: patient education Communication is excluded while regular instruction is kept', () => {
+      const edu = makePatientEducationCommunication('comm-edu');
+      const instr = makeRegularPatientInstruction('comm-instr');
+      const result = filterEntriesToTemplateContent([edu, instr] as TemplateEncounterResource[], new Set());
+      const ids = result.map((r) => r.id);
+      expect(ids).not.toContain('comm-edu');
+      expect(ids).toContain('comm-instr');
+    });
   });
 });
 
@@ -314,6 +366,75 @@ describe('filterEntriesToTemplateContent — in-house lab repeat CPT filtering',
 });
 
 // ---------------------------------------------------------------------------
+// isValidExternalLabServiceRequest — external lab SR capture filter
+// ---------------------------------------------------------------------------
+
+const makeStandardExternalLabSR = (id: string, overrides: Partial<ServiceRequest> = {}): ServiceRequest => ({
+  resourceType: 'ServiceRequest',
+  id,
+  status: 'draft',
+  intent: 'order',
+  subject: { reference: 'Patient/p1' },
+  code: { coding: [{ system: OYSTEHR_LAB_OI_CODE_SYSTEM, code: '7788', display: 'CBC With Differential' }] },
+  ...overrides,
+});
+
+describe('isValidExternalLabServiceRequest', () => {
+  test('includes a standard draft external lab order', () => {
+    expect(isValidExternalLabServiceRequestForTemplate(makeStandardExternalLabSR('sr-1'))).toBe(true);
+  });
+
+  test('includes orders with includable statuses: draft, active, on-hold, completed', () => {
+    for (const status of ['draft', 'active', 'on-hold', 'completed'] as ServiceRequest['status'][]) {
+      expect(isValidExternalLabServiceRequestForTemplate(makeStandardExternalLabSR(`sr-${status}`, { status }))).toBe(
+        true
+      );
+    }
+  });
+
+  test('excludes a revoked (canceled) order — should not carry deleted orders into templates', () => {
+    expect(
+      isValidExternalLabServiceRequestForTemplate(makeStandardExternalLabSR('sr-revoked', { status: 'revoked' }))
+    ).toBe(false);
+  });
+
+  test('excludes an entered-in-error order', () => {
+    expect(
+      isValidExternalLabServiceRequestForTemplate(makeStandardExternalLabSR('sr-error', { status: 'entered-in-error' }))
+    ).toBe(false);
+  });
+
+  test('excludes a reflex/downstream SR (basedOn references another ServiceRequest)', () => {
+    const sr = makeStandardExternalLabSR('sr-reflex', {
+      basedOn: [{ reference: 'ServiceRequest/sr-parent' }],
+    });
+    expect(isValidExternalLabServiceRequestForTemplate(sr)).toBe(false);
+  });
+
+  test('excludes a template plan SR (intent is plan, not order)', () => {
+    const sr = makeStandardExternalLabSR('sr-plan', { intent: 'plan' });
+    expect(isValidExternalLabServiceRequestForTemplate(sr)).toBe(false);
+  });
+
+  test('excludes an in-house lab SR (different code system)', () => {
+    const sr = makeStandardExternalLabSR('sr-in-house', {
+      code: { coding: [{ system: IN_HOUSE_TEST_CODE_SYSTEM, code: 'STREP-RAPID' }] },
+    });
+    expect(isValidExternalLabServiceRequestForTemplate(sr)).toBe(false);
+  });
+
+  test('non-ServiceRequest resource returns false', () => {
+    const obs: TemplateEncounterResource = {
+      resourceType: 'Observation',
+      id: 'obs-1',
+      status: 'final',
+      code: { coding: [{ system: OYSTEHR_LAB_OI_CODE_SYSTEM, code: '7788' }] },
+    };
+    expect(isValidExternalLabServiceRequestForTemplate(obs)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // isValidProcedureServiceRequest — in-office procedure SR capture filter
 // ---------------------------------------------------------------------------
 
@@ -408,7 +529,7 @@ const makePatientInstruction = (id: string): TemplateEncounterResource =>
     id,
     status: 'completed',
     meta: { tag: [{ system: chartDataTagSystem('patient-instruction'), code: 'patient-instruction' }] },
-  }) as unknown as TemplateEncounterResource;
+  }) as TemplateEncounterResource;
 
 describe('deduplicateTemplateResourcesByMetaTag', () => {
   test('preserves multiple in-office procedure ServiceRequests (additive section)', () => {
@@ -469,5 +590,26 @@ describe('deduplicateTemplateResourcesByMetaTag', () => {
     };
     const result = deduplicateTemplateResourcesByMetaTag([enc]);
     expect(result.map((r) => r.id)).toEqual(['enc-1']);
+  });
+});
+
+describe('isInHouseMedicationCptLine', () => {
+  test('skips only CPT lines written by an in-house medication order, so vaccine and provider lines stay in the template', () => {
+    const cptLine = (partOf?: string): Procedure => ({
+      resourceType: 'Procedure',
+      status: 'completed',
+      subject: { reference: 'Patient/p1' },
+      meta: { tag: [{ system: chartDataTagSystem('cpt-code'), code: 'cpt-code' }] },
+      ...(partOf && { partOf: [{ reference: partOf }] }),
+    });
+    const inHouseMedicationOrderReferences = new Set(['MedicationAdministration/in-house']);
+
+    expect(
+      isInHouseMedicationCptLine(cptLine('MedicationAdministration/in-house'), inHouseMedicationOrderReferences)
+    ).toBe(true);
+    expect(
+      isInHouseMedicationCptLine(cptLine('MedicationAdministration/vaccine'), inHouseMedicationOrderReferences)
+    ).toBe(false);
+    expect(isInHouseMedicationCptLine(cptLine(), inHouseMedicationOrderReferences)).toBe(false);
   });
 });

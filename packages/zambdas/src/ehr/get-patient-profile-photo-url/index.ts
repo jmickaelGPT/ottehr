@@ -1,8 +1,15 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { GetOrUploadPatientProfilePhotoInputValidated, getSecret, Secrets, SecretsKeys } from 'utils';
-import { checkOrCreateM2MClientToken, wrapHandler, ZambdaInput } from '../../shared';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import {
+  GetOrUploadPatientProfilePhotoInputSchema,
+  GetOrUploadPatientProfilePhotoInputValidated,
+} from 'utils/lib/types/api/get-patient-profile-photo-url.types';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { assertZ3UrlInProject } from '../../shared/presigned-file-urls/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { validateWithSchema } from '../../shared/validation';
 import { createPresignedUrl } from '../../shared/z3Utils';
-import { validateRequestParameters } from './validateRequestParameters';
 
 const logIt = (msg: string): void => {
   console.log(`PatientProfilePhoto: ${msg}`);
@@ -17,7 +24,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   let validatedParameters: GetOrUploadPatientProfilePhotoInputValidated;
 
   try {
-    validatedParameters = validateRequestParameters(input);
+    validatedParameters = validateWithSchema(GetOrUploadPatientProfilePhotoInputSchema, input);
   } catch (error: any) {
     return {
       statusCode: 400,
@@ -45,6 +52,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   }
 
   logIt(`Pre-signing this URL ...`);
+  assertZ3UrlInProject(z3PhotoUrl, secrets);
   const presignedDownloadUrl = await createPresignedUrl(token, z3PhotoUrl, action);
   logIt(`Signed download URL value=[${presignedDownloadUrl}]`);
   const resolvedPresignedUrl = presignedDownloadUrl;

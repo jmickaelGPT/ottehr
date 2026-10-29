@@ -18,6 +18,8 @@ function isLikelyChunkLoadError(errorString: string): boolean {
     errorString.includes('Failed to fetch dynamically imported module') ||
     errorString.includes('Importing a module script failed') ||
     errorString.includes('error loading dynamically imported module') ||
+    errorString.includes('is not a valid JavaScript MIME type') ||
+    errorString.includes('Failed to fetch') ||
     errorString.includes('Loading chunk')
   );
 }
@@ -32,6 +34,28 @@ const VITE_APP_OYSTEHR_APPLICATION_REDIRECT_URL =
 const VITE_APP_OYSTEHR_CONNECTION_NAME = import.meta.env.VITE_APP_OYSTEHR_CONNECTION_NAME?.trim();
 const hasRequiredAuthConfig =
   Boolean(VITE_APP_OYSTEHR_APPLICATION_DOMAIN) && Boolean(import.meta.env.VITE_APP_OYSTEHR_APPLICATION_CLIENT_ID);
+
+const CHUNK_RELOAD_AT_KEY = 'ottehr-chunk-reload-at';
+const CHUNK_RELOAD_WINDOW_MS = 30_000;
+
+/**
+ * One reload per tab per window. A module-scope flag cannot do this: it is reset by the very
+ * reload it is meant to bound, so a chunk that stays missing would reload forever. Falls through
+ * to the error UI on the second failure instead. Returns true when reloading is allowed.
+ */
+const canReloadForChunkError = (): boolean => {
+  try {
+    const last = Number(sessionStorage.getItem(CHUNK_RELOAD_AT_KEY));
+    if (last && Date.now() - last < CHUNK_RELOAD_WINDOW_MS) {
+      return false;
+    }
+    sessionStorage.setItem(CHUNK_RELOAD_AT_KEY, String(Date.now()));
+    return true;
+  } catch {
+    // Storage unavailable (Safari private mode). Keep the pre-existing behavior.
+    return true;
+  }
+};
 
 export const AUTH0_REDIRECT_URI =
   import.meta.env.VITE_APP_OYSTEHR_APPLICATION_REDIRECT_URL_TELEMED &&
@@ -85,10 +109,7 @@ root.render(
               // Handle chunk loading failures from deployments
               const errorString = String(error);
               if (isLikelyChunkLoadError(errorString)) {
-                const reloadGuardKey = 'ehr:chunk-reload-attempted';
-                const alreadyRetried = sessionStorage.getItem(reloadGuardKey) === '1';
-                if (!alreadyRetried) {
-                  sessionStorage.setItem(reloadGuardKey, '1');
+                if (canReloadForChunkError()) {
                   console.log('Chunk loading error detected, reloading page once...');
                   location.reload();
                 } else {

@@ -11,7 +11,7 @@ if (!envArg || !['dev', 'beta', 'production'].includes(envArg)) {
   process.exit(1);
 }
 
-const includeBillingApp = String(process.env.INCLUDE_BILLING_APP || '').toLowerCase() === 'true';
+const billingOnly = String(process.env.BILLING_ONLY || '').toLowerCase() === 'true';
 
 const modeByEnv = {
   dev: 'azure-dev',
@@ -82,7 +82,7 @@ const canonicalDomainByEnv = {
 };
 
 const webApps = webAppByEnv[envArg];
-const targetApps = includeBillingApp ? ['ehr', 'intake', 'billing'] : ['ehr', 'intake'];
+const targetApps = billingOnly ? ['billing'] : ['ehr', 'intake', 'billing'];
 
 for (const app of targetApps) {
   const webAppName = webApps[app];
@@ -211,8 +211,8 @@ async function runCanonicalDomainPreflight() {
 
 async function main() {
   console.log(`Deploying Azure web apps for environment: ${envArg} (mode: ${envMode})`);
-  if (!includeBillingApp) {
-    console.log('Billing is disabled for this run (set INCLUDE_BILLING_APP=true to include it).');
+  if (billingOnly) {
+    console.log('Deploying billing only.');
   }
   await runCanonicalDomainPreflight();
 

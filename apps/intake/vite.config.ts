@@ -55,6 +55,9 @@ export default (env: any): Record<string, any> => {
   return mergeConfig(
     config({ mode }),
     defineConfig({
+      legacy: {
+        inconsistentCjsInterop: true,
+      },
       build: {
         sourcemap: true,
       },

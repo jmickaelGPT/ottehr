@@ -2,13 +2,13 @@ import Oystehr from '@oystehr/sdk';
 import { Operation } from 'fast-json-patch';
 import { CodeableConcept, Coding, Encounter, EncounterParticipant, Location, Reference } from 'fhir/r4b';
 import {
-  FOLLOWUP_SUBTYPE_SYSTEM,
+  buildFollowupEncounterType,
   FOLLOWUP_SYSTEMS,
   FollowupReason,
   formatFhirEncounterToPatientFollowupDetails,
-  PatientFollowupDetails,
-  PRACTITIONER_CODINGS,
-} from 'utils';
+} from 'utils/lib/fhir/encounter';
+import { PatientFollowupDetails } from 'utils/lib/types/api/encounter.types';
+import { PRACTITIONER_CODINGS } from 'utils/lib/types/data/appointments/appointments.types';
 
 export async function createEncounterResource(
   encounterDetails: PatientFollowupDetails,
@@ -29,7 +29,7 @@ export async function createEncounterResource(
       start: encounterDetails.start,
       end: encounterDetails?.end,
     },
-    type: createEncounterType(encounterDetails.followupType, encounterDetails.followupSubtype || 'annotation'),
+    type: buildFollowupEncounterType(encounterDetails.followupSubtype || 'annotation', encounterDetails.followupType),
   };
 
   if (encounterDetails.location) {
@@ -141,7 +141,10 @@ export async function updateEncounterResource(
     operations.push({
       op: 'replace',
       path: '/type',
-      value: createEncounterType(encounterDetails.followupType, encounterDetails.followupSubtype || 'annotation'),
+      value: buildFollowupEncounterType(
+        encounterDetails.followupSubtype || 'annotation',
+        encounterDetails.followupType
+      ),
     });
   }
 
@@ -322,26 +325,6 @@ export async function updateEncounterResource(
     return curFhirEncounter;
   }
 }
-
-const createEncounterType = (type: string, subtype: string = 'annotation'): Encounter['type'] => {
-  return [
-    {
-      coding: [
-        {
-          system: FOLLOWUP_SYSTEMS.type.url,
-          code: FOLLOWUP_SYSTEMS.type.code,
-          display: type,
-        },
-        {
-          system: FOLLOWUP_SUBTYPE_SYSTEM,
-          code: subtype,
-          display: subtype,
-        },
-      ],
-      text: type,
-    },
-  ];
-};
 
 const createEncounterReasonCode = (reason: FollowupReason, otherReason?: string): Encounter['reasonCode'] => {
   return [

@@ -1,5 +1,7 @@
-import { DeleteLabOrderZambdaInput, Secrets } from 'utils';
-import { ZambdaInput } from '../../../../shared';
+import { Secrets } from 'utils/lib/secrets';
+import { DeleteLabOrderZambdaInput } from 'utils/lib/types/data/labs/labs.types';
+import { ZambdaInput } from '../../../../shared/types/common';
+import { safeJsonParse } from '../../../../shared/validation';
 
 export interface DeleteLabOrderZambdaInputValidated extends DeleteLabOrderZambdaInput {
   secrets: Secrets;
@@ -12,7 +14,7 @@ export function validateRequestParameters(input: ZambdaInput): DeleteLabOrderZam
   }
 
   const userToken = input.headers.Authorization.replace('Bearer ', '');
-  const { serviceRequestId } = JSON.parse(input.body);
+  const { serviceRequestId } = safeJsonParse(input.body);
 
   if (!serviceRequestId) {
     throw new Error('missing required parameter: serviceRequestId');

@@ -1,4 +1,5 @@
-import { FormFieldsDisplayItem, FormFieldsGroupItem, FormFieldsInputItem, FormFieldTrigger } from 'config-types';
+import { FormFieldsDisplayItem, FormFieldsGroupItem, FormFieldsInputItem } from 'config-types/config/form-fields';
+import { FormFieldTrigger } from 'config-types/config/questionnaire';
 import {
   Questionnaire,
   QuestionnaireItem,
@@ -8,10 +9,10 @@ import {
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
 import { getTaxID } from '../fhir/helpers';
-import type { PrePopulationFromPatientRecordInput } from '../helpers';
-import { makeAnswer, makePrepopulatedItemsFromPatientRecord } from '../helpers';
+import type { PrePopulationFromPatientRecordInput } from '../helpers/paperwork/prePopulation';
+import { makeAnswer, makePrepopulatedItemsFromPatientRecord } from '../helpers/paperwork/prePopulation';
 import { PATIENT_RECORD_CONFIG } from '../ottehr-config/patient-record';
-import type { ServiceMode } from '../types';
+import type { ServiceMode } from '../types/common';
 
 export interface AppointmentContext {
   appointmentServiceCategory?: string;
@@ -30,6 +31,7 @@ export interface TriggeredEffects {
   required: boolean;
   enabled: boolean | null;
   substituteText: string | undefined;
+  filtered: boolean;
 }
 
 /**
@@ -45,7 +47,7 @@ export const evaluateFieldTriggers = (
   const { triggers } = item;
 
   if (!triggers || triggers.length === 0) {
-    return { required: false, enabled: true, substituteText: undefined };
+    return { required: false, enabled: true, substituteText: undefined, filtered: false };
   }
 
   const flattenedTriggers: Trigger[] = triggers.flatMap((trigger) =>
@@ -184,9 +186,18 @@ export const evaluateFieldTriggers = (
         acc.substituteText = trigger.substituteText;
       }
 
+      if (trigger.effect === 'filter' && trigger.conditionMet) {
+        acc.filtered = true;
+      }
+
       return acc;
     },
-    { required: false as boolean, enabled: null as boolean | null, substituteText: undefined as undefined | string }
+    {
+      required: false as boolean,
+      enabled: null as boolean | null,
+      substituteText: undefined as undefined | string,
+      filtered: false as boolean,
+    }
   );
 };
 

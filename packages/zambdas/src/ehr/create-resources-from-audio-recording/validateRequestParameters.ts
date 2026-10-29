@@ -1,6 +1,7 @@
-import { MISSING_REQUEST_BODY, NOT_AUTHORIZED } from 'utils';
+import { MISSING_REQUEST_BODY, NOT_AUTHORIZED } from 'utils/lib/types/errors';
 import { z } from 'zod';
-import { safeValidate, ZambdaInput } from '../../shared';
+import { ZambdaInput } from '../../shared/types/common';
+import { safeJsonParse, safeValidate } from '../../shared/validation';
 import { CreateResourcesFromAudioRecordingInputValidated } from '.';
 
 const Z3_URL_PREFIX = 'https://project-api.zapehr.com';
@@ -27,7 +28,7 @@ export function validateRequestParameters(input: ZambdaInput): CreateResourcesFr
 
   const userToken = input.headers.Authorization.replace('Bearer ', '');
 
-  const parsed = JSON.parse(input.body);
+  const parsed = safeJsonParse(input.body);
   const { visitID, duration, z3URL } = safeValidate(CreateResourcesFromAudioRecordingBodySchema, parsed);
 
   return {

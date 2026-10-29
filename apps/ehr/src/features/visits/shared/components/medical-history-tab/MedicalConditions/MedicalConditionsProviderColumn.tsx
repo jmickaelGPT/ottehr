@@ -21,14 +21,17 @@ import { sortByRecencyAndStatus } from 'src/helpers';
 import { useCommandPaletteSource } from 'src/hooks/useCommandPaletteSource';
 import { useMergedMedicalConditionQuickPicks } from 'src/hooks/useMergedQuickPicks';
 import { usePendingQuickPick } from 'src/hooks/usePendingQuickPick';
-import { IcdSearchResponse, isTelemedAppointment, MedicalConditionDTO, MedicalConditionQuickPickData } from 'utils';
+import { isTelemedAppointment } from 'utils/lib/fhir/moduleIdentification';
+import { MedicalConditionDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
+import { IcdSearchResponse } from 'utils/lib/types/api/icd-search/icd-search.types';
+import { MedicalConditionQuickPickData } from 'utils/lib/types/api/quick-picks.types';
+import { useChartData } from '../../../hooks/useChartData';
 import { useChartDataArrayValue } from '../../../hooks/useChartDataArrayValue';
 import { useGetAppointmentAccessibility } from '../../../hooks/useGetAppointmentAccessibility';
 import { useICD10SearchNew } from '../../../stores/appointment/appointment.queries';
 import {
   ChartDataState,
   useAppointmentData,
-  useChartData,
   useDeleteChartData,
   useSaveChartData,
 } from '../../../stores/appointment/appointment.store';
@@ -238,6 +241,7 @@ const MedicalConditionListItem: FC<{ value: MedicalConditionDTO; index: number; 
           disabled={(isLoading && areNotesEqual) || !isAlreadySaved}
           size="small"
           fullWidth
+          multiline
           label="Notes for inactive condition"
           InputProps={{
             endAdornment: !areNotesEqual && (

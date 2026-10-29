@@ -1,12 +1,15 @@
 import Oystehr, { BatchInputPostRequest, BatchInputPutRequest } from '@oystehr/sdk';
+import { captureException } from '@sentry/node-core/light';
 import { randomUUID } from 'crypto';
 import { Operation } from 'fast-json-patch';
 import {
   AllergyIntolerance,
   ClinicalImpression,
   CodeableConcept,
+  Coding,
   Communication,
   Condition,
+  DiagnosticReport,
   DocumentReference,
   DomainResource,
   Encounter,
@@ -25,83 +28,106 @@ import {
   Task,
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
+import { getCptBillableUnitsFromCoding } from 'utils/lib/fhir/billing';
 import {
   ACCIDENT_STATE_EXTENSION,
   ACCIDENT_TYPE_SYSTEM,
-  AccidentDTO,
-  ADDED_VIA_LAB_ORDER_SYSTEM,
+  AMBIENT_SCRIBE_RECORDING_PENDING_CODING,
+  BODY_SITE_SYSTEM,
+  CPT_BILLABLE_UNITS_EXTENSION_URL,
+  CPT_CODE_SYSTEM,
+  ERX_MEDICATION_META_TAG_CODE,
+  FHIR_EXTENSION,
+  PERFORMER_TYPE_SYSTEM,
+  PRESCRIPTION_ERX_PHARMACY_ID_URL,
+  PRIVATE_EXTENSION_BASE_URL,
+  PROCEDURE_TYPE_SYSTEM,
+} from 'utils/lib/fhir/constants';
+import { OTHER_SPECIALTY_TRANSFER_OPTION } from 'utils/lib/fhir/disposition';
+import {
+  createFilesDocumentReferences,
+  getBooleanExtensionValue,
+  sanitizeStringForFhirCode,
+} from 'utils/lib/fhir/helpers';
+import { fillVitalObservationAttributes, isVitalObservation, makeVitalsObservationDTO } from 'utils/lib/fhir/vitals';
+import { removePrefix } from 'utils/lib/helpers/helpers';
+import {
   addEmptyArrOperation,
-  ADDITIONAL_QUESTIONS_META_SYSTEM,
   addOperation,
   addOrReplaceOperation,
+  removeOperation,
+} from 'utils/lib/helpers/operations';
+import { CODE_SYSTEM_ICD_10 } from 'utils/lib/helpers/rcm/constants';
+import { isNoteEdited } from 'utils/lib/helpers/visit-note/note-edit-detection.helper';
+import { VitalsSchema } from 'utils/lib/helpers/vitals/config-schema';
+import { getVitalObservationFhirInterpretations } from 'utils/lib/helpers/vitals/utils';
+import { patientScreeningQuestionsConfig } from 'utils/lib/ottehr-config/screening-questions';
+import { parseStructuredFacts } from 'utils/lib/procedure-coding/structured-fields';
+import { VISIT_CONSULT_NOTE_DOC_REF_CODING_CODE } from 'utils/lib/types/api/appointment.types';
+import {
+  DispositionMetaFieldsNames,
+  ProviderChartDataFieldsNames,
+  SCHOOL_WORK_NOTE_TYPE_META_SYSTEM,
+} from 'utils/lib/types/api/chart-data/chart-data.constants';
+import {
+  AccidentDTO,
+  ADDITIONAL_QUESTIONS_META_SYSTEM,
   AI_OBSERVATION_META_SYSTEM,
   AllChartValues,
   AllergyDTO,
   BirthHistoryDTO,
-  BODY_SITE_SYSTEM,
   BooleanValueDTO,
   ClinicalImpressionDTO,
   CommunicationDTO,
   CPTCodeDTO,
-  createCodeableConcept,
-  createFilesDocumentReferences,
   DiagnosisDTO,
   DispositionDTO,
   DispositionFollowUpType,
-  DispositionMetaFieldsNames,
   DispositionType,
-  ERX_MEDICATION_META_TAG_CODE,
   EXAM_OBSERVATION_META_SYSTEM,
   ExamObservationDTO,
-  FHIR_EXTENSION,
-  fillVitalObservationAttributes,
   FreeTextNoteDTO,
-  GetChartDataResponse,
-  getVitalObservationFhirInterpretations,
   HospitalizationDTO,
-  ICD_10_CODE_SYSTEM,
   IN_PERSON_NOTE_ID,
-  isNoteEdited,
-  isVitalObservation,
-  makeVitalsObservationDTO,
   MedicalConditionDTO,
-  MEDICATION_DISPENSABLE_DRUG_ID,
   MedicationDTO,
   NOTE_TYPE,
   NoteDTO,
   NOTHING_TO_EAT_OR_DRINK_FIELD,
   NOTHING_TO_EAT_OR_DRINK_ID,
   ObservationBooleanFieldDTO,
+  PATIENT_VITALS_META_SYSTEM,
+  PrescribedMedicationDTO,
+  ProcedureDTO,
+  REFUSAL_OF_EMS_TRANSPORT_FIELD,
+  REFUSAL_OF_EMS_TRANSPORT_ID,
+  ROS_OBSERVATION_META_SYSTEM,
+  SchoolWorkNoteExcuseDocFileDTO,
+  SchoolWorkNoteType,
+} from 'utils/lib/types/api/chart-data/chart-data.types';
+import { createCodeableConcept } from 'utils/lib/types/api/chart-data/exam-fields-map';
+import { GetChartDataResponse } from 'utils/lib/types/api/chart-data/get-chart-data.types';
+import { SNOMEDCodeConceptInterface } from 'utils/lib/types/api/chart-data/save-chart-data.types';
+import { MEDICATION_DISPENSABLE_DRUG_ID } from 'utils/lib/types/api/medication-administration.constants';
+import { ADDED_VIA_PROCEDURE_EXTENSION } from 'utils/lib/types/api/procedures.constants';
+import { TaskCoding } from 'utils/lib/types/common';
+import { ADDED_VIA_LAB_ORDER_SYSTEM } from 'utils/lib/types/data/labs/labs.constants';
+import { SCHOOL_WORK_NOTE, SCHOOL_WORK_NOTE_CODE } from 'utils/lib/types/data/paperwork/paperwork.constants';
+import {
   ObservationDateFieldDTO,
   ObservationDateRangeFieldDTO,
   ObservationDTO,
   ObservationTextFieldDTO,
-  OTHER_SPECIALTY_TRANSFER_OPTION,
-  PATIENT_VITALS_META_SYSTEM,
-  patientScreeningQuestionsConfig,
-  PERFORMER_TYPE_SYSTEM,
-  PrescribedMedicationDTO,
-  PRIVATE_EXTENSION_BASE_URL,
-  PROCEDURE_TYPE_SYSTEM,
-  ProcedureDTO,
-  ProviderChartDataFieldsNames,
-  REFUSAL_OF_EMS_TRANSPORT_FIELD,
-  REFUSAL_OF_EMS_TRANSPORT_ID,
-  removeOperation,
-  ROS_OBSERVATION_META_SYSTEM,
-  SCHOOL_WORK_NOTE,
-  SCHOOL_WORK_NOTE_CODE,
-  SCHOOL_WORK_NOTE_TYPE_META_SYSTEM,
-  SchoolWorkNoteExcuseDocFileDTO,
-  SchoolWorkNoteType,
-  SNOMEDCodeConceptInterface,
-  TaskCoding,
-  VISIT_CONSULT_NOTE_DOC_REF_CODING_CODE,
-} from 'utils';
-import { removePrefix } from '../appointment/helpers';
-import { getCptModifierCodeFromProcedure } from '../candid';
+} from 'utils/lib/types/data/screening-questions/types';
+import { getCptModifierCodeFromProcedure, makeCptModifierExtension } from '../candid';
 import { fillMeta } from '../helpers';
 import { isDocumentPublished, PdfDocumentReferencePublishedStatuses, PdfInfo } from '../pdf/pdf-utils';
+import {
+  isCurrentRadiologyResultDocRef,
+  makeRadiologyDTO,
+  takeMostRecentPreliminaryReport,
+  takeTheBestFinalDiagnosticReport,
+} from '../radiology';
 import { saveOrUpdateResourceRequest } from '../resources.helpers';
 
 const hasValue = (data: unknown): boolean => {
@@ -144,7 +170,7 @@ export function makeConditionResource(
       ? {
           coding: [
             {
-              system: ICD_10_CODE_SYSTEM,
+              system: CODE_SYSTEM_ICD_10,
               version: '2019',
               code: dto.code,
               display: dto.display,
@@ -290,6 +316,14 @@ export function makeMedicationResource(
         },
       ],
     },
+    ...(data.isRenewal !== undefined && {
+      extension: [
+        {
+          url: FHIR_EXTENSION.MedicationRequest.isRenewal.url,
+          valueBoolean: data.isRenewal,
+        },
+      ],
+    }),
   };
 }
 
@@ -313,6 +347,7 @@ export function makeMedicationDTO(medication: MedicationStatement): MedicationDT
       ? (medication.status as 'active' | 'completed')
       : 'completed',
     practitioner: medication.informationSource,
+    isRenewal: getBooleanExtensionValue(medication, FHIR_EXTENSION.MedicationRequest.isRenewal.url),
   };
 }
 
@@ -330,6 +365,8 @@ export function makePrescribedMedicationDTO(medRequest: MedicationRequest): Pres
       (identifier) => identifier.system === 'https://identifiers.fhir.oystehr.com/erx-prescription-id'
     )?.value,
     encounterId: medRequest.encounter?.reference?.split('/')?.[1],
+    isRenewal: getBooleanExtensionValue(medRequest, FHIR_EXTENSION.MedicationRequest.isRenewal.url),
+    pharmacyId: medRequest.extension?.find((e) => e.url === PRESCRIPTION_ERX_PHARMACY_ID_URL)?.valueInteger?.toString(),
   };
 }
 
@@ -354,8 +391,23 @@ export function makeProcedureResource(
   if (text !== undefined) {
     result.note = [{ text: text }];
   } else if ('code' in data && 'display' in data) {
+    const coding: Coding = { system: CPT_CODE_SYSTEM, code: data.code, display: data.display };
+    const extensions: Extension[] = [];
+
+    if (data.modifier?.length) {
+      extensions.push(makeCptModifierExtension(data.modifier));
+    }
+
+    if (data.billableUnits != null && Number.isFinite(data.billableUnits) && data.billableUnits > 0) {
+      extensions.push({ url: CPT_BILLABLE_UNITS_EXTENSION_URL, valueDecimal: data.billableUnits });
+    }
+
+    if (extensions.length > 0) {
+      coding.extension = extensions;
+    }
+
     result.code = {
-      coding: [{ code: data.code, display: data.display }],
+      coding: [coding],
     };
   }
   if (partOf) {
@@ -372,8 +424,9 @@ export function makeObservationResource(
   documentReferenceCreateUrl: string | undefined,
   data: ObservationDTO,
   metaSystem: string,
-  patientDOB?: string,
-  patientSex?: string
+  patientDOB: string | undefined,
+  patientSex: string | undefined,
+  vitalsAlertConfig: VitalsSchema | undefined
 ): Observation {
   const base: Observation = {
     id: data.resourceId,
@@ -402,14 +455,15 @@ export function makeObservationResource(
 
   if (isVitalObservation(data)) {
     let interpretation: Observation['interpretation'];
-    if (patientDOB) {
+    if (patientDOB && vitalsAlertConfig) {
       interpretation = getVitalObservationFhirInterpretations({
         patientDOB,
         vitalsObservation: data,
         patientSex,
+        config: vitalsAlertConfig,
       });
     }
-    return fillVitalObservationAttributes({ ...base, interpretation }, data, patientDOB);
+    return fillVitalObservationAttributes({ ...base, interpretation }, data, patientDOB, vitalsAlertConfig);
   }
 
   if (isObservationBooleanFieldDTO(data)) {
@@ -521,6 +575,7 @@ export function makeCPTCodeDTO(resource: Procedure): CPTCodeDTO | undefined {
       code: coding?.code,
       display: coding?.display,
       modifier: getCptModifierCodeFromProcedure(resource),
+      billableUnits: getCptBillableUnitsFromCoding(coding),
     };
   }
   return undefined;
@@ -608,6 +663,7 @@ export function makeRosObservationResource(
     encounter: { reference: `Encounter/${encounterId}` },
     status: 'final',
     valueBoolean: typeof data.value === 'boolean' ? Boolean(data.value) : undefined,
+    note: data.note ? [{ text: data.note }] : undefined,
     code: { text: data.label || data.field },
     meta: fillMeta(data.field, ROS_OBSERVATION_META_SYSTEM),
   };
@@ -929,16 +985,19 @@ export function makeDispositionDTO(
       ? followUp.orderDetail?.find((detail) => detail.coding?.[0]?.system === 'specialty-transfer')?.text || undefined
       : undefined;
 
-  const followUpArr = subFollowUp?.map((element) => {
-    const performerCode = element.performerType?.coding?.[0].code;
-    const followUpType = Object.keys(followUpToPerformerMap).find(
-      (keyName) => performerCode === followUpToPerformerMap[keyName as DispositionFollowUpType]?.coding?.[0].code
-    );
-
-    return {
-      type: followUpType as DispositionFollowUpType,
-      note: element.note?.[0].text,
-    };
+  // Resolve each sub-follow-up's type via the shared reverse lookup (coding code OR text,
+  // so the coding-less 'other'/'lurie-ct' performer types disambiguate correctly), and skip
+  // entries whose type can't be resolved rather than emitting a bogus type that downstream
+  // consumers (visit-note PDF, review tab) can't render.
+  const followUpArr = subFollowUp?.flatMap((element) => {
+    const followUpType = followUpTypeFromPerformerType(element.performerType);
+    if (!followUpType) return [];
+    return [
+      {
+        type: followUpType as DispositionFollowUpType,
+        note: element.note?.[0].text,
+      },
+    ];
   });
 
   const followUpTime = followUp.occurrenceTiming?.repeat?.offset;
@@ -968,7 +1027,6 @@ export function makeDispositionDTOFromFhirResources(
   encounter?: Encounter,
   serviceRequests?: ServiceRequest[]
 ): DispositionDTO | undefined {
-  // checking and creating dispositionDTO
   if (encounter) {
     const dischargeDisposition = encounter.hospitalization?.dischargeDisposition;
     const dispositionCode = dischargeDisposition?.coding?.find(
@@ -1089,15 +1147,15 @@ export function updateEncounterReasonForVisit(encounter: Encounter, data: FreeTe
   return resultOperations;
 }
 
-export function deleteEncounterDiagnosis(encounter: Encounter, conditionId: string): Operation[] {
-  const resultOperations: Operation[] = [];
-  if (encounter.diagnosis) {
-    encounter.diagnosis.find((diagnosis, index) => {
-      if (diagnosis.condition.reference === `Condition/${conditionId}`)
-        resultOperations.push(removeOperation(`/diagnosis/${index}`));
-    });
-  }
-  return resultOperations;
+export function deleteEncounterDiagnoses(encounter: Encounter, conditionIds: readonly string[]): Operation[] {
+  const references = new Set(conditionIds.map((id) => `Condition/${id}`));
+  return (encounter.diagnosis ?? [])
+    .flatMap((diagnosis, index) =>
+      diagnosis.condition.reference && references.has(diagnosis.condition.reference)
+        ? [removeOperation(`/diagnosis/${index}`)]
+        : []
+    )
+    .reverse();
 }
 
 export function deleteEncounterAddendumNote(encounter: Encounter): Operation[] {
@@ -1123,7 +1181,7 @@ export function makeDiagnosisConditionResource(
     code: {
       coding: [
         {
-          system: ICD_10_CODE_SYSTEM,
+          system: CODE_SYSTEM_ICD_10,
           code: data.code,
           display: data.display,
         },
@@ -1135,6 +1193,15 @@ export function makeDiagnosisConditionResource(
     conditionConfig.extension = [
       {
         url: ADDED_VIA_LAB_ORDER_SYSTEM,
+        valueBoolean: true,
+      },
+    ];
+  }
+  if (data.addedViaProcedure === true) {
+    conditionConfig.extension = [
+      ...(conditionConfig.extension ?? []),
+      {
+        url: ADDED_VIA_PROCEDURE_EXTENSION,
         valueBoolean: true,
       },
     ];
@@ -1151,6 +1218,11 @@ export function makeDiagnosisDTO(resource: Condition, isPrimary: boolean): Diagn
     display: resource.code?.coding?.[0].display || '',
     isPrimary: isPrimary,
     addedViaLabOrder,
+    ...(resource.extension?.some(
+      (extension) => extension.url === ADDED_VIA_PROCEDURE_EXTENSION && extension.valueBoolean === true
+    )
+      ? { addedViaProcedure: true }
+      : {}),
   };
 }
 
@@ -1576,6 +1648,12 @@ const mapResourceToChartDataFields = (
   ) {
     data.aiChat?.documents.push(resource);
     resourceMapped = true;
+  } else if (
+    resource.resourceType === 'DocumentReference' &&
+    resource.type?.coding?.[0].code === AMBIENT_SCRIBE_RECORDING_PENDING_CODING.code
+  ) {
+    if (data.aiChat) data.aiChat.hasPendingRecording = true;
+    resourceMapped = true;
   }
   return {
     chartDataFields: data,
@@ -1655,6 +1733,45 @@ export function handleCustomDTOExtractions(data: AllChartValues, resources: Fhir
 
   // 7. Accident
   data.accident = makeAccidentDTOFromFhirResources(resources);
+
+  // 8. Radiology orders
+  if (data.radiologyOrders) {
+    const diagnosticReportBySrId = resources.reduce((acc: Record<string, DiagnosticReport[]>, r) => {
+      if (r.resourceType === 'DiagnosticReport') {
+        const srId = r.basedOn
+          ?.find((basedOn) => basedOn.reference?.startsWith('ServiceRequest/'))
+          ?.reference?.replace('ServiceRequest/', '');
+        if (!srId) return acc;
+
+        if (acc[srId]) {
+          acc[srId].push(r);
+        } else {
+          acc[srId] = [r];
+        }
+      }
+      return acc;
+    }, {});
+
+    serviceRequests.forEach((sr) => {
+      if (!chartDataResourceHasMetaTagByCode(sr, 'radiology')) return;
+      if (sr.status === 'revoked') return; // don't pull in soft deletes
+
+      const { id } = sr;
+      if (!id) return;
+
+      const relatedDiagnosticReports = diagnosticReportBySrId[id] ?? [];
+      const preliminaryDiagnosticReport = takeMostRecentPreliminaryReport(relatedDiagnosticReports);
+      const bestFinalReport = takeTheBestFinalDiagnosticReport(relatedDiagnosticReports);
+      const radiologyDTO = makeRadiologyDTO(sr, preliminaryDiagnosticReport, bestFinalReport);
+      // External orders have no DiagnosticReports; an uploaded result DocumentReference marks them reviewed.
+      if (radiologyDTO.external) {
+        radiologyDTO.externalResultReviewed =
+          resources.some((r) => r.resourceType === 'DocumentReference' && isCurrentRadiologyResultDocRef(r, id)) ||
+          undefined;
+      }
+      data.radiologyOrders?.push(radiologyDTO);
+    });
+  }
 
   return data;
 }
@@ -1794,6 +1911,22 @@ export const followUpToPerformerMap: { [field in DispositionFollowUpType]: Codea
   other: createCodeableConcept(undefined, 'other'),
 };
 
+/**
+ * Reverse of followUpToPerformerMap: maps a sub-follow-up ServiceRequest.performerType back to its
+ * DispositionFollowUpType key. Coded types carry a SNOMED coding; 'other'/'lurie-ct' are text-only,
+ * so match on coding[0].code OR text — guarded so undefined never matches undefined.
+ */
+export const followUpTypeFromPerformerType = (
+  performerType: CodeableConcept | undefined
+): DispositionFollowUpType | undefined => {
+  const performerKey = performerType?.coding?.[0]?.code ?? performerType?.text;
+  if (!performerKey) return undefined;
+  return (Object.keys(followUpToPerformerMap) as DispositionFollowUpType[]).find((key) => {
+    const performer = followUpToPerformerMap[key];
+    return performer?.coding?.[0]?.code === performerKey || performer?.text === performerKey;
+  });
+};
+
 export function makeProceduresDTOFromFhirResources(
   encounter: Encounter,
   resources: FhirResource[]
@@ -1871,6 +2004,11 @@ export type ProcedureFormFields = Pick<
   | 'technique'
   | 'suppliesUsed'
   | 'procedureDetails'
+  | 'structuredFacts'
+  | 'lengthCm'
+  | 'repairDepth'
+  | 'infusionStartTime'
+  | 'infusionStopTime'
   | 'specimenSent'
   | 'complications'
   | 'patientResponse'
@@ -1899,6 +2037,14 @@ export const readProcedureFormFieldsFromServiceRequest = (sr: ServiceRequest): P
     .filter((value): value is string => value != null),
   suppliesUsed: getExtension(sr, FHIR_EXTENSION.ServiceRequest.suppliesUsed.url)?.valueString,
   procedureDetails: getExtension(sr, FHIR_EXTENSION.ServiceRequest.procedureDetails.url)?.valueString,
+  structuredFacts: parseStructuredFacts(
+    getExtension(sr, FHIR_EXTENSION.ServiceRequest.structuredFacts.url)?.valueString,
+    (error) => captureException(error, { extra: { serviceRequestId: sr.id } })
+  ),
+  lengthCm: getExtension(sr, FHIR_EXTENSION.ServiceRequest.lengthCm.url)?.valueDecimal,
+  repairDepth: getExtension(sr, FHIR_EXTENSION.ServiceRequest.repairDepth.url)?.valueString,
+  infusionStartTime: getExtension(sr, FHIR_EXTENSION.ServiceRequest.infusionStartTime.url)?.valueString,
+  infusionStopTime: getExtension(sr, FHIR_EXTENSION.ServiceRequest.infusionStopTime.url)?.valueString,
   specimenSent: getExtension(sr, FHIR_EXTENSION.ServiceRequest.specimenSent.url)?.valueBoolean,
   complications: getExtension(sr, FHIR_EXTENSION.ServiceRequest.complications.url)?.valueString,
   patientResponse: getExtension(sr, FHIR_EXTENSION.ServiceRequest.patientResponse.url)?.valueString,
@@ -1908,12 +2054,38 @@ export const readProcedureFormFieldsFromServiceRequest = (sr: ServiceRequest): P
   consentObtained: getExtension(sr, FHIR_EXTENSION.ServiceRequest.consentObtained.url)?.valueBoolean,
 });
 
+/** An extension that states its content as a value[x], with no nested extensions. */
+type ValueOnlyExtension = Extension & { extension?: never };
+
+/**
+ * FHIR invariant ext-1: an extension carries either a value or nested extensions. Our array is flat
+ * today, so only the value half is checked here. The parameter type is what keeps that safe: adding
+ * a nested extension to the array fails to compile, and this function can be updated to handle it.
+ */
+const extensionCarriesValue = (extension: ValueOnlyExtension): boolean =>
+  Object.entries(extension).some(([key, value]) => {
+    if (!key.startsWith('value')) return false;
+    if (typeof value === 'string') return value.trim().length > 0;
+    if (typeof value === 'number') return Number.isFinite(value);
+    return value != null;
+  });
+
+const toFhirCode = (value: string | undefined): string | undefined => {
+  if (value == null) {
+    return undefined;
+  }
+  return sanitizeStringForFhirCode(value) || undefined;
+};
+
 export const createProcedureServiceRequest = (
   procedure: ProcedureDTO,
   encounterId: string,
   patientId: string
 ): BatchInputPutRequest<ServiceRequest> | BatchInputPostRequest<ServiceRequest> => {
-  const extensions: Extension[] = [
+  const procedureTypeCode = toFhirCode(procedure.procedureType);
+  const performerTypeCode = toFhirCode(procedure.performerType);
+  const bodySiteCode = toFhirCode(procedure.bodySite);
+  const extensions: ValueOnlyExtension[] = [
     {
       url: FHIR_EXTENSION.ServiceRequest.medicationUsed.url,
       valueString: procedure.medicationUsed,
@@ -1935,6 +2107,26 @@ export const createProcedureServiceRequest = (
     {
       url: FHIR_EXTENSION.ServiceRequest.procedureDetails.url,
       valueString: procedure.procedureDetails,
+    },
+    {
+      url: FHIR_EXTENSION.ServiceRequest.structuredFacts.url,
+      valueString: procedure.structuredFacts === undefined ? undefined : JSON.stringify(procedure.structuredFacts),
+    },
+    {
+      url: FHIR_EXTENSION.ServiceRequest.lengthCm.url,
+      valueDecimal: procedure.lengthCm,
+    },
+    {
+      url: FHIR_EXTENSION.ServiceRequest.repairDepth.url,
+      valueString: procedure.repairDepth,
+    },
+    {
+      url: FHIR_EXTENSION.ServiceRequest.infusionStartTime.url,
+      valueString: procedure.infusionStartTime,
+    },
+    {
+      url: FHIR_EXTENSION.ServiceRequest.infusionStopTime.url,
+      valueString: procedure.infusionStopTime,
     },
     {
       url: FHIR_EXTENSION.ServiceRequest.specimenSent.url,
@@ -1964,7 +2156,7 @@ export const createProcedureServiceRequest = (
       url: FHIR_EXTENSION.ServiceRequest.consentObtained.url,
       valueBoolean: procedure.consentObtained,
     },
-  ].filter((extension) => extension.valueString != null || extension.valueBoolean != null);
+  ].filter(extensionCarriesValue);
   // Linked Condition/Procedure references are usually plain ids that get the
   // FHIR resource-type prefix. Callers building requests for a FHIR transaction
   // can also pass a urn:uuid pre-formatted reference (e.g. the apply-template
@@ -1987,13 +2179,13 @@ export const createProcedureServiceRequest = (
     status: 'completed',
     intent: 'original-order',
     category:
-      procedure.procedureType != null
+      procedureTypeCode != null
         ? [
             {
               coding: [
                 {
                   system: PROCEDURE_TYPE_SYSTEM,
-                  code: procedure.procedureType,
+                  code: procedureTypeCode,
                 },
               ],
             },
@@ -2002,24 +2194,24 @@ export const createProcedureServiceRequest = (
     occurrenceDateTime: procedure.procedureDateTime,
     authoredOn: procedure.documentedDateTime,
     performerType:
-      procedure.performerType != null
+      performerTypeCode != null
         ? {
             coding: [
               {
                 system: PERFORMER_TYPE_SYSTEM,
-                code: procedure.performerType,
+                code: performerTypeCode,
               },
             ],
           }
         : undefined,
     bodySite:
-      procedure.bodySite != null
+      bodySiteCode != null
         ? [
             {
               coding: [
                 {
                   system: BODY_SITE_SYSTEM,
-                  code: procedure.bodySite,
+                  code: bodySiteCode,
                 },
               ],
             },
@@ -2076,10 +2268,16 @@ export function makeEncounterTaskResource(encounterId: string, coding: TaskCodin
   };
 }
 
+export function findAccidentConditions(resources: Resource[]): Condition[] {
+  return (
+    resources.filter(
+      (resource) => resource?.resourceType === 'Condition' && chartDataResourceHasMetaTagByCode(resource, 'accident')
+    ) as Condition[]
+  ).sort((a, b) => (b.meta?.lastUpdated ?? '').localeCompare(a.meta?.lastUpdated ?? ''));
+}
+
 export function makeAccidentDTOFromFhirResources(resources: FhirResource[]): AccidentDTO | undefined {
-  const accidentCondition = resources.find(
-    (resource) => resource?.resourceType === 'Condition' && chartDataResourceHasMetaTagByCode(resource, 'accident')
-  ) as Condition;
+  const accidentCondition = findAccidentConditions(resources)[0];
   if (accidentCondition == null) {
     return undefined;
   }

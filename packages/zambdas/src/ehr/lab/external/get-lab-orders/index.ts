@@ -1,6 +1,11 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { EMPTY_PAGINATION, getSecret, ReflexLabDTO, SecretsKeys } from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../../shared';
+import { getSecret, SecretsKeys } from 'utils/lib/secrets';
+import { EMPTY_PAGINATION } from 'utils/lib/types/data/labs/labs.constants';
+import { ReflexLabDTO } from 'utils/lib/types/data/labs/labs.types';
+import { checkOrCreateM2MClientToken } from '../../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../../shared/helpers';
+import { wrapHandler } from '../../../../shared/sentry';
+import { ZambdaInput } from '../../../../shared/types/common';
 import {
   checkForDiagnosticReportDrivenResults,
   getLabResources,
@@ -19,7 +24,7 @@ export const index = wrapHandler('get-lab-orders', async (input: ZambdaInput): P
   console.debug('validateRequestParameters success');
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   console.log('searchBy:', JSON.stringify(searchBy));
 
@@ -64,6 +69,7 @@ export const index = wrapHandler('get-lab-orders', async (input: ZambdaInput): P
     patientLabItems,
     appointmentScheduleMap,
     communications,
+    coverages,
   } = await getLabResources(oystehr, validatedParameters, m2mToken, {
     searchBy: validatedParameters.searchBy,
   });
@@ -79,12 +85,13 @@ export const index = wrapHandler('get-lab-orders', async (input: ZambdaInput): P
     };
   }
 
-  const ENVIRONMENT = getSecret(SecretsKeys.ENVIRONMENT, secrets);
-  const labOrders = mapResourcesToLabOrderDTOs(
-    { searchBy },
+  const labOrders = mapResourcesToLabOrderDTOs({
+    searchBy: {
+      searchBy,
+    },
     serviceRequests,
     tasks,
-    diagnosticReports,
+    results: diagnosticReports,
     practitioners,
     encounters,
     locations,
@@ -96,8 +103,9 @@ export const index = wrapHandler('get-lab-orders', async (input: ZambdaInput): P
     specimens,
     appointmentScheduleMap,
     communications,
-    ENVIRONMENT
-  );
+    coverages,
+    environment: getSecret(SecretsKeys.ENVIRONMENT, secrets),
+  });
 
   if (diagnosticReportDrivenResultResources) {
     drDrivenResults = await mapResourcesToDrLabDTO(diagnosticReportDrivenResultResources, m2mToken);

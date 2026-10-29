@@ -4,13 +4,14 @@ import { readdirSync } from 'fs';
 import { DateTime } from 'luxon';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
+import { BILLING_RESOURCE_TAG } from 'utils/lib/fhir/constants';
 import {
   FILLER_ORDER_NUMBER_CODE_SYSTEM,
-  getPatchOperationToUpdateExtension,
   PLACER_ORDER_NUMBER_CODE_SYSTEM,
   SERVICE_REQUEST_HAS_BEEN_SENT_TO_TELERADIOLOGY_EXTENSION_URL,
   SERVICE_REQUEST_NEEDS_TO_BE_SENT_TO_TELERADIOLOGY_EXTENSION_URL,
-} from 'utils';
+} from 'utils/lib/fhir/radiology';
+import { getPatchOperationToUpdateExtension } from 'utils/lib/fhir/resourcePatch';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -40,6 +41,7 @@ const createOystehrClientFromConfig = async (config: ProjectConfig): Promise<any
 
   return new Oystehr({
     accessToken: token,
+    ignoreTags: [BILLING_RESOURCE_TAG],
   });
 };
 
@@ -75,22 +77,38 @@ const loadProjectConfigurations = async (): Promise<ProjectConfig[]> => {
   return projectConfigs;
 };
 
-const findServiceRequestsToSend = async (oystehr: Oystehr): Promise<ServiceRequest[]> => {
-  // 1. Fetch ServiceRequests that need to be sent to teleradiology
+const SEARCH_PAGE_SIZE = 50;
 
+const findServiceRequestsToSend = async (oystehr: Oystehr): Promise<ServiceRequest[]> => {
   const twoWeeksAgo = DateTime.now().minus({ weeks: 2 });
-  const serviceRequests = (
-    await oystehr.fhir.search<ServiceRequest>({
+  const baseParams = [
+    { name: 'status', value: 'completed' },
+    { name: 'authored', value: `ge${twoWeeksAgo.toISODate()}` },
+    { name: '_count', value: SEARCH_PAGE_SIZE.toString() },
+    { name: '_sort', value: '_id' },
+    {
+      name: '_tag',
+      value: 'https://fhir.ottehr.com/CodeSystem/order-type-tag|radiology',
+    },
+  ];
+
+  let offset = 0;
+  const serviceRequests: ServiceRequest[] = [];
+
+  let searchBundle = await oystehr.fhir.search<ServiceRequest>({
+    resourceType: 'ServiceRequest',
+    params: [...baseParams, { name: '_offset', value: offset.toString() }],
+  });
+  serviceRequests.push(...searchBundle.unbundle());
+
+  while (searchBundle.link?.find((l) => l.relation === 'next')) {
+    offset += SEARCH_PAGE_SIZE;
+    searchBundle = await oystehr.fhir.search<ServiceRequest>({
       resourceType: 'ServiceRequest',
-      params: [
-        { name: 'status', value: 'completed' },
-        {
-          name: 'authored',
-          value: `ge${twoWeeksAgo.toISODate()}`,
-        },
-      ],
-    })
-  ).unbundle();
+      params: [...baseParams, { name: '_offset', value: offset.toString() }],
+    });
+    serviceRequests.push(...searchBundle.unbundle());
+  }
 
   const serviceRequestsToSend: ServiceRequest[] = [];
   for (const sr of serviceRequests) {

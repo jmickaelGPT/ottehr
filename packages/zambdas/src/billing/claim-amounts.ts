@@ -1,0 +1,622 @@
+import Oystehr, { SearchParam } from '@oystehr/sdk';
+import {
+  Claim,
+  ClaimResponse,
+  ClaimResponseItemAdjudication,
+  FhirResource,
+  PaymentNotice,
+  PaymentReconciliation,
+  Provenance,
+} from 'fhir/r4b';
+import { DateTime } from 'luxon';
+import { CLAIM_STATUS_RESPONSE_EVENT_SYSTEM, PAYMENT_METHOD_EXTENSION_URL } from 'utils/lib/fhir/constants';
+import { getContainedReconciliation } from 'utils/lib/fhir/payments';
+import { ottehrIdentifierSystem } from 'utils/lib/fhir/systemUrls';
+import { extractPayerIdFromUrl } from 'utils/lib/helpers/helpers';
+import { X12_ADJUSTMENT_GROUP_CODE, X12AdjustmentGroupCode } from 'utils/lib/types/data/billing/billing.constants';
+import { ClaimPatientPayment, ClaimRemitAdjustment } from 'utils/lib/types/data/billing/billing.types';
+import { roundNumberToDecimalPlaces } from 'utils/lib/utils/convert';
+import { fetchAllPages } from '../shared/fhir';
+import { STRIPE_PAYMENT_ID_SYSTEM } from '../shared/stripeIntegration';
+import {
+  CLINICAL_PAYMENT_NOTICE_ID_SYSTEM,
+  MANUAL_PAYMENT_IDEMPOTENCY_KEY_SYSTEM,
+  MANUAL_REFUND_ID_SYSTEM,
+} from './payments';
+import { ERA_STATUS_CODE_EXTENSION, isEraProcessingProvenance } from './shared';
+
+export const OYSTEHR_ADJUDICATION_SYSTEM = 'https://terminology.fhir.oystehr.com/CodeSystem/adjudication';
+export const X12_ADJUSTMENT_GROUP_SYSTEM = 'https://x12.org/codes/claim-adjustment-group-codes';
+export const ADJUDICATION_CODES = {
+  PAID: 'paid',
+  ALLOWED: 'allowed',
+  ALLOWED_X12: 'B6',
+  CHARGE: 'charge',
+} as const;
+export const ADJUSTMENT_GROUP_PATIENT_RESPONSIBILITY = X12_ADJUSTMENT_GROUP_CODE.patientResponsibility;
+
+export interface ClaimResponseAmounts {
+  payerId: string;
+  paid: number;
+  // undefined = the ClaimResponse carries no allowed data (distinct from an explicit 0)
+  allowed: number | undefined;
+  // undefined = the ClaimResponse carries no adjudication data at all, so PR can't be read off it
+  patientResp: number | undefined;
+}
+
+export interface ClaimPaymentSummary {
+  allowed: number;
+  insurancePaid: number;
+  patientResp: number;
+  patientPaid: number;
+  writeOffsTotal: number;
+  balance: number;
+  adjudicated: boolean;
+}
+
+function allAdjudications(claimResponse: ClaimResponse): ClaimResponseItemAdjudication[] {
+  return [
+    ...(claimResponse.item ?? []).flatMap((item) => item.adjudication ?? []),
+    ...(claimResponse.addItem ?? []).flatMap((item) => item.adjudication ?? []),
+  ];
+}
+
+function adjudicationCode(adj: ClaimResponseItemAdjudication): string | undefined {
+  return adj.category?.coding?.[0]?.code;
+}
+
+function sumAmounts(adjudications: ClaimResponseItemAdjudication[]): number {
+  return adjudications.reduce((sum, adj) => sum + (adj.amount?.value ?? 0), 0);
+}
+
+export function extractClaimResponseAmounts(claimResponse: ClaimResponse): ClaimResponseAmounts {
+  const adjudications = allAdjudications(claimResponse);
+
+  const totalPaid = claimResponse.total?.find((t) => t.category?.coding?.[0]?.code === ADJUDICATION_CODES.PAID)?.amount
+    ?.value;
+  const paid =
+    totalPaid ?? sumAmounts(adjudications.filter((adj) => adjudicationCode(adj) === ADJUDICATION_CODES.PAID));
+
+  const allowedCodes: string[] = [ADJUDICATION_CODES.ALLOWED, ADJUDICATION_CODES.ALLOWED_X12];
+  const allowedAdjudications = adjudications.filter((adj) => allowedCodes.includes(adjudicationCode(adj) ?? ''));
+  const totalAllowed = claimResponse.total?.find((t) => t.category?.coding?.[0]?.code === ADJUDICATION_CODES.ALLOWED)
+    ?.amount?.value;
+  const allowed = allowedAdjudications.length > 0 ? sumAmounts(allowedAdjudications) : totalAllowed;
+  const patientResp =
+    adjudications.length > 0
+      ? sumAmounts(adjudications.filter((adj) => adjudicationCode(adj) === ADJUSTMENT_GROUP_PATIENT_RESPONSIBILITY))
+      : undefined;
+
+  const payerId = extractPayerIdFromUrl(claimResponse.insurer.reference) ?? '';
+
+  return {
+    payerId,
+    paid,
+    allowed,
+    patientResp,
+  };
+}
+
+// CAS adjustments as written by both ERA converters: category = group code (system
+// X12_ADJUSTMENT_GROUP_SYSTEM), reason = CARC reason code, amount = the adjusted amount.
+function extractAdjustments(adjudications: ClaimResponseItemAdjudication[]): ClaimRemitAdjustment[] {
+  return adjudications
+    .filter((adj) => adj.category?.coding?.[0]?.system === X12_ADJUSTMENT_GROUP_SYSTEM && adjudicationCode(adj) != null)
+    .map((adj) => ({
+      groupCode: adjudicationCode(adj) as X12AdjustmentGroupCode,
+      reasonCode: adj.reason?.coding?.[0]?.code ?? '',
+      amount: adj.amount?.value ?? 0,
+    }));
+}
+
+export function extractRemitAdjustments(claimResponse: ClaimResponse): ClaimRemitAdjustment[] {
+  return extractAdjustments(allAdjudications(claimResponse));
+}
+
+// CLP03 total claim charge as the payer reported it: the ClaimResponse.total 'charge' entry, else
+// the sum of the line-level 'charge' adjudications. Undefined when the remit reports no charge.
+export function extractReportedCharge(claimResponse: ClaimResponse): number | undefined {
+  const totalCharge = claimResponse.total?.find(
+    (total) => total.category?.coding?.[0]?.code === ADJUDICATION_CODES.CHARGE
+  )?.amount?.value;
+  if (totalCharge !== undefined) return totalCharge;
+  const chargeAdjudications = allAdjudications(claimResponse).filter(
+    (adj) => adjudicationCode(adj) === ADJUDICATION_CODES.CHARGE
+  );
+  return chargeAdjudications.length > 0 ? sumAmounts(chargeAdjudications) : undefined;
+}
+
+export interface RemitLineAmounts {
+  // undefined = not reported on this line (distinct from an explicit 0)
+  billed: number | undefined;
+  allowed: number | undefined;
+  paid: number;
+  adjustments: ClaimRemitAdjustment[];
+}
+
+// Per-line variant of extractClaimResponseAmounts: reads a single item/addItem adjudication array.
+export function extractLineAmounts(adjudications: ClaimResponseItemAdjudication[] | undefined): RemitLineAmounts {
+  const all = adjudications ?? [];
+  const amountOf = (code: string): number | undefined => {
+    const matches = all.filter((adj) => adjudicationCode(adj) === code);
+    return matches.length > 0 ? sumAmounts(matches) : undefined;
+  };
+  const allowedCodes: string[] = [ADJUDICATION_CODES.ALLOWED, ADJUDICATION_CODES.ALLOWED_X12];
+  const allowedMatches = all.filter((adj) => allowedCodes.includes(adjudicationCode(adj) ?? ''));
+  return {
+    billed: amountOf(ADJUDICATION_CODES.CHARGE),
+    allowed: allowedMatches.length > 0 ? sumAmounts(allowedMatches) : undefined,
+    paid: amountOf(ADJUDICATION_CODES.PAID) ?? 0,
+    adjustments: extractAdjustments(all),
+  };
+}
+
+export function sortClaimResponsesByRecency(claimResponses: ClaimResponse[]): ClaimResponse[] {
+  return [...claimResponses].sort(
+    (a, b) =>
+      (a.created ?? '').localeCompare(b.created ?? '') ||
+      (a.meta?.lastUpdated ?? '').localeCompare(b.meta?.lastUpdated ?? '')
+  );
+}
+
+export function summarizeClaimPayments(
+  claimResponses: ClaimResponse[],
+  billed: number,
+  patientPaid = 0,
+  writeOffsTotal = 0
+): ClaimPaymentSummary {
+  if (claimResponses.length === 0) {
+    return {
+      allowed: 0,
+      insurancePaid: 0,
+      patientResp: 0,
+      patientPaid,
+      writeOffsTotal,
+      balance: billed - patientPaid - writeOffsTotal,
+      adjudicated: false,
+    };
+  }
+
+  const amounts = sortClaimResponsesByRecency(claimResponses).map(extractClaimResponseAmounts);
+
+  const insurancePaid = amounts.reduce((sum, a) => sum + a.paid, 0);
+  const allowed = amounts.findLast((a) => a.allowed !== undefined)?.allowed ?? 0;
+
+  // Patient responsibility is what the final adjudication says the patient owes: after COB the
+  // last payer's PR already accounts for what prior payers paid, so summing PR across payers
+  // would double-count the share of the primary's PR the secondary covered. When the latest
+  // response carries no adjudication data, `allowed - insurancePaid` is used instead. Ceilinged
+  // to 0 either way: a reversal reports what it took back as negative PR, and the patient owes
+  // nothing rather than less than nothing — otherwise a payment they made counts twice as credit.
+  const latestPatientResp = amounts[amounts.length - 1].patientResp;
+  const patientResp = Math.max(latestPatientResp ?? allowed - insurancePaid, 0);
+
+  return {
+    allowed,
+    insurancePaid,
+    patientResp,
+    patientPaid,
+    writeOffsTotal,
+    balance: patientResp - patientPaid - writeOffsTotal,
+    adjudicated: true,
+  };
+}
+
+// claims count toward the patient's balance when receiving a remit or reaching patient AR. an
+// un-adjudicated claim's billed amount is pending insurance, not patient-owed
+export function summarizePatientBalance(
+  entries: {
+    payments: ClaimPaymentSummary;
+    reachedPatientAr: boolean;
+  }[]
+): {
+  claimsWithPatientBalance: number;
+  pendingPayments: number;
+  currentBalance: number;
+} {
+  const claimBalances = entries.map(({ payments, reachedPatientAr }) =>
+    roundNumberToDecimalPlaces(payments.adjudicated || reachedPatientAr ? payments.balance : -payments.patientPaid, 2)
+  );
+  return {
+    claimsWithPatientBalance: claimBalances.filter((balance) => balance > 0).length,
+    pendingPayments: 0,
+    currentBalance: roundNumberToDecimalPlaces(
+      claimBalances.reduce((sum, balance) => sum + balance, 0),
+      2
+    ),
+  };
+}
+
+/**
+ * Sums the amounts from patient payments. There are 4 possible resource layouts here:
+ *  - normal patient payment -- positive value
+ *  - voided patient payment -- positive value, status is 'cancelled'
+ *  - refunded patient payment -- positive value
+ *  - refund -- negative value
+ * Voided are filtered out, normal and refunded payment notices add positive amounts,
+ * "refund notice" adds negative amount.
+ *
+ * @param notices PaymentNotice resources that are expected to be for patient payments
+ * @returns total
+ */
+export function sumPatientPayments(notices: PaymentNotice[]): number {
+  return notices.filter((n) => n.status === 'active').reduce((sum, notice) => sum + (notice.amount?.value ?? 0), 0);
+}
+
+export function toClaimPatientPayment(notice: PaymentNotice): ClaimPatientPayment {
+  const reconciliation = getContainedReconciliation(notice);
+  return {
+    paymentNoticeId: notice.id ?? '',
+    paymentDate: notice.paymentDate ?? reconciliation?.paymentDate ?? notice.created ?? '',
+    amount: notice.amount?.value ?? 0,
+    method: notice.extension?.find((extension) => extension.url === PAYMENT_METHOD_EXTENSION_URL)?.valueString ?? '',
+    description: reconciliation?.disposition ?? '',
+    checkNumber: reconciliation?.paymentIdentifier?.value,
+    status: notice.status,
+  };
+}
+
+// Oystehr leaves unmatched ERA ClaimResponses pointing at a contained '#request' claim instead of a
+// real Claim/{id} reference.
+export function isMatchedToClaim(claimResponse: ClaimResponse): boolean {
+  return claimResponse.request?.reference?.startsWith('Claim/') ?? false;
+}
+
+export interface EraClaimCounts {
+  total: number;
+  matched: number;
+  unmatched: number;
+}
+
+export function countEraClaims(claimResponses: ClaimResponse[]): EraClaimCounts {
+  const matched = new Set(
+    claimResponses.filter(isMatchedToClaim).map((claimResponse) => claimResponse.request?.reference)
+  ).size;
+  const unmatched = claimResponses.filter((claimResponse) => !isMatchedToClaim(claimResponse)).length;
+  return {
+    total: matched + unmatched,
+    matched,
+    unmatched,
+  };
+}
+
+const BATCH = 100;
+const PAGE_SIZE = 200;
+const PATIENT_PAYMENT_ENCOUNTER_BATCH = 50;
+
+export async function fetchResourcesGrouped<T extends FhirResource>({
+  oystehr,
+  resourceType,
+  ids,
+  buildParam,
+  groupKeyOf,
+  keep,
+  batchSize = BATCH,
+}: {
+  oystehr: Oystehr;
+  resourceType: T['resourceType'];
+  ids: string[];
+  buildParam: (batch: string[]) => SearchParam[];
+  groupKeyOf: (resource: T) => string | undefined;
+  keep?: (resource: T) => boolean;
+  batchSize?: number;
+}): Promise<Map<string, T[]>> {
+  const grouped = new Map<string, T[]>();
+  const uniqueIds = [...new Set(ids)];
+  for (let i = 0; i < uniqueIds.length; i += batchSize) {
+    const batch = uniqueIds.slice(i, i + batchSize);
+    await fetchAllPages(async (offset, count) => {
+      const bundle = await oystehr.fhir.search<T>({
+        resourceType,
+        params: [
+          ...buildParam(batch),
+          {
+            name: '_count',
+            value: String(count),
+          },
+          {
+            name: '_offset',
+            value: String(offset),
+          },
+        ],
+      });
+      for (const resource of bundle.unbundle()) {
+        if (keep && !keep(resource)) continue;
+        const key = groupKeyOf(resource);
+        if (!key) continue;
+        const list = grouped.get(key) ?? [];
+        list.push(resource);
+        grouped.set(key, list);
+      }
+      return bundle;
+    }, PAGE_SIZE);
+  }
+  return grouped;
+}
+
+// The CLP02 claim status Oystehr stamps on each ERA remit, which matching leaves in place
+function hasEraStatusCode(claimResponse: ClaimResponse): boolean {
+  return !!claimResponse.extension?.some((extension) => extension.url === ERA_STATUS_CODE_EXTENSION);
+}
+
+// Fetch every matched ClaimResponse for the given claims, grouped by claim id. Unmatched ERA
+// ClaimResponses never carry a Claim/{id} request reference, so this returns matched ones only.
+// Filters out non-ERA ClaimResponses created by claim submission.
+export async function fetchClaimResponsesByClaimIds(
+  oystehr: Oystehr,
+  claimIds: string[]
+): Promise<Map<string, ClaimResponse[]>> {
+  return fetchResourcesGrouped<ClaimResponse>({
+    oystehr,
+    resourceType: 'ClaimResponse',
+    ids: claimIds,
+    buildParam: (batch) => [
+      {
+        name: 'request',
+        value: batch.map((id) => `Claim/${id}`).join(','),
+      },
+      // Filter out error CRs, which come from claim submission
+      {
+        name: 'outcome:not',
+        value: 'error',
+      },
+    ],
+    groupKeyOf: (claimResponse) => claimResponse.request?.reference?.replace('Claim/', ''),
+    // Queued CRs come from claim submission too, but an ERA can also be queued
+    keep: (claimResponse) => claimResponse.outcome !== 'queued' || hasEraStatusCode(claimResponse),
+  });
+}
+
+export async function fetchPatientPaymentsByEncounterIds(
+  oystehr: Oystehr,
+  encounterIds: string[]
+): Promise<Map<string, PaymentNotice[]>> {
+  const system = ottehrIdentifierSystem('claim-encounter-id');
+  return fetchResourcesGrouped<PaymentNotice>({
+    oystehr,
+    resourceType: 'PaymentNotice',
+    ids: encounterIds,
+    buildParam: (batch) => [
+      {
+        name: 'request:identifier',
+        value: batch.map((id) => `${system}|${id}`).join(','),
+      },
+      {
+        name: 'identifier',
+        value: `${MANUAL_REFUND_ID_SYSTEM}|,${STRIPE_PAYMENT_ID_SYSTEM}|,${MANUAL_PAYMENT_IDEMPOTENCY_KEY_SYSTEM}|,${CLINICAL_PAYMENT_NOTICE_ID_SYSTEM}|`,
+      },
+    ],
+    groupKeyOf: (notice) => notice.request?.identifier?.value,
+    batchSize: PATIENT_PAYMENT_ENCOUNTER_BATCH,
+  });
+}
+
+export async function fetchPatientPaidByClaimId({
+  oystehr,
+  claims,
+}: {
+  oystehr: Oystehr;
+  claims: Claim[];
+}): Promise<Map<string, number>> {
+  const system = ottehrIdentifierSystem('claim-encounter-id');
+  const encounterIdByClaimId = new Map<string, string>();
+  for (const claim of claims) {
+    const encounterId = claim.identifier?.find((identifier) => identifier.system === system)?.value;
+    if (claim.id && encounterId) encounterIdByClaimId.set(claim.id, encounterId);
+  }
+
+  const paymentsByEncounter = await fetchPatientPaymentsByEncounterIds(oystehr, [...encounterIdByClaimId.values()]);
+
+  const patientPaidByClaimId = new Map<string, number>();
+  for (const [claimId, encounterId] of encounterIdByClaimId) {
+    patientPaidByClaimId.set(claimId, sumPatientPayments(paymentsByEncounter.get(encounterId) ?? []));
+  }
+  return patientPaidByClaimId;
+}
+
+// Fetch the era-processing Provenances (one per ERA, targeting its PaymentReconciliation +
+// ClaimResponses) that point at any of the given resource references, deduped by id.
+export async function fetchEraProcessingProvenances(oystehr: Oystehr, targetRefs: string[]): Promise<Provenance[]> {
+  const byId = new Map<string, Provenance>();
+  const uniqueRefs = [...new Set(targetRefs)];
+  for (let i = 0; i < uniqueRefs.length; i += BATCH) {
+    const batch = uniqueRefs.slice(i, i + BATCH);
+    await fetchAllPages(async (offset, count) => {
+      const bundle = await oystehr.fhir.search<Provenance>({
+        resourceType: 'Provenance',
+        params: [
+          {
+            name: 'target',
+            value: batch.join(','),
+          },
+          {
+            name: '_count',
+            value: String(count),
+          },
+          {
+            name: '_offset',
+            value: String(offset),
+          },
+        ],
+      });
+      for (const provenance of bundle.unbundle()) {
+        if (provenance.id && isEraProcessingProvenance(provenance)) byId.set(provenance.id, provenance);
+      }
+      return bundle;
+    }, PAGE_SIZE);
+  }
+  return [...byId.values()];
+}
+
+export function eraProvenanceTargetIds(provenance: Provenance, resourceType: string): string[] {
+  const prefix = `${resourceType}/`;
+  return (provenance.target ?? [])
+    .map((target) => target.reference ?? '')
+    .filter((reference) => reference.startsWith(prefix))
+    .map((reference) => reference.slice(prefix.length));
+}
+
+async function fetchPaymentReconciliationsByIds(oystehr: Oystehr, ids: string[]): Promise<PaymentReconciliation[]> {
+  const results: PaymentReconciliation[] = [];
+  const uniqueIds = [...new Set(ids)];
+  for (let i = 0; i < uniqueIds.length; i += BATCH) {
+    const batch = uniqueIds.slice(i, i + BATCH);
+    await fetchAllPages(async (offset, count) => {
+      const bundle = await oystehr.fhir.search<PaymentReconciliation>({
+        resourceType: 'PaymentReconciliation',
+        params: [
+          {
+            name: '_id',
+            value: batch.join(','),
+          },
+          {
+            name: '_count',
+            value: String(count),
+          },
+          {
+            name: '_offset',
+            value: String(offset),
+          },
+        ],
+      });
+      results.push(...bundle.unbundle());
+      return bundle;
+    }, PAGE_SIZE);
+  }
+  return results;
+}
+
+export async function fetchClaimResponsesByPaymentReconciliations(
+  oystehr: Oystehr,
+  paymentReconciliations: PaymentReconciliation[]
+): Promise<Map<string, ClaimResponse[]>> {
+  const paymentReconciliationIds = paymentReconciliations
+    .map((paymentReconciliation) => paymentReconciliation.id)
+    .filter((id): id is string => !!id);
+  const provenances = await fetchEraProcessingProvenances(
+    oystehr,
+    paymentReconciliationIds.map((id) => `PaymentReconciliation/${id}`)
+  );
+  return fetchClaimResponsesFromEraProvenances(oystehr, provenances);
+}
+
+export async function fetchClaimResponsesFromEraProvenances(
+  oystehr: Oystehr,
+  provenances: Provenance[]
+): Promise<Map<string, ClaimResponse[]>> {
+  const claimResponseIdsByPaymentReconciliationId = new Map<string, string[]>();
+  for (const provenance of provenances) {
+    const claimResponseIds = eraProvenanceTargetIds(provenance, 'ClaimResponse');
+    for (const paymentReconciliationId of eraProvenanceTargetIds(provenance, 'PaymentReconciliation')) {
+      claimResponseIdsByPaymentReconciliationId.set(paymentReconciliationId, [
+        ...(claimResponseIdsByPaymentReconciliationId.get(paymentReconciliationId) ?? []),
+        ...claimResponseIds,
+      ]);
+    }
+  }
+
+  const claimResponsesById = await fetchResourcesGrouped<ClaimResponse>({
+    oystehr,
+    resourceType: 'ClaimResponse',
+    ids: [...new Set([...claimResponseIdsByPaymentReconciliationId.values()].flat())],
+    buildParam: (batch) => [
+      {
+        name: '_id',
+        value: batch.join(','),
+      },
+    ],
+    groupKeyOf: (claimResponse) => claimResponse.id,
+  });
+
+  const grouped = new Map<string, ClaimResponse[]>();
+  for (const [paymentReconciliationId, claimResponseIds] of claimResponseIdsByPaymentReconciliationId) {
+    grouped.set(
+      paymentReconciliationId,
+      claimResponseIds.flatMap((id) => claimResponsesById.get(id) ?? [])
+    );
+  }
+  return grouped;
+}
+
+export interface ClaimEraLinks {
+  paymentReconciliations: PaymentReconciliation[];
+  // the ERA each of the given ClaimResponses arrived on; one ERA can carry several of them (e.g. a
+  // reversal and its correction)
+  paymentReconciliationIdByClaimResponseId: Map<string, string>;
+}
+
+export async function fetchClaimEraLinks(oystehr: Oystehr, claimResponses: ClaimResponse[]): Promise<ClaimEraLinks> {
+  const claimResponseIds = new Set(claimResponses.map((cr) => cr.id).filter((id): id is string => !!id));
+  const provenances = await fetchEraProcessingProvenances(
+    oystehr,
+    [...claimResponseIds].map((id) => `ClaimResponse/${id}`)
+  );
+
+  const paymentReconciliationIds = new Set<string>();
+  const paymentReconciliationIdByClaimResponseId = new Map<string, string>();
+  for (const provenance of provenances) {
+    const eraPaymentReconciliationIds = eraProvenanceTargetIds(provenance, 'PaymentReconciliation');
+    eraPaymentReconciliationIds.forEach((id) => paymentReconciliationIds.add(id));
+    if (eraPaymentReconciliationIds.length === 0) continue;
+    for (const claimResponseId of eraProvenanceTargetIds(provenance, 'ClaimResponse')) {
+      if (claimResponseIds.has(claimResponseId) && !paymentReconciliationIdByClaimResponseId.has(claimResponseId)) {
+        paymentReconciliationIdByClaimResponseId.set(claimResponseId, eraPaymentReconciliationIds[0]);
+      }
+    }
+  }
+
+  const paymentReconciliations =
+    paymentReconciliationIds.size > 0
+      ? await fetchPaymentReconciliationsByIds(oystehr, [...paymentReconciliationIds])
+      : [];
+  return {
+    paymentReconciliations,
+    paymentReconciliationIdByClaimResponseId,
+  };
+}
+
+// Oystehr records each submission of a claim to the payer as a ClaimResponse with outcome 'queued'.
+// 277 claim-status responses (their event identifier) and ERA remits (the CLP02 stamp, adjudicated
+// lines) are not submissions even when they share that outcome.
+function isClaimSubmissionResponse(claimResponse: ClaimResponse): boolean {
+  if (claimResponse.outcome !== 'queued') return false;
+  if (claimResponse.identifier?.some((identifier) => identifier.system === CLAIM_STATUS_RESPONSE_EVENT_SYSTEM)) {
+    return false;
+  }
+  if (hasEraStatusCode(claimResponse)) return false;
+  return allAdjudications(claimResponse).length === 0;
+}
+
+// When the claim was first sent to the payer: the earliest submission response, '' when none.
+export function firstSubmittedDate(claimResponses: ClaimResponse[]): string {
+  const submissions = claimResponses
+    .filter(isClaimSubmissionResponse)
+    .map((claimResponse) => ({
+      created: claimResponse.created,
+      millis: DateTime.fromISO(claimResponse.created ?? '').toMillis(),
+    }))
+    .filter((submission) => Number.isFinite(submission.millis))
+    .sort((a, b) => a.millis - b.millis);
+  return submissions[0]?.created ?? '';
+}
+
+// Submission responses are untagged, so this needs the ERA read client.
+export async function fetchClaimFirstSubmittedDate(oystehr: Oystehr, claimId: string): Promise<string> {
+  const claimResponsesByClaimId = await fetchResourcesGrouped<ClaimResponse>({
+    oystehr,
+    resourceType: 'ClaimResponse',
+    ids: [claimId],
+    buildParam: (batch) => [
+      {
+        name: 'request',
+        value: batch.map((id) => `Claim/${id}`).join(','),
+      },
+      {
+        name: 'outcome',
+        value: 'queued',
+      },
+    ],
+    groupKeyOf: (claimResponse) => claimResponse.request?.reference?.replace('Claim/', ''),
+  });
+  return firstSubmittedDate(claimResponsesByClaimId.get(claimId) ?? []);
+}

@@ -23,15 +23,18 @@ const mockChartDataSetState = vi.fn();
 let mockChartData: Pick<GetChartDataResponse, 'allergies'> = {};
 
 vi.mock('../../src/features/visits/shared/stores/appointment/appointment.store', () => ({
-  useChartData: () => ({
-    chartData: mockChartData,
-    setPartialChartData: mockSetPartialChartData,
-    chartDataSetState: mockChartDataSetState,
-  }),
   useSaveChartData: vi.fn(),
   useDeleteChartData: vi.fn(),
   useAppointmentData: () => ({
     appointment: {},
+  }),
+}));
+
+vi.mock('../../src/features/visits/shared/hooks/useChartData', () => ({
+  useChartData: () => ({
+    chartData: mockChartData,
+    setPartialChartData: mockSetPartialChartData,
+    chartDataSetState: mockChartDataSetState,
   }),
 }));
 
@@ -45,6 +48,9 @@ vi.mock('../../src/features/visits/shared/stores/appointment/appointment.queries
   useGetAllergiesSearch: (search: string) => ({
     isFetching: false,
     data: search && search.length > 0 ? mockAllergySearchData : [],
+  }),
+  useTriggerErxPatientSync: () => ({
+    triggerSync: vi.fn(),
   }),
 }));
 
@@ -80,7 +86,7 @@ vi.mock('../../src/hooks/useMergedQuickPicks', () => ({
 }));
 
 import { dataTestIds } from 'src/constants/data-test-ids';
-import { GetChartDataResponse } from 'utils';
+import { GetChartDataResponse } from 'utils/lib/types/api/chart-data/get-chart-data.types';
 import { KnownAllergiesProviderColumn } from '../../src/features/visits/shared/components/known-allergies/KnownAllergiesProviderColumn';
 import {
   useDeleteChartData,

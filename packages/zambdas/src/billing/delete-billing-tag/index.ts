@@ -1,16 +1,21 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { Basic, Claim } from 'fhir/r4b';
-import { FHIR_RESOURCE_NOT_FOUND, INVALID_INPUT_ERROR } from 'utils';
-import { checkOrCreateM2MClientToken, wrapHandler, ZambdaInput } from '../../shared';
-import { CLAIM_TAG_SYSTEM, createBillingClient, TAG_CODE_SYSTEM } from '../shared';
-import { DeleteBillingTagParams, validateRequestParameters } from './validateRequestParameters';
+import { Basic } from 'fhir/r4b';
+import { DeleteBillingTagInputSchema } from 'utils/lib/types/data/billing/billing.schemas';
+import { FHIR_RESOURCE_NOT_FOUND, INVALID_INPUT_ERROR } from 'utils/lib/types/errors';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { ValidatedZambdaInput, validateWithSchema } from '../../shared/validation';
+import { countClaimsByTag, createBillingClient, isSystemTag, TAG_CODE_SYSTEM } from '../shared';
+
+export type DeleteBillingTagParams = ValidatedZambdaInput<typeof DeleteBillingTagInputSchema>;
 
 let m2mToken: string;
 const ZAMBDA_NAME = 'delete-billing-tag';
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  const params = validateRequestParameters(input);
+  const params = validateWithSchema(DeleteBillingTagInputSchema, input);
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, params.secrets);
   const oystehr = createBillingClient(m2mToken, params.secrets);
 
@@ -18,7 +23,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   return { statusCode: 200, body: JSON.stringify(response) };
 });
 
-async function performEffect(oystehr: Oystehr, params: DeleteBillingTagParams): Promise<{ deleted: true }> {
+export async function performEffect(oystehr: Oystehr, params: DeleteBillingTagParams): Promise<{ deleted: true }> {
   const tagBundle = await oystehr.fhir.search<Basic>({
     resourceType: 'Basic',
     params: [
@@ -28,21 +33,17 @@ async function performEffect(oystehr: Oystehr, params: DeleteBillingTagParams): 
   });
   const tag = tagBundle.unbundle()[0];
   if (!tag) throw FHIR_RESOURCE_NOT_FOUND('Basic');
+  if (isSystemTag(tag)) {
+    throw INVALID_INPUT_ERROR('Cannot delete system-level tags');
+  }
 
   const tagName = tag.code?.text ?? '';
   if (tagName) {
-    const claimBundle = await oystehr.fhir.search<Claim>({
-      resourceType: 'Claim',
-      params: [
-        { name: '_tag', value: `${CLAIM_TAG_SYSTEM}|${tagName}` },
-        { name: '_total', value: 'accurate' },
-        { name: '_count', value: '0' },
-      ],
-    });
-    if (claimBundle.total === undefined) {
+    const usage = (await countClaimsByTag(oystehr, [tagName])).get(tagName);
+    if (usage === undefined) {
       throw INVALID_INPUT_ERROR('Unable to verify tag usage — FHIR server did not return a total count');
     }
-    if (claimBundle.total > 0) {
+    if (usage > 0) {
       throw INVALID_INPUT_ERROR('Cannot delete tag — it is associated with one or more claims');
     }
   }

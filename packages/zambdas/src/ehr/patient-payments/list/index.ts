@@ -2,25 +2,23 @@ import Oystehr, { SearchParam } from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Account } from 'fhir/r4b';
 import Stripe from 'stripe';
+import { Secrets } from 'utils/lib/secrets';
+import { ListPatientPaymentInput, ListPatientPaymentResponse } from 'utils/lib/types/api/patient-payment-types';
 import {
   FHIR_RESOURCE_NOT_FOUND,
   INVALID_INPUT_ERROR,
-  isValidUUID,
-  ListPatientPaymentInput,
-  ListPatientPaymentResponse,
   MISSING_REQUEST_BODY,
   MISSING_REQUIRED_PARAMETERS,
   NOT_AUTHORIZED,
-  Secrets,
-} from 'utils';
-import {
-  createOystehrClient,
-  getAuth0Token,
-  getStripeClient,
-  lambdaResponse,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+} from 'utils/lib/types/errors';
+import { isValidUUID } from 'utils/lib/validation/helper';
+import { getAuth0Token } from '../../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { lambdaResponse } from '../../../shared/lambda';
+import { wrapHandler } from '../../../shared/sentry';
+import { getStripeClient } from '../../../shared/stripeIntegration';
+import { ZambdaInput } from '../../../shared/types/common';
+import { safeJsonParse } from '../../../shared/validation';
 import { getAccountAndCoverageResourcesForPatient } from '../../shared/harvest';
 import { getPaymentsForPatient } from '../helpers';
 
@@ -34,7 +32,6 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   let validatedParameters: ReturnType<typeof validateRequestParameters>;
   try {
     validatedParameters = validateRequestParameters(input);
-    console.log(JSON.stringify(validatedParameters, null, 4));
   } catch (error: any) {
     console.log(error);
     return lambdaResponse(400, { message: error.message });
@@ -52,7 +49,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     console.log('already have a token, no need to update');
   }
 
-  const oystehrClient = createOystehrClient(oystehrM2MClientToken, secrets);
+  const oystehrClient = createClinicalOystehrClient(oystehrM2MClientToken, secrets);
 
   const accountResources = await getAccountAndCoverageResourcesForPatient(patientId, oystehrClient);
   const account: Account | undefined = accountResources.account;
@@ -142,7 +139,7 @@ const validateRequestParameters = (input: ZambdaInput): ListPatientPaymentInput 
     throw MISSING_REQUEST_BODY;
   }
 
-  const { patientId, encounterId } = JSON.parse(input.body);
+  const { patientId, encounterId } = safeJsonParse(input.body);
 
   if (!patientId) {
     throw MISSING_REQUIRED_PARAMETERS(['patientId']);

@@ -1,7 +1,7 @@
 // cSpell:ignore RCRT, RFRT, RPRT
 import { Coding } from 'fhir/r4b';
-import { LabelConfig } from '../..';
-import { Pagination } from '..';
+import { LabelConfig } from '../../common';
+import { Pagination } from '../pagination.types';
 import { LabPaymentMethod, LabType } from './labs.types';
 
 // for order form pdf (we might not want this idk)
@@ -194,7 +194,7 @@ export const OYSTEHR_LAB_API_BASE = 'https://labs-api.zapehr.com/v1';
 export const OYSTEHR_LAB_ORDERABLE_ITEM_SEARCH_API = `${OYSTEHR_LAB_API_BASE}/orderableItem`;
 export const OYSTEHR_SUBMIT_LAB_API = `${OYSTEHR_LAB_API_BASE}/submit`;
 
-export const DEFAULT_LABS_ITEMS_PER_PAGE = 10;
+export const DEFAULT_LABS_ITEMS_PER_PAGE = 20;
 
 export const EMPTY_PAGINATION: Pagination = {
   currentPageIndex: 0,
@@ -351,6 +351,10 @@ export const SR_REVOKED_REASON_EXT = {
   url: 'https://extensions.fhir.oystehr.com/reason-sr-revoked',
   valueCode: 'rejected-abn',
 };
+
+// for OBX-5s (value) of type OBX-2 = SN which get parsed as valueRatio like 1:180 for titer or 7/8
+export const OYSTEHR_LABS_OBSERVATION_RATIO_SEPARATOR_EXT_URL =
+  'https://extensions.fhir.oystehr.com/obx-5-sn-separator';
 
 export const LAB_CLIENT_BILL_COVERAGE_TYPE_CODING = {
   system: 'https://terminology.fhir.oystehr.com/CodeSystem/labs-financial-class',

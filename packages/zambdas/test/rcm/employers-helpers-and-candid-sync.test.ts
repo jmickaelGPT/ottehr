@@ -1,5 +1,6 @@
 import { Address, Organization } from 'fhir/r4b';
-import { MISSING_REQUEST_SECRETS } from 'utils';
+import { EMPLOYER_NOTES_EXTENSION_URL } from 'utils/lib/fhir/organization';
+import { MISSING_REQUEST_SECRETS } from 'utils/lib/types/errors';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // hoisted to avoid dependency issues
@@ -7,7 +8,7 @@ const { mockGetOrCreateCandidApiClient } = vi.hoisted(() => ({
   mockGetOrCreateCandidApiClient: vi.fn(),
 }));
 
-vi.mock('utils', async (importOriginal) => {
+vi.mock('utils/lib/helpers/candidApi', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   return {
     ...actual,
@@ -23,16 +24,14 @@ const {
 } = await import('../../src/rcm/employers/candid-sync');
 
 const {
-  EMPLOYER_NOTES_EXTENSION_URL,
   buildEmployerType,
   getCandidPayerIdFromOrganization,
   isEmployerOrganization,
-  normalizeAddress,
   normalizeEmployerNotesExtension,
   normalizeIdentifier,
-  normalizeTelecom,
   setOrUpdateCandidIdentifier,
 } = await import('../../src/rcm/employers/helpers');
+const { normalizeAddress, normalizeTelecom } = await import('../../src/shared/organization');
 
 describe('RCM employer helpers', () => {
   it('detects employer organizations by type code', () => {

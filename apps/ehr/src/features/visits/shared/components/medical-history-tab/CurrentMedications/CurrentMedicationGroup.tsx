@@ -4,7 +4,8 @@ import { ActionsList } from 'src/components/ActionsList';
 import { DeleteIconButton } from 'src/components/DeleteIconButton';
 import { dataTestIds } from 'src/constants/data-test-ids';
 import { MedHistorySubsectionTypography } from 'src/features/visits/in-person/components/MedHistorySubsectionTypography';
-import { DATE_FORMAT, MedicationDTO } from 'utils';
+import { MedicationDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
+import { DATE_FORMAT } from 'utils/lib/utils/dateUtils';
 import { useGetAppointmentAccessibility } from '../../../hooks/useGetAppointmentAccessibility';
 
 export const CurrentMedicationGroup = ({
@@ -51,7 +52,7 @@ function CurrentMedicationItem({ value }: { value: MedicationDTO }): JSX.Element
   const lastIntakeDate = value.intakeInfo.date && DateTime.fromISO(value.intakeInfo.date);
   let lastIntakeDateDisplay = '';
   if (lastIntakeDate instanceof DateTime) {
-    lastIntakeDateDisplay = `${lastIntakeDate.toFormat(DATE_FORMAT)} at ${lastIntakeDate.toFormat('HH:mm a')}`;
+    lastIntakeDateDisplay = `${lastIntakeDate.toFormat(DATE_FORMAT)} at ${lastIntakeDate.toFormat('hh:mm a')}`;
   }
   const additionalInfo = [
     value.intakeInfo?.dose,

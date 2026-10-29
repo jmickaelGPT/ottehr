@@ -1,8 +1,9 @@
 import Oystehr from '@oystehr/sdk';
 import { Appointment, Encounter, RelatedPerson } from 'fhir/r4b';
-import { getRelatedPersonsForPatient, getSecret, Secrets, SecretsKeys } from 'utils';
-import { getAuth0Token } from '../../shared';
+import { getRelatedPersonsForPatient } from 'utils/lib/auth/user-auth.helper';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
 import { getPatientFromAppointment } from '../../shared/appointment/helpers';
+import { getAuth0Token } from '../../shared/getAuth0Token';
 import { CreateTelemedVideoRoomResponse } from '../../shared/types/telemed/video-room.types';
 
 export const createVideoRoom = async (
@@ -29,7 +30,10 @@ const execCreateVideoRoomRequest = async (
 ): Promise<CreateTelemedVideoRoomResponse['encounter']> => {
   const token = await getAuth0Token(secrets);
   const response = await fetch(`${getSecret(SecretsKeys.PROJECT_API, secrets)}/telemed/v2/meeting`, {
-    body: JSON.stringify({ encounter: encounter }),
+    // recordAudio enables Oystehr's telemed audio recording. When the recording is ready Oystehr stores an
+    // audio/mp4 file in Z3 and creates a DocumentReference (LOINC 56444-3) on the Encounter, which the
+    // process-telemed-recording subscription picks up to power the Ambient Scribe AI chart recommendations.
+    body: JSON.stringify({ encounter: encounter, recordAudio: true }),
     headers: {
       Authorization: `Bearer ${token}`,
     },

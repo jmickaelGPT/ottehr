@@ -4,16 +4,14 @@ import { Appointment, Attachment, Encounter, Patient, QuestionnaireResponse } fr
 import { readFileSync } from 'fs';
 import { DateTime } from 'luxon';
 import { join } from 'path';
-import {
-  chooseJson,
-  DOB_DATE_FORMAT,
-  EHRImageUploadType,
-  GetPresignedFileURLInput,
-  UpdateVisitFilesInput,
-  VisitDocuments,
-} from 'utils';
+import { chooseJson } from 'utils/lib/helpers/oystehrApi';
+import { GetPresignedFileURLInput } from 'utils/lib/types/api/get-presigned-file-url/get-presigned-file-url.types';
+import { EHRImageUploadType, UpdateVisitFilesInput } from 'utils/lib/types/api/update-visit-details.types';
+import { VisitDocuments } from 'utils/lib/types/data/documents';
+import { DOB_DATE_FORMAT } from 'utils/lib/utils/date';
 import { assert, inject } from 'vitest';
-import { getAuth0Token } from '../../src/shared';
+import { getAuth0Token } from '../../src/shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../src/shared/helpers';
 import QRInput from '../data/questionnaire-response-1.json';
 import { SECRETS } from '../data/secrets';
 import { ensureM2MPractitionerProfile } from '../helpers/configureTestM2MClient';
@@ -215,14 +213,9 @@ describe('saving card files from EHR', () => {
       AUTH0_AUDIENCE: AUTH0_AUDIENCE,
     });
 
-    oystehr = new Oystehr({
-      accessToken: token,
-      fhirApiUrl: FHIR_API,
-      projectApiUrl: EXECUTE_ZAMBDA_URL,
-      services: {
-        zambdaApiUrl: EXECUTE_ZAMBDA_URL,
-      },
+    oystehr = createClinicalOystehrClient(token, SECRETS, {
       projectId: PROJECT_ID,
+      services: { fhirApiUrl: FHIR_API, projectApiUrl: EXECUTE_ZAMBDA_URL, zambdaApiUrl: EXECUTE_ZAMBDA_URL },
     });
 
     await ensureM2MPractitionerProfile(token);

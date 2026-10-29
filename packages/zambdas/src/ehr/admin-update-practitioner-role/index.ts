@@ -1,15 +1,21 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { HealthcareService, PractitionerRole } from 'fhir/r4b';
 import {
-  INVALID_INPUT_ERROR,
-  isServiceCategoryHealthcareService,
-  MISSING_REQUEST_BODY,
-  MISSING_REQUIRED_PARAMETERS,
   PRACTITIONER_ROLE_ALL_CATEGORIES_EXTENSION_URL,
   SCHEDULE_DISPLAY_NAME_EXTENSION_URL,
-  Secrets,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../shared';
+} from 'utils/lib/fhir/constants';
+import { isServiceCategoryHealthcareService } from 'utils/lib/fhir/healthcareService';
+import { Secrets } from 'utils/lib/secrets';
+import {
+  INVALID_INPUT_ERROR,
+  MISSING_REQUEST_BODY,
+  MISSING_REQUIRED_PARAMETERS,
+  PRACTITIONER_SCHEDULE_CONFLICT_ERROR,
+} from 'utils/lib/types/errors';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import { checkPractitionerRoleConflict } from '../admin-practitioner-role-shared/check-conflict';
 
 interface AdminUpdatePractitionerRoleInput {
@@ -90,7 +96,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   const hasAllCategories = typeof parsed.allCategories === 'boolean';
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, parsed.secrets);
-  const oystehr = createOystehrClient(m2mToken, parsed.secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, parsed.secrets);
 
   // Validate the resulting (provider, location, category) tuple won't collide
   // with another active PR. Need the current PR to fill in fields the caller
@@ -142,19 +148,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
       { categoryNameById }
     );
     if (conflict) {
-      return {
-        statusCode: 400,
-        body: JSON.stringify({
-          code: 'PRACTITIONER_SCHEDULE_CONFLICT',
-          message: `This provider already has another active schedule at this location offering ${conflict.conflictingCategoryNames.join(
-            ', '
-          )}. Remove ${
-            conflict.conflictingCategoryNames.length === 1 ? 'it' : 'them'
-          } from that schedule first, or pick a different location.`,
-          conflictingPractitionerRoleId: conflict.conflictingPractitionerRoleId,
-          conflictingCategoryNames: conflict.conflictingCategoryNames,
-        }),
-      };
+      throw PRACTITIONER_SCHEDULE_CONFLICT_ERROR(conflict.conflictingCategoryNames);
     }
   }
 

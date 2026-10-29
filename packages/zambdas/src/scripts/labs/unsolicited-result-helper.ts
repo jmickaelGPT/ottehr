@@ -7,8 +7,9 @@ import {
   DR_CONTAINED_PRACTITIONER_REF,
   OYSTEHR_LAB_DIAGNOSTIC_REPORT_CATEGORY,
   OYSTEHR_LABS_RESULT_ORDERING_PROVIDER_EXT_URL,
-} from 'utils';
-import { createOystehrClient, getAuth0Token } from '../../shared';
+} from 'utils/lib/types/data/labs/labs.constants';
+import { getAuth0Token } from '../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../shared/helpers';
 import { DR_UNSOLICITED_RESULT_TAG } from './lab-script-consts';
 import { createResultAttachmentDocRef } from './lab-script-helpers';
 
@@ -54,7 +55,7 @@ const main = async (): Promise<void> => {
   if (!token) {
     throw new Error('Failed to fetch auth token.');
   }
-  const oystehr = createOystehrClient(token, envConfig);
+  const oystehr = createClinicalOystehrClient(token, envConfig);
 
   const autoLabOrgSearch = (
     await oystehr.fhir.search<Organization>({

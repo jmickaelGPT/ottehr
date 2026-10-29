@@ -1,7 +1,8 @@
 import { BatchInputPostRequest } from '@oystehr/sdk';
 import { DiagnosticReport, DocumentReference, ServiceRequest } from 'fhir/r4b';
 import fs from 'fs';
-import { createOystehrClient, getAuth0Token } from '../../shared';
+import { getAuth0Token } from '../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../shared/helpers';
 import { EXAMPLE_ENVS } from './lab-script-consts';
 import { createResultAttachmentDocRef } from './lab-script-helpers';
 
@@ -32,7 +33,7 @@ const main = async (): Promise<void> => {
   if (!token) {
     throw new Error('Failed to fetch auth token.');
   }
-  const oystehr = createOystehrClient(token, envConfig);
+  const oystehr = createClinicalOystehrClient(token, envConfig);
 
   let serviceRequest: ServiceRequest | undefined;
   try {

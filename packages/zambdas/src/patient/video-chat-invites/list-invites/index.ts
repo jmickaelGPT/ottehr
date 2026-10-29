@@ -2,23 +2,20 @@ import { User } from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Appointment } from 'fhir/r4b';
 import { JSONPath } from 'jsonpath-plus';
+import { getAppointmentResourceById } from 'utils/lib/fhir/appointments';
+import { createOystehrClient } from 'utils/lib/helpers/helpers';
+import { getSecret, SecretsKeys } from 'utils/lib/secrets';
 import {
-  createOystehrClient,
-  getAppointmentResourceById,
-  getSecret,
   ListInvitedParticipantsInput,
   ListInvitedParticipantsResponse,
-  SecretsKeys,
-} from 'utils';
-import {
-  getAuth0Token,
-  getUser,
-  getVideoEncounterForAppointment,
-  lambdaResponse,
-  searchInvitedParticipantResourcesByEncounterId,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+} from 'utils/lib/types/data/telemed/video-chat-invites.types';
+import { getUser } from '../../../shared/auth';
+import { getVideoEncounterForAppointment } from '../../../shared/encounters';
+import { searchInvitedParticipantResourcesByEncounterId } from '../../../shared/fhir';
+import { getAuth0Token } from '../../../shared/getAuth0Token';
+import { lambdaResponse } from '../../../shared/lambda';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 // Lifting up value to outside of the handler allows it to stay in memory across warm lambda invocations
@@ -35,7 +32,6 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   let validatedParameters: ListInvitedParticipantsInput;
   try {
     validatedParameters = validateRequestParameters(input);
-    console.log(JSON.stringify(validatedParameters, null, 4));
   } catch (error: any) {
     console.log(error);
     return lambdaResponse(400, { message: error.message });
@@ -75,7 +71,11 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     return lambdaResponse(404, { message: 'Appointment is not found' });
   }
 
-  const encounter = await getVideoEncounterForAppointment(appointment.id || 'Unknown', oystehr);
+  if (!appointment.id) {
+    throw new Error(`Appointment resource returned without id for appointment ${appointmentId}`);
+  }
+
+  const encounter = await getVideoEncounterForAppointment(appointment.id, oystehr);
   if (!encounter || !encounter.id) {
     throw new Error('Encounter not found.'); // 500
   }

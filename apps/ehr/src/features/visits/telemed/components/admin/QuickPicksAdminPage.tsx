@@ -31,7 +31,7 @@ import {
   MedicationHistoryQuickPickData,
   PatientInstructionQuickPickData,
   QuickTextQuickPickData,
-} from 'utils';
+} from 'utils/lib/types/api/quick-picks.types';
 import ImmunizationQuickPicksPage from './ImmunizationQuickPicksPage';
 import InHouseMedicationQuickPicksPage from './InHouseMedicationQuickPicksPage';
 import InsuranceQuickPickPage from './InsuranceQuickPickPage';
@@ -398,7 +398,12 @@ export default function QuickPicksAdminPage(): ReactElement {
     <Box>
       <TabContext value={subTab ?? 'procedures'}>
         <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
-          <TabList onChange={(_, v) => navigate(`/admin/quick-picks/${v}`)} aria-label="Quick pick categories">
+          <TabList
+            onChange={(_, v) => navigate(`/admin/quick-picks/${v}`)}
+            aria-label="Quick pick categories"
+            variant="scrollable"
+            scrollButtons="auto"
+          >
             <Tab label="Procedures" value="procedures" sx={{ textTransform: 'none' }} />
             <Tab label="Allergies" value="allergies" sx={{ textTransform: 'none' }} />
             <Tab label="Medical Conditions" value="medical-conditions" sx={{ textTransform: 'none' }} />

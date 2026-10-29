@@ -1,6 +1,9 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../shared';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { complexValidation, ValidatedInput, validateRequestParameters, validateSecrets } from './validation';
 
 const ZAMBDA_NAME = 'delete-visit-files';
@@ -17,18 +20,16 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   console.group('validateRequestParameters');
   const validatedParameters = await validateRequestParameters(input);
   console.groupEnd();
-  console.debug('validateRequestParameters success', JSON.stringify(validatedParameters));
 
   console.group('createOystehrClient');
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
   console.groupEnd();
   console.debug('createOystehrClient success');
 
   console.group('complexValidation');
   const validatedInput = await complexValidation(validatedParameters, secrets, oystehr);
   console.groupEnd();
-  console.debug('complexValidation success', JSON.stringify(validatedInput));
 
   console.group('performEffect');
   const success = await performEffect(validatedInput, oystehr);

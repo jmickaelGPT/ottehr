@@ -1,5 +1,7 @@
-import { CreateLabOrderParameters, MISSING_REQUEST_BODY, MISSING_REQUIRED_PARAMETERS } from 'utils';
-import { ZambdaInput } from '../../../../shared/types';
+import { CreateLabOrderParameters } from 'utils/lib/types/data/labs/labs.types';
+import { MISSING_REQUEST_BODY, MISSING_REQUIRED_PARAMETERS } from 'utils/lib/types/errors';
+import { ZambdaInput } from '../../../../shared/types/common';
+import { safeJsonParse } from '../../../../shared/validation';
 
 export function validateRequestParameters(input: ZambdaInput): CreateLabOrderParameters & { secrets: any } {
   if (!input.body) {
@@ -7,7 +9,7 @@ export function validateRequestParameters(input: ZambdaInput): CreateLabOrderPar
   }
 
   const { dx, encounter, orderableItems, psc, orderingLocation, selectedPaymentMethod, clinicalInfoNoteByUser } =
-    JSON.parse(input.body);
+    safeJsonParse(input.body);
 
   const missingResources = [];
   if (!dx) missingResources.push('dx (diagnosis)');

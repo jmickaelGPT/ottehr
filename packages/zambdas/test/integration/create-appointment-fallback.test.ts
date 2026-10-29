@@ -12,25 +12,27 @@ import {
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
 import {
-  CreateAppointmentInputParams,
-  CreateAppointmentResponse,
   GROUP_ASSIGNMENT_MODE_SYSTEM,
-  PatientInfo,
   SCHEDULE_EXTENSION_URL,
   ScheduleStrategyCoding,
   SERVICE_CATEGORY_CONFIG_EXTENSION_URL,
   SERVICE_CATEGORY_SYSTEM,
   SERVICE_CATEGORY_TAG,
-  serviceCategoryCharacteristics,
-  ServiceMode,
-  ServiceVisitType,
   SLOT_BOOKED_VIA_GROUP_EXTENSION_URL,
   SLOT_FALLBACK_REROUTED_TAG_SYSTEM,
-  SLOT_UNAVAILABLE_ERROR,
   SlotServiceCategory,
-} from 'utils';
+} from 'utils/lib/fhir/constants';
+import { serviceCategoryCharacteristics } from 'utils/lib/fhir/healthcareService';
+import {
+  CreateAppointmentInputParams,
+  CreateAppointmentResponse,
+} from 'utils/lib/types/api/prebook-create-appointment/prebook-create-appointment.types';
+import { ServiceMode, ServiceVisitType } from 'utils/lib/types/common';
+import { PatientInfo } from 'utils/lib/types/data/telemed/appointments/create-appointment.types';
+import { SLOT_UNAVAILABLE_ERROR } from 'utils/lib/types/errors';
 import { afterAll, assert, beforeAll, describe, expect, inject, test } from 'vitest';
-import { getAuth0Token } from '../../src/shared';
+import { getAuth0Token } from '../../src/shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../src/shared/helpers';
 import { SECRETS } from '../data/secrets';
 import {
   buildSimpleScheduleExt,
@@ -64,11 +66,12 @@ describe('create-appointment group-member fallback (D-6 phase 2)', () => {
       AUTH0_SECRET: AUTH0_SECRET_TESTS,
       AUTH0_AUDIENCE,
     });
-    oystehr = new Oystehr({
-      accessToken: token,
-      fhirApiUrl: FHIR_API,
-      projectApiUrl: EXECUTE_ZAMBDA_URL,
-      services: { zambdaApiUrl: EXECUTE_ZAMBDA_URL },
+    oystehr = createClinicalOystehrClient(token, SECRETS, {
+      services: {
+        fhirApiUrl: FHIR_API,
+        projectApiUrl: EXECUTE_ZAMBDA_URL,
+        zambdaApiUrl: EXECUTE_ZAMBDA_URL,
+      },
       projectId: PROJECT_ID,
     });
     tag = {
@@ -659,8 +662,9 @@ describe('create-appointment group-member fallback (D-6 phase 2)', () => {
     try {
       const result = await callCreateAppointment(patientSlot.id!);
       if (!result.ok) {
+        const diag = await diagnoseSlotAppointmentConflict(patientSlot.id!);
         throw new Error(
-          `Expected the :15 slot to be bookable once cadence is resolved from the service category, but got: ${result.message}`
+          `Expected the :15 slot to be bookable once cadence is resolved from the service category, but got: ${result.message}\nDiagnostic: ${diag}`
         );
       }
     } finally {

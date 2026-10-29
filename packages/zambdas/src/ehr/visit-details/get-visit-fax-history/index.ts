@@ -1,27 +1,30 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { Practitioner, Provenance } from 'fhir/r4b';
+import { Provenance, Task } from 'fhir/r4b';
 import {
-  FHIR_RESOURCE_NOT_FOUND_CUSTOM,
+  OUTBOUND_DELIVERY_INPUT_CODES,
+  OUTBOUND_DELIVERY_TASK_CODES,
+  OUTBOUND_DELIVERY_TASK_SYSTEM,
+  PROVENANCE_FAX_ACTIVITY_CODES,
+  PROVENANCE_FAX_SYSTEM,
+} from 'utils/lib/fhir/constants';
+import { getAllFhirSearchPages } from 'utils/lib/fhir/getAllFhirSearchPages';
+import { getOutboundDeliveryInput, getOutboundDeliveryRecipientSnapshot } from 'utils/lib/fhir/outbound-delivery';
+import { removePrefix } from 'utils/lib/helpers/helpers';
+import {
   GetVisitFaxHistoryInput,
   GetVisitFaxHistoryInputSchema,
   GetVisitFaxHistoryInputValidated,
   GetVisitFaxHistoryInputValidatedSchema,
   GetVisitFaxHistoryOutput,
-  INVALID_INPUT_ERROR,
-  MISSING_AUTH_TOKEN,
-  MISSING_REQUEST_BODY,
-  PROVENANCE_FAX_ACTIVITY_CODES,
-  PROVENANCE_FAX_SYSTEM,
-} from 'utils';
+} from 'utils/lib/types/api/visit-details/visit-details.types';
+import { INVALID_INPUT_ERROR, MISSING_AUTH_TOKEN, MISSING_REQUEST_BODY } from 'utils/lib/types/errors';
 import { ZodError } from 'zod';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  formatZodError,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
+import { formatZodError, safeJsonParse } from '../../../shared/validation';
 
 const ZAMBDA_NAME = 'get-visit-fax-history';
 
@@ -31,10 +34,9 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   console.group('validateRequestParameters');
   const validatedParameters = validateRequestParameters(input);
   console.groupEnd();
-  console.debug('validateRequestParameters success', JSON.stringify(validatedParameters));
   const { secrets } = validatedParameters;
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   console.group('performEffect');
   const resources = await performEffect(validatedParameters, oystehr);
@@ -50,17 +52,25 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
 const performEffect = async (input: GetVisitFaxHistoryInput, oystehr: Oystehr): Promise<GetVisitFaxHistoryOutput> => {
   const { appointmentId } = input;
 
-  const allProvenances = (
-    await oystehr.fhir.search<Provenance>({
-      resourceType: 'Provenance',
-      params: [
-        {
-          name: 'target',
-          value: `Appointment/${appointmentId}`,
-        },
-      ],
-    })
-  ).unbundle();
+  const [tasks, allProvenances] = await Promise.all([
+    getAllFhirSearchPages<Task>(
+      {
+        resourceType: 'Task',
+        params: [
+          { name: 'code', value: `${OUTBOUND_DELIVERY_TASK_SYSTEM}|${OUTBOUND_DELIVERY_TASK_CODES.fax}` },
+          { name: 'focus', value: `Appointment/${appointmentId}` },
+        ],
+      },
+      oystehr
+    ),
+    getAllFhirSearchPages<Provenance>(
+      {
+        resourceType: 'Provenance',
+        params: [{ name: 'target', value: `Appointment/${appointmentId}` }],
+      },
+      oystehr
+    ),
+  ]);
   console.log(`found ${allProvenances.length} provenances for appointment ${appointmentId}`);
 
   const faxProvenances = allProvenances.filter(
@@ -72,27 +82,48 @@ const performEffect = async (input: GetVisitFaxHistoryInput, oystehr: Oystehr): 
 
   console.log(`found ${faxProvenances.length} fax provenances for appointment ${appointmentId}`);
 
-  const faxesSent = faxProvenances.map((provenance) => {
-    const recipientNumber = (provenance.contained?.[0] as Practitioner | undefined)?.telecom?.[0].value;
-    const created = provenance.occurredDateTime;
-    const senderId = provenance.agent?.[0].who.identifier?.value;
-    const senderDisplay = provenance.agent?.[0].who.display;
-
-    if (!recipientNumber) throw FHIR_RESOURCE_NOT_FOUND_CUSTOM('Fax provenance is missing recipient fax number');
-    if (!created) throw FHIR_RESOURCE_NOT_FOUND_CUSTOM('Fax provenance is missing occurredDateTime');
-    if (!senderId) throw FHIR_RESOURCE_NOT_FOUND_CUSTOM('Fax provenance is missing sender id');
-    if (!senderDisplay) throw FHIR_RESOURCE_NOT_FOUND_CUSTOM('Fax provenance is missing sender display');
-
-    return {
-      recipientNumber,
-      created,
+  const taskSnapshots = tasks.map((task) => ({ task, recipient: getOutboundDeliveryRecipientSnapshot(task) }));
+  const communicationIdsInTasks = new Set(
+    taskSnapshots.map(({ recipient }) => recipient.communicationId).filter((id): id is string => Boolean(id))
+  );
+  const taskFaxes = taskSnapshots
+    .filter(({ task, recipient }) => task.status === 'completed' || Boolean(recipient.communicationId))
+    .map(({ task, recipient }) => ({
+      recipientNumber: recipient.address ?? '',
+      created: task.authoredOn ?? task.executionPeriod?.start ?? '',
       sender: {
-        id: senderId,
-        display: senderDisplay,
+        id: getOutboundDeliveryInput(task, OUTBOUND_DELIVERY_INPUT_CODES.senderId)?.valueString ?? '',
+        display: getOutboundDeliveryInput(task, OUTBOUND_DELIVERY_INPUT_CODES.senderDisplay)?.valueString ?? 'n/a',
       },
-    };
-  });
-  return { faxesSent };
+    }))
+    .filter((fax) => fax.recipientNumber && fax.created);
+
+  const legacyFaxes = faxProvenances
+    .filter((provenance) => {
+      const communicationId = provenance.target
+        .map((target) => removePrefix('Communication/', target.reference ?? ''))
+        .find(Boolean);
+      return !communicationId || !communicationIdsInTasks.has(communicationId);
+    })
+    .map((provenance) => {
+      const recipientNumber = provenance.contained
+        ?.find((resource) => resource.resourceType === 'Practitioner')
+        ?.telecom?.find((telecom) => telecom.system === 'fax')?.value;
+      const created = provenance.occurredDateTime;
+      const senderId = provenance.agent?.[0]?.who?.identifier?.value;
+      const senderDisplay = provenance.agent?.[0]?.who?.display;
+
+      return {
+        recipientNumber: recipientNumber ?? '',
+        created: created ?? '',
+        sender: {
+          id: senderId ?? '',
+          display: senderDisplay ?? 'n/a',
+        },
+      };
+    })
+    .filter((fax) => fax.recipientNumber && fax.created);
+  return { faxesSent: [...taskFaxes, ...legacyFaxes].sort((a, b) => b.created.localeCompare(a.created)) };
 };
 
 function validateRequestParameters(input: ZambdaInput): GetVisitFaxHistoryInputValidated {
@@ -106,7 +137,7 @@ function validateRequestParameters(input: ZambdaInput): GetVisitFaxHistoryInputV
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(input.body);
+    parsed = safeJsonParse(input.body);
   } catch {
     throw INVALID_INPUT_ERROR('Invalid JSON in request body.');
   }

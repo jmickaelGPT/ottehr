@@ -2,16 +2,16 @@ import { expect, Page } from '@playwright/test';
 import { DateTime } from 'luxon';
 import { dataTestIds } from 'src/helpers/data-test-ids';
 import {
-  BookingConfig,
-  chooseJson,
-  CreateAppointmentResponse,
   getReasonForVisitOptionsForServiceCategory,
   getServiceCategoryCodings,
   prepopulateBookingForm,
-  selectBookingQuestionnaire,
   serviceCategorySupportsContext,
-  VALUE_SETS,
-} from 'utils';
+} from 'utils/lib/config-helpers/booking';
+import { chooseJson } from 'utils/lib/helpers/oystehrApi';
+import { BookingConfig, selectBookingQuestionnaire } from 'utils/lib/ottehr-config/booking';
+import { VALUE_SETS } from 'utils/lib/ottehr-config/value-sets';
+import { CreateAppointmentResponse } from 'utils/lib/types/api/prebook-create-appointment/prebook-create-appointment.types';
+import { logVerbose } from '../logging';
 import {
   collectValidationErrors,
   fillChoiceDropdown,
@@ -55,7 +55,7 @@ export class BookingFlowHelpers {
    * Get a valid value from a config-defined value set
    * Returns the first value from the appropriate value set
    */
-  static getValidValueFromConfig(fieldKey: string, serviceCategory?: string): string | undefined {
+  static getValidValueFromConfig(fieldKey: string, serviceCategory?: string, serviceMode?: string): string | undefined {
     switch (fieldKey) {
       case 'patient-birth-sex':
         return VALUE_SETS.birthSexOptions[0].value; // 'Male'
@@ -65,7 +65,7 @@ export class BookingFlowHelpers {
       case 'reason-for-visit-om':
       case 'reason-for-visit-wc':
         if (serviceCategory) {
-          const options = getReasonForVisitOptionsForServiceCategory(serviceCategory);
+          const options = getReasonForVisitOptionsForServiceCategory(serviceCategory, serviceMode);
           return options[0]?.value;
         }
         // Default to first available category if no category specified
@@ -124,7 +124,10 @@ export class BookingFlowHelpers {
       },
       // No patient = new patient flow, so triggered fields with PatientDoesntExistTrigger should be enabled
     });
-    console.log('Prepopulated form items:', JSON.stringify(prepopulatedItems, null, 2));
+    // Pretty-printing this whole response was the single largest contributor to the intake job log:
+    // one dump per test, a few hundred lines each. The count is what the flow actually depends on.
+    console.log(`Prepopulated form items: ${prepopulatedItems.length} section(s)`);
+    logVerbose(JSON.stringify(prepopulatedItems, null, 2));
 
     // Extract logical field values from prepopulated items for trigger evaluation
     const logicalFieldValues = new Map<string, any>();
@@ -156,6 +159,12 @@ export class BookingFlowHelpers {
             return targetValue === trigger.answerString;
           } else if (trigger.answerBoolean !== undefined) {
             return targetValue === trigger.answerBoolean;
+          }
+        } else if (trigger.operator === '!=') {
+          if (trigger.answerString !== undefined) {
+            return targetValue !== trigger.answerString;
+          } else if (trigger.answerBoolean !== undefined) {
+            return targetValue !== trigger.answerBoolean;
           }
         }
         return false;
@@ -863,7 +872,7 @@ export class BookingFlowHelpers {
    * Names and DOB are randomized to avoid duplicate patient detection
    * Returns both valid and invalid data for validation testing
    */
-  static getSamplePatientData(serviceCategory?: string): PatientTestData {
+  static getSamplePatientData(serviceCategory?: string, serviceMode?: string): PatientTestData {
     // Generate random timestamp suffix to ensure uniqueness
     const timestamp = Date.now();
     const randomSuffix = Math.floor(Math.random() * 1000);
@@ -889,7 +898,7 @@ export class BookingFlowHelpers {
         'patient-weight': '180', // Only shown for virtual visits
         'patient-ssn': '123-45-6789', // Required for workers-comp flows
         'return-patient-check': this.getValidValueFromConfig('return-patient-check'),
-        'reason-for-visit': this.getValidValueFromConfig('reason-for-visit', serviceCategory),
+        'reason-for-visit': this.getValidValueFromConfig('reason-for-visit', serviceCategory, serviceMode),
         'reason-for-visit-om': this.getValidValueFromConfig('reason-for-visit-om', 'occupational-medicine'),
         'reason-for-visit-wc': this.getValidValueFromConfig('reason-for-visit-wc', 'workers-comp'),
         'tell-us-more': 'Patient experiencing symptoms for testing purposes',

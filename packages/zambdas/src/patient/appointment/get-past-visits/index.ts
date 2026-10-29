@@ -1,20 +1,21 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Appointment, Location, Patient, Schedule } from 'fhir/r4b';
+import { getPatientsForUser } from 'utils/lib/auth/user-auth.helper';
+import { TIMEZONE_EXTENSION_URL } from 'utils/lib/fhir/constants';
+import { createOystehrClient, getParticipantIdFromAppointment } from 'utils/lib/helpers/helpers';
+import { getSecret, SecretsKeys } from 'utils/lib/secrets';
+import { TIMEZONES } from 'utils/lib/types/constants';
 import {
   AppointmentInformationIntake,
   appointmentTypeMap,
-  createOystehrClient,
-  getInPersonVisitStatus,
-  getParticipantIdFromAppointment,
   GetPastVisitsResponse,
-  getPatientsForUser,
-  getSecret,
-  getTimezone,
-  SecretsKeys,
-  TIMEZONE_EXTENSION_URL,
-  TIMEZONES,
-} from 'utils';
-import { checkOrCreateM2MClientToken, getUser, wrapHandler, ZambdaInput } from '../../../shared';
+} from 'utils/lib/types/data/appointments/appointments.types';
+import { NO_READ_ACCESS_TO_PATIENT_ERROR } from 'utils/lib/types/errors';
+import { getTimezone } from 'utils/lib/utils/scheduleUtils';
+import { getInPersonVisitStatus } from 'utils/lib/utils/visitUtils';
+import { checkOrCreateM2MClientToken, getUser } from '../../../shared/auth';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { getFhirResources, mapEncountersToAppointmentIds } from './helpers';
 import { validateRequestParameters } from './validateRequestParameters';
 
@@ -46,7 +47,8 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   console.log(`patient IDs for user: [${patientIDs.join(', ')}]`);
 
   if (patientId && !patientIDs.includes(`Patient/${patientId}`)) {
-    throw new Error('Not authorized to get this patient');
+    // authenticated but requesting a patient they don't have access to
+    throw NO_READ_ACCESS_TO_PATIENT_ERROR;
   }
 
   if (!patientIDs.length && !patientId) {

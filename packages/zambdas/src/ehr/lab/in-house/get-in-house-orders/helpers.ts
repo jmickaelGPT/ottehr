@@ -17,26 +17,29 @@ import {
   Specimen,
   Task,
 } from 'fhir/r4b';
+import { getFullestAvailableName } from 'utils/lib/fhir/patient';
+import { getAttendingPractitionerId } from 'utils/lib/fhir/practitioners';
+import { convertActivityDefinitionToDataEntryTestItem } from 'utils/lib/helpers/in-house-labs';
+import { fetchDocumentReferencesForDiagnosticReports } from 'utils/lib/helpers/presigned-file-url/helpers';
+import { DiagnosisDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
 import {
-  compareDates,
-  convertActivityDefinitionToDataEntryTestItem,
   DEFAULT_IN_HOUSE_LABS_ITEMS_PER_PAGE,
-  DiagnosisDTO,
-  EMPTY_PAGINATION,
-  fetchDocumentReferencesForDiagnosticReports,
-  getAttendingPractitionerId,
-  getFullestAvailableName,
   IN_HOUSE_TEST_CODE_SYSTEM,
+} from 'utils/lib/types/data/in-house/in-house.constants';
+import {
   InHouseGetOrdersResponseDTO,
   InHouseOrderDetailPageItemDTO,
   InHouseOrderListPageItemDTO,
   InHouseOrdersSearchBy,
-  isPositiveNumberOrZero,
-  LabDocumentRelatedToDiagnosticReport,
-  Pagination,
   TestStatus,
-} from 'utils';
-import { getMyPractitionerId, sendErrors } from '../../../../shared';
+} from 'utils/lib/types/data/in-house/in-house.types';
+import { EMPTY_PAGINATION } from 'utils/lib/types/data/labs/labs.constants';
+import { LabDocumentRelatedToDiagnosticReport } from 'utils/lib/types/data/labs/labs.types';
+import { Pagination } from 'utils/lib/types/data/pagination.types';
+import { compareDates } from 'utils/lib/utils/dateUtils';
+import { isPositiveNumberOrZero } from 'utils/lib/validation/helper';
+import { sendErrors } from '../../../../shared/errors';
+import { getMyPractitionerId } from '../../../../shared/practitioners';
 import { getObservationsForDiagnosticReportResults } from '../../shared/helpers';
 import {
   buildOrderHistory,
@@ -181,6 +184,7 @@ export const parseOrderData = <SearchBy extends InHouseOrdersSearchBy>({
     timezone: parseTimezoneForAppointmentSchedule(appointment, appointmentScheduleMap),
     orderAddedDate: parseOrderAddedDate(serviceRequest, tasks),
     serviceRequestId: serviceRequest.id,
+    labDetails: testItem,
   };
 
   if (searchBy.searchBy.field === 'serviceRequestId') {
@@ -446,6 +450,19 @@ export const createInHouseServiceRequestSearchParams = (params: GetZambdaInHouse
     });
   }
 
+  // Both the list page and the detail page need results now, so grab DR and obs
+  // Include the DR for grabbing pdf url
+  searchParams.push({
+    name: '_revinclude',
+    value: 'DiagnosticReport:based-on',
+  });
+
+  // Include observations for lab details
+  searchParams.push({
+    name: '_include:iterate',
+    value: 'DiagnosticReport:result',
+  });
+
   if (searchBy.field === 'serviceRequestId') {
     searchParams.push({
       name: '_id',
@@ -456,18 +473,6 @@ export const createInHouseServiceRequestSearchParams = (params: GetZambdaInHouse
     searchParams.push({
       name: '_include',
       value: 'ServiceRequest:specimen',
-    });
-
-    // Include the DR for grabbing pdf url
-    searchParams.push({
-      name: '_revinclude',
-      value: 'DiagnosticReport:based-on',
-    });
-
-    // Include observations for lab details
-    searchParams.push({
-      name: '_include:iterate',
-      value: 'DiagnosticReport:result',
     });
 
     // Include any related repeat test SRs

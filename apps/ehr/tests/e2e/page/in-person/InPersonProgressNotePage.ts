@@ -27,11 +27,15 @@ export class InPersonProgressNotePage extends BaseProgressNotePage {
     ).toBeVisible({ timeout: 15000 });
   }
 
-  async verifyRosReviewSectionHidden(): Promise<void> {
+  async verifyRosReviewSectionEmpty(): Promise<void> {
     await expect(
       this.#page.getByTestId(dataTestIds.progressNotePage.rosReviewContainer),
-      'ROS review section should not be visible when no findings are documented'
-    ).not.toBeVisible();
+      'ROS review section should be visible so it can be filled in from the note'
+    ).toBeVisible();
+    await expect(
+      this.#page.getByTestId(dataTestIds.progressNotePage.rosReviewContainer),
+      'ROS review section should read as empty when no findings are documented'
+    ).toContainText('No review of systems');
   }
 
   async verifyRosFinding(findingLabel: string, abnormal: boolean): Promise<void> {
@@ -46,6 +50,15 @@ export class InPersonProgressNotePage extends BaseProgressNotePage {
         '700'
       );
     }
+  }
+
+  async verifyRosComment(systemLabel: string, comment: string): Promise<void> {
+    const rosContainer = this.#page.getByTestId(dataTestIds.progressNotePage.rosReviewContainer);
+    await expect(rosContainer, `ROS section should list the "${systemLabel}" system`).toContainText(systemLabel);
+    await expect(
+      rosContainer.getByText(comment, { exact: true }),
+      `Comment for "${systemLabel}" should be visible in ROS section`
+    ).toBeVisible();
   }
 
   async expectLoaded(): Promise<void> {

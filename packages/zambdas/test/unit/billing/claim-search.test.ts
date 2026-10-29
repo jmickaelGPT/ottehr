@@ -1,0 +1,641 @@
+import Oystehr from '@oystehr/sdk';
+import { Claim, ClaimResponse, Coverage, Location, Organization, Patient, Practitioner, Resource } from 'fhir/r4b';
+import { ottehrIdentifierSystem } from 'utils/lib/fhir/systemUrls';
+import { getPayerUrl } from 'utils/lib/helpers/helpers';
+import { CODE_SYSTEM_CLAIM_TYPE } from 'utils/lib/helpers/rcm/constants';
+import { CLAIM_TAG_SYSTEM } from 'utils/lib/types/data/billing/billing.constants';
+import { AR_STAGE, AR_STAGE_NONE, CLAIM_STATUS_TAG_SYSTEMS } from 'utils/lib/types/data/billing/claim-status';
+import {
+  CUSTOM_INSURANCE_ORG_ID_SYSTEM,
+  CUSTOM_INSURANCE_ORG_KIND_CODE,
+} from 'utils/lib/types/data/billing/custom-insurance-org.types';
+import {
+  CLAIM_NON_INSURANCE_PAYER_TAG_SYSTEM,
+  NIO_ORGANIZATION_KIND_SYSTEM,
+} from 'utils/lib/types/data/billing/non-insurance-org.types';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  buildClaimFilterParams,
+  CLAIM_LIST_ELEMENTS,
+  claimMatchesServiceDateRange,
+  getClaimServiceDate,
+  mapClaimToItem,
+} from '../../../src/billing/claim-search';
+import { getClaimTypeCoding } from '../../../src/billing/shared';
+
+type Lookups = Parameters<typeof mapClaimToItem>[1];
+
+const makeClaim = (id: string, billed: number): Claim =>
+  ({
+    resourceType: 'Claim',
+    id,
+    status: 'active',
+    created: '2026-07-01',
+    type: {
+      coding: [],
+    },
+    insurance: [],
+    total: {
+      value: billed,
+      currency: 'USD',
+    },
+    meta: {
+      tag: [],
+    },
+  }) as unknown as Claim;
+
+const makeServiceDatedClaim = (created: string, servicedStart?: string): Claim =>
+  ({
+    resourceType: 'Claim',
+    created,
+    item: servicedStart
+      ? [
+          {
+            servicedPeriod: {
+              start: servicedStart,
+            },
+          },
+        ]
+      : undefined,
+  }) as unknown as Claim;
+
+const makeLookups = (
+  patientPaidByClaimId: Map<string, number>,
+  claimResponsesByClaimId: Map<string, ClaimResponse[]> = new Map(),
+  providers: Lookups['providers'] = []
+): Lookups => ({
+  patients: [],
+  payersByRef: new Map(),
+  locations: [],
+  providers,
+  coverages: [],
+  claimResponsesByClaimId,
+  patientPaidByClaimId,
+  writeOffs: new Map([]),
+});
+
+describe('buildClaimFilterParams: non-insurance payer', () => {
+  it('filters by the NIO meta.tag mirror', async () => {
+    const nioId = '5b0261af-71c6-4f7e-9a51-e0d16a468980';
+    const params = await buildClaimFilterParams({
+      oystehr: {} as unknown as Oystehr,
+      params: { nonInsurancePayerId: [nioId] },
+    });
+    expect(params).toContainEqual({
+      name: '_tag',
+      value: `${CLAIM_NON_INSURANCE_PAYER_TAG_SYSTEM}|${nioId}`,
+    });
+  });
+});
+
+describe('buildClaimFilterParams: payer', () => {
+  it('builds an RCM payer URL insurer filter for an ordinary payerId, without any FHIR lookup', async () => {
+    const search = vi.fn();
+    const params = await buildClaimFilterParams({
+      oystehr: { fhir: { search } } as unknown as Oystehr,
+      params: { payerId: ['PAYER1'] },
+    });
+    expect(params).toContainEqual({ name: 'insurer', value: getPayerUrl('PAYER1') });
+    expect(search).not.toHaveBeenCalled();
+  });
+
+  it('resolves a business-id-shaped payerId to the custom org and filters by its Organization reference', async () => {
+    const search = vi.fn().mockResolvedValue({ unbundle: () => [{ resourceType: 'Organization', id: 'org-uuid' }] });
+    const params = await buildClaimFilterParams({
+      oystehr: { fhir: { search } } as unknown as Oystehr,
+      params: { payerId: ['OTR-ACME'] },
+    });
+    expect(params).toContainEqual({ name: 'insurer', value: 'Organization/org-uuid' });
+  });
+
+  it('throws when a business-id-shaped payerId matches no custom insurance organization', async () => {
+    const search = vi.fn().mockResolvedValue({ unbundle: () => [] });
+    await expect(
+      buildClaimFilterParams({
+        oystehr: { fhir: { search } } as unknown as Oystehr,
+        params: { payerId: ['OTR-UNKNOWN'] },
+      })
+    ).rejects.toThrow();
+  });
+  it('ORs several payers into one insurer filter', async () => {
+    const params = await buildClaimFilterParams({
+      oystehr: {} as unknown as Oystehr,
+      params: { payerId: ['PAYER1', 'PAYER2'] },
+    });
+    expect(params).toContainEqual({ name: 'insurer', value: `${getPayerUrl('PAYER1')},${getPayerUrl('PAYER2')}` });
+  });
+});
+
+describe('buildClaimFilterParams: multi-value filters', () => {
+  const oystehr = {} as unknown as Oystehr;
+
+  it('ORs several values of one tag filter into a single _tag param', async () => {
+    const params = await buildClaimFilterParams({
+      oystehr,
+      params: { tag: ['a', 'b'], type: ['professional', 'institutional'] },
+    });
+    expect(params).toContainEqual({ name: '_tag', value: `${CLAIM_TAG_SYSTEM}|a,${CLAIM_TAG_SYSTEM}|b` });
+    expect(params).toContainEqual({
+      name: '_tag',
+      value: `${CODE_SYSTEM_CLAIM_TYPE}|professional,${CODE_SYSTEM_CLAIM_TYPE}|institutional`,
+    });
+  });
+
+  it('adds no param for an empty list', async () => {
+    const params = await buildClaimFilterParams({ oystehr, params: { tag: [], arStage: [], status: [] } });
+    expect(params).toEqual([{ name: '_sort', value: '-_lastUpdated' }]);
+  });
+
+  it('matches every status system for each chosen status', async () => {
+    const params = await buildClaimFilterParams({ oystehr, params: { status: ['s1', 's2'] } });
+    const statusParam = params.find((p) => p.name === '_tag');
+    const values = statusParam?.value.split(',') ?? [];
+    // seven status systems × two statuses
+    expect(values).toHaveLength(14);
+    expect(values).toContain(`${CLAIM_STATUS_TAG_SYSTEMS.insuranceArStatus}|s1`);
+    expect(values).toContain(`${CLAIM_STATUS_TAG_SYSTEMS.patientPaidStatus}|s2`);
+  });
+
+  it('ORs several AR stages', async () => {
+    const params = await buildClaimFilterParams({
+      oystehr,
+      params: { arStage: [AR_STAGE.patient, AR_STAGE.insurancePayer] },
+    });
+    expect(params).toContainEqual({
+      name: '_tag',
+      value: `${CLAIM_STATUS_TAG_SYSTEMS.arStage}|${AR_STAGE.patient},${CLAIM_STATUS_TAG_SYSTEMS.arStage}|${AR_STAGE.insurancePayer}`,
+    });
+  });
+
+  it('expresses "no AR stage or a chosen stage" as excluding the other stages', async () => {
+    const params = await buildClaimFilterParams({
+      oystehr,
+      params: { arStage: [AR_STAGE_NONE, AR_STAGE.patient] },
+    });
+    expect(params.filter((p) => p.name === '_tag')).toEqual([]);
+    expect(params.filter((p) => p.name === '_tag:not')).toEqual([
+      { name: '_tag:not', value: `${CLAIM_STATUS_TAG_SYSTEMS.arStage}|${AR_STAGE.insurancePayer}` },
+      { name: '_tag:not', value: `${CLAIM_STATUS_TAG_SYSTEMS.arStage}|${AR_STAGE.nonInsurancePayer}` },
+    ]);
+  });
+});
+
+describe('mapClaimToItem: payer columns', () => {
+  it('shows the stamped non-insurance payer in its own column, never under payerName', () => {
+    const claim = {
+      ...makeClaim('claim-1', 100),
+      extension: [
+        {
+          url: 'https://fhir.ottehr.com/billing/non-insurance-payer',
+          valueReference: { reference: 'Organization/nio-1', display: 'FedEx' },
+        },
+      ],
+    } as Claim;
+    const item = mapClaimToItem(claim, makeLookups(new Map()));
+    expect(item.nonInsurancePayerName).toBe('FedEx');
+    expect(item.payerName).toBe('');
+  });
+
+  it('leaves both payer columns blank when the claim has neither insurer nor non-insurance payer', () => {
+    const item = mapClaimToItem(makeClaim('claim-1', 100), makeLookups(new Map()));
+    expect(item.payerName).toBe('');
+    expect(item.nonInsurancePayerName).toBe('');
+  });
+
+  it('shows a custom insurance organization payer by name and business id', () => {
+    const payerOrgId = 'a1b2c3d4-1111-4111-8111-abcdefabcdef';
+    const claim = {
+      ...makeClaim('claim-1', 100),
+      insurer: { reference: `Organization/${payerOrgId}` },
+    } as Claim;
+    const customOrg = {
+      resourceType: 'Organization',
+      id: payerOrgId,
+      name: 'Acme Custom Insurance',
+      type: [{ coding: [{ system: NIO_ORGANIZATION_KIND_SYSTEM, code: CUSTOM_INSURANCE_ORG_KIND_CODE }] }],
+      identifier: [{ system: CUSTOM_INSURANCE_ORG_ID_SYSTEM, value: 'OTR-ACME' }],
+    } as unknown as Organization;
+
+    const item = mapClaimToItem(claim, {
+      ...makeLookups(new Map()),
+      payersByRef: new Map([[`Organization/${payerOrgId}`, customOrg]]),
+    });
+
+    expect(item.payerName).toBe('Acme Custom Insurance');
+    expect(item.payerId).toBe('OTR-ACME');
+  });
+});
+
+describe('mapClaimToItem: patient payments', () => {
+  it('reports the linked patient payment total and nets it from the balance', () => {
+    const item = mapClaimToItem(makeClaim('claim-1', 100), makeLookups(new Map([['claim-1', 30]])));
+    expect(item.patientPaid).toBe(30);
+    expect(item.claimBalance).toBe(70);
+  });
+
+  it('defaults patient paid to zero when the claim has no linked payments', () => {
+    const item = mapClaimToItem(makeClaim('claim-2', 100), makeLookups(new Map()));
+    expect(item.patientPaid).toBe(0);
+    expect(item.claimBalance).toBe(100);
+  });
+});
+
+describe('mapClaimToItem: adjudicated flag', () => {
+  const claimResponse: ClaimResponse = {
+    resourceType: 'ClaimResponse',
+    id: 'cr-1',
+    status: 'active',
+    request: {
+      reference: 'Claim/claim-1',
+    },
+    created: '2026-01-01',
+    insurer: {
+      display: 'Unknown',
+    },
+    outcome: 'complete',
+    patient: {
+      reference: 'Patient/12345',
+    },
+    type: {
+      coding: [getClaimTypeCoding('professional')],
+      text: 'Unknown',
+    },
+    use: 'claim',
+  };
+
+  it('marks a claim with no remittance as un-adjudicated, so the list can flag its balance', () => {
+    const item = mapClaimToItem(makeClaim('claim-1', 100), makeLookups(new Map()));
+    expect(item.adjudicated).toBe(false);
+  });
+
+  it('marks a claim with a remittance as adjudicated', () => {
+    const item = mapClaimToItem(
+      makeClaim('claim-1', 100),
+      makeLookups(new Map(), new Map([['claim-1', [claimResponse]]]))
+    );
+    expect(item.adjudicated).toBe(true);
+  });
+});
+
+describe('mapClaimToItem: rendering provider', () => {
+  const withRenderingProvider = (reference: string): Claim =>
+    ({
+      ...makeClaim('claim-1', 100),
+      careTeam: [
+        {
+          sequence: 1,
+          provider: {
+            reference,
+          },
+        },
+      ],
+    }) as unknown as Claim;
+
+  it('names a Practitioner rendering provider', () => {
+    const practitioner = {
+      resourceType: 'Practitioner',
+      id: '1',
+      name: [
+        {
+          family: 'Black',
+          given: ['Oliver'],
+        },
+      ],
+    } as unknown as Lookups['providers'][number];
+
+    const item = mapClaimToItem(
+      withRenderingProvider('Practitioner/1'),
+      makeLookups(new Map(), new Map(), [practitioner])
+    );
+    expect(item.renderingProvider).toBe('Black, Oliver');
+  });
+
+  it('names an Organization rendering provider', () => {
+    const organization = {
+      resourceType: 'Organization',
+      id: 'org-1',
+      name: 'Riverside Group',
+    } as unknown as Lookups['providers'][number];
+
+    const item = mapClaimToItem(
+      withRenderingProvider('Organization/org-1'),
+      makeLookups(new Map(), new Map(), [organization])
+    );
+    expect(item.renderingProvider).toBe('Riverside Group');
+  });
+
+  it('leaves the column blank when the claim has no care team', () => {
+    const item = mapClaimToItem(makeClaim('claim-1', 100), makeLookups(new Map()));
+    expect(item.renderingProvider).toBe('');
+  });
+});
+
+describe('CLAIM_LIST_ELEMENTS', () => {
+  const keptFieldsFor = (resourceType: string): string[] =>
+    CLAIM_LIST_ELEMENTS.split(',')
+      .filter((element) => element.startsWith(`${resourceType}.`))
+      .map((element) => element.slice(resourceType.length + 1));
+
+  const narrow = <T extends Resource>(resource: T): T => {
+    const kept = keptFieldsFor(resource.resourceType);
+    return Object.fromEntries(
+      Object.entries(resource).filter(([field]) => field === 'resourceType' || kept.includes(field))
+    ) as T;
+  };
+
+  const ENCOUNTER_ID_SYSTEM = ottehrIdentifierSystem('claim-encounter-id');
+
+  const fullClaim = {
+    resourceType: 'Claim',
+    id: 'claim-1',
+    status: 'active',
+    created: '2026-07-21',
+    type: {
+      coding: [
+        {
+          system: 'http://terminology.hl7.org/CodeSystem/claim-type',
+          code: 'professional',
+        },
+      ],
+    },
+    identifier: [
+      {
+        system: ENCOUNTER_ID_SYSTEM,
+        value: 'encounter-1',
+      },
+    ],
+    total: {
+      value: 250,
+      currency: 'USD',
+    },
+    patient: {
+      reference: 'Patient/patient-1',
+    },
+    insurer: {
+      reference: 'Organization/payer-1',
+    },
+    facility: {
+      reference: 'Location/location-1',
+    },
+    provider: {
+      reference: 'Organization/billing-1',
+    },
+    careTeam: [
+      {
+        sequence: 1,
+        provider: {
+          reference: 'Practitioner/practitioner-1',
+        },
+      },
+    ],
+    insurance: [
+      {
+        sequence: 1,
+        focal: true,
+        coverage: {
+          reference: 'Coverage/coverage-1',
+        },
+      },
+    ],
+    item: [
+      {
+        sequence: 1,
+        servicedPeriod: {
+          start: '2026-07-19',
+        },
+      },
+    ],
+    meta: {
+      tag: [
+        {
+          system: CLAIM_STATUS_TAG_SYSTEMS.arStage,
+          code: AR_STAGE.insurancePayer,
+        },
+        {
+          system: CLAIM_TAG_SYSTEM,
+          code: 'needs-review',
+        },
+      ],
+    },
+    diagnosis: [
+      {
+        sequence: 1,
+        diagnosisCodeableConcept: {
+          coding: [
+            {
+              code: 'J06.9',
+            },
+          ],
+        },
+      },
+    ],
+    supportingInfo: [
+      {
+        sequence: 1,
+        category: {
+          text: 'attachment',
+        },
+      },
+    ],
+  } as unknown as Claim;
+
+  const patient = {
+    resourceType: 'Patient',
+    id: 'patient-1',
+    name: [
+      {
+        family: 'Smith',
+        given: ['John'],
+      },
+    ],
+    birthDate: '1990-01-01',
+    address: [
+      {
+        city: 'Boston',
+      },
+    ],
+  } as unknown as Patient;
+
+  const location = {
+    resourceType: 'Location',
+    id: 'location-1',
+    name: 'Riverside Clinic',
+    telecom: [
+      {
+        system: 'phone',
+        value: '5551234567',
+      },
+    ],
+  } as unknown as Location;
+
+  const practitioner = {
+    resourceType: 'Practitioner',
+    id: 'practitioner-1',
+    name: [
+      {
+        family: 'Black',
+        given: ['Oliver'],
+      },
+    ],
+    qualification: [
+      {
+        code: {
+          text: 'MD',
+        },
+      },
+    ],
+  } as unknown as Practitioner;
+
+  const payer = {
+    resourceType: 'Organization',
+    id: 'payer-1',
+    name: 'Acme Health',
+    address: [
+      {
+        city: 'Boston',
+      },
+    ],
+  } as unknown as Organization;
+
+  const lookupsFor = ({
+    claimPatient,
+    claimLocation,
+    claimPractitioner,
+    claimPayer,
+  }: {
+    claimPatient: Patient;
+    claimLocation: Location;
+    claimPractitioner: Practitioner;
+    claimPayer: Organization;
+  }): Lookups => ({
+    patients: [claimPatient],
+    payersByRef: new Map([['Organization/payer-1', claimPayer]]),
+    locations: [claimLocation],
+    providers: [claimPractitioner],
+    coverages: [
+      {
+        resourceType: 'Coverage',
+        id: 'coverage-1',
+        subscriberId: 'MEM-1',
+      } as unknown as Coverage,
+    ],
+    claimResponsesByClaimId: new Map(),
+    patientPaidByClaimId: new Map([['claim-1', 25]]),
+    writeOffs: new Map([]),
+  });
+
+  // Every field each fixture carries that the list is meant to strip. The accounting test below
+  // ties this and CLAIM_LIST_ELEMENTS to the fixtures, so adding a field to a fixture forces it
+  // into one list or the other — which stops a newly read field being left out of _elements.
+  const narrowedFixtures = [
+    {
+      resource: fullClaim as Resource,
+      dropped: ['diagnosis', 'supportingInfo'],
+    },
+    {
+      resource: patient as Resource,
+      dropped: ['address'],
+    },
+    {
+      resource: location as Resource,
+      dropped: ['telecom'],
+    },
+    {
+      resource: practitioner as Resource,
+      dropped: ['qualification'],
+    },
+    {
+      resource: payer as Resource,
+      dropped: ['address'],
+    },
+  ];
+
+  it('keeps every field the row mapping reads', () => {
+    const fromFull = mapClaimToItem(
+      fullClaim,
+      lookupsFor({
+        claimPatient: patient,
+        claimLocation: location,
+        claimPractitioner: practitioner,
+        claimPayer: payer,
+      })
+    );
+    const fromNarrowed = mapClaimToItem(
+      narrow(fullClaim),
+      lookupsFor({
+        claimPatient: narrow(patient),
+        claimLocation: narrow(location),
+        claimPractitioner: narrow(practitioner),
+        claimPayer: narrow(payer),
+      })
+    );
+    expect(fromNarrowed).toEqual(fromFull);
+    // Guard against a list so narrow that everything collapses to defaults and the rows still match.
+    expect(fromFull.serviceDate).toBe('2026-07-19');
+    expect(fromFull.memberId).toBe('MEM-1');
+    expect(fromFull.rulesEngine).toBe('claim-submission');
+    expect(fromFull.payerName).toBe('Acme Health');
+  });
+
+  it.each(narrowedFixtures)(
+    'accounts for every $resource.resourceType field in the element list',
+    ({ resource, dropped }) => {
+      const fixtureFields = Object.keys(resource).filter((field) => field !== 'resourceType');
+      const kept = keptFieldsFor(resource.resourceType);
+
+      // An element nothing in the fixture carries is an element the narrowing test never exercises.
+      expect(kept.filter((field) => !fixtureFields.includes(field))).toEqual([]);
+      // A fixture field that is neither kept nor expected to be dropped is a field someone added
+      // without deciding whether the list needs it.
+      expect(fixtureFields.filter((field) => !kept.includes(field) && !dropped.includes(field))).toEqual([]);
+      expect(dropped.filter((field) => !fixtureFields.includes(field))).toEqual([]);
+    }
+  );
+
+  // fetchPatientPaidByClaimId reads this outside mapClaimToItem, so the test above cannot catch it:
+  // without the identifier every row silently reports a patient paid of zero.
+  it('keeps the encounter identifier the patient payment lookup joins on', () => {
+    expect(narrow(fullClaim).identifier?.find((id) => id.system === ENCOUNTER_ID_SYSTEM)?.value).toBe('encounter-1');
+  });
+
+  it.each(narrowedFixtures)('drops the $resource.resourceType fields the list never reads', ({ resource, dropped }) => {
+    const narrowed = narrow(resource) as unknown as Record<string, unknown>;
+    dropped.forEach((field) => expect(narrowed[field]).toBeUndefined());
+    expect(dropped.length).toBeGreaterThan(0);
+  });
+
+  it('narrows every resource type the list includes, so none is returned whole', () => {
+    ['Claim', 'Patient', 'Location', 'Practitioner', 'Organization'].forEach((resourceType) =>
+      expect(keptFieldsFor(resourceType).length).toBeGreaterThan(0)
+    );
+  });
+});
+
+describe('claim search service date', () => {
+  it('derives the service date from the first service line, not the creation date', () => {
+    expect(getClaimServiceDate(makeServiceDatedClaim('2026-07-21', '2026-07-19'))).toBe('2026-07-19');
+  });
+
+  it('falls back to created only when the claim has no service line', () => {
+    expect(getClaimServiceDate(makeServiceDatedClaim('2026-07-21'))).toBe('2026-07-21');
+  });
+
+  it('windows on the service date, not the creation date', () => {
+    const claim = makeServiceDatedClaim('2026-07-21', '2026-07-19');
+    expect(claimMatchesServiceDateRange(claim, '2026-07-21', '2026-07-21')).toBe(false);
+    expect(claimMatchesServiceDateRange(claim, '2026-07-19', '2026-07-19')).toBe(true);
+  });
+
+  it('matches inside an inclusive range and excludes outside it, with open-ended bounds', () => {
+    const claim = makeServiceDatedClaim('2026-07-25', '2026-07-20');
+    expect(claimMatchesServiceDateRange(claim, '2026-07-19', '2026-07-21')).toBe(true);
+    expect(claimMatchesServiceDateRange(claim, '2026-07-21', '2026-07-31')).toBe(false);
+    expect(claimMatchesServiceDateRange(claim, undefined, '2026-07-20')).toBe(true);
+    expect(claimMatchesServiceDateRange(claim, '2026-07-20', undefined)).toBe(true);
+  });
+
+  it('includes same-day claims when bounds are passed as ISO datetimes', () => {
+    const claim = makeServiceDatedClaim('2026-07-21', '2026-07-19');
+    expect(claimMatchesServiceDateRange(claim, '2026-07-19T00:00:00Z', '2026-07-19T23:59:59Z')).toBe(true);
+  });
+});

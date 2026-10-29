@@ -1,29 +1,25 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Appointment, Encounter, Observation, ObservationComponent, Patient, Practitioner } from 'fhir/r4b';
+import { PRIVATE_EXTENSION_BASE_URL } from 'utils/lib/fhir/constants';
+import { getFullName } from 'utils/lib/fhir/patient';
 import {
-  convertVitalsListToMap,
   extractBloodPressureObservationMethod,
+  extractDotVisionScreening,
   extractHeartbeatObservationMethod,
   extractOxySaturationObservationMethod,
   extractTemperatureObservationMethod,
   extractVisionValues,
-  FHIR_RESOURCE_NOT_FOUND,
-  FHIR_RESOURCE_NOT_FOUND_CUSTOM,
-  getFullName,
-  getVitalDTOCriticalityFromObservation,
-  GetVitalsResponseData,
-  INVALID_INPUT_ERROR,
-  isValidUUID,
   LOINC_SYSTEM,
-  MISSING_REQUIRED_PARAMETERS,
   parseLastMenstrualPeriodObservation,
-  PATIENT_VITALS_META_SYSTEM,
-  PRIVATE_EXTENSION_BASE_URL,
   VITAL_DIASTOLIC_BLOOD_PRESSURE_LOINC_CODE,
   VITAL_SYSTOLIC_BLOOD_PRESSURE_LOINC_CODE,
   VITAL_WEIGHT_PATIENT_REFUSED_OPTION_SNOMED_CODE,
-  VitalFieldNames,
+} from 'utils/lib/fhir/vitals';
+import { convertVitalsListToMap } from 'utils/lib/helpers/vitals/utils';
+import { VitalFieldNames } from 'utils/lib/types/api/chart-data/chart-data.constants';
+import {
+  PATIENT_VITALS_META_SYSTEM,
   VitalsBloodPressureObservationDTO,
   VitalsHeartbeatObservationDTO,
   VitalsObservationDTO,
@@ -32,21 +28,35 @@ import {
   VitalsVisionObservationDTO,
   VitalsWeightObservationDTO,
   VitalsWeightOption,
-} from 'utils';
+} from 'utils/lib/types/api/chart-data/chart-data.types';
+import { GetVitalsResponseData } from 'utils/lib/types/api/chart-data/get-vitals.types';
+import {
+  FHIR_RESOURCE_NOT_FOUND,
+  FHIR_RESOURCE_NOT_FOUND_CUSTOM,
+  INVALID_INPUT_ERROR,
+  MISSING_REQUIRED_PARAMETERS,
+} from 'utils/lib/types/errors';
+import { isValidUUID } from 'utils/lib/validation/helper';
 import * as z from 'zod';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../../shared';
+import { checkOrCreateM2MClientToken } from '../../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../../shared/helpers';
+import { wrapHandler } from '../../../../shared/sentry';
+import { ZambdaInput } from '../../../../shared/types/common';
+import {
+  getVitalsEngineConfig,
+  resolveVitalAlertCriticality,
+  VitalAlertContext,
+} from '../../../../shared/vitals-alert-config';
 
 let m2mToken: string;
 const ZAMBDA_NAME = 'get-vitals';
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`Validating input: ${JSON.stringify(input.body)}`);
   const { encounterId, mode, secrets } = validateRequestParameters(input);
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   console.log(`Performing complex validation for encounterId: ${encounterId}, mode: ${mode}`);
   const effectInput = await complexValidation({ encounterId, mode, secrets }, oystehr);
-  console.log(`Effect input: ${JSON.stringify(effectInput)}`);
   const results = await performEffect(effectInput, oystehr);
 
   return {
@@ -56,23 +66,33 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
 });
 
 const performEffect = async (input: EffectInput, oystehr: Oystehr): Promise<GetVitalsResponseData> => {
-  const { encounter, mode } = input;
+  const { encounter, mode, patient } = input;
+  const alertContext: VitalAlertContext = {
+    patientDOB: patient.birthDate,
+    patientSex: patient.gender,
+    vitalsAlertConfig: await getVitalsEngineConfig(oystehr),
+  };
   if (!mode.historical) {
     // Fetch current vitals for the encounter
-    const list = await fetchVitalsForEncounter(encounter.id, oystehr);
+    const list = await fetchVitalsForEncounter(encounter.id, oystehr, alertContext);
     const map = convertVitalsListToMap(list);
     return map;
   } else {
     const list = await fetchVitalsPriorToEncounter(
       { patientId: input.patientId, searchBefore: mode.searchBefore, encounterId: encounter.id },
-      oystehr
+      oystehr,
+      alertContext
     );
     const map = convertVitalsListToMap(list);
     return map;
   }
 };
 
-const fetchVitalsForEncounter = async (encounterId: string, oystehr: Oystehr): Promise<any> => {
+const fetchVitalsForEncounter = async (
+  encounterId: string,
+  oystehr: Oystehr,
+  alertContext: VitalAlertContext
+): Promise<any> => {
   const currentVitalsAndPerformers = (
     await oystehr.fhir.search<Observation | Practitioner>({
       resourceType: 'Observation',
@@ -91,7 +111,7 @@ const fetchVitalsForEncounter = async (encounterId: string, oystehr: Oystehr): P
     (res) => res.resourceType === 'Practitioner'
   ) as Practitioner[];
 
-  return parseResourcesToDTOs(observations, practitioners);
+  return parseResourcesToDTOs(observations, practitioners, alertContext);
 };
 
 interface FetchHistoricalVitalsInput {
@@ -100,7 +120,11 @@ interface FetchHistoricalVitalsInput {
   encounterId: string; // Optional, used to exclude current encounter observations
 }
 
-const fetchVitalsPriorToEncounter = async (input: FetchHistoricalVitalsInput, oystehr: Oystehr): Promise<any> => {
+const fetchVitalsPriorToEncounter = async (
+  input: FetchHistoricalVitalsInput,
+  oystehr: Oystehr,
+  alertContext: VitalAlertContext
+): Promise<any> => {
   const { patientId, searchBefore, encounterId } = input;
   const currentVitalsAndPerformers = (
     await oystehr.fhir.search<Observation | Practitioner>({
@@ -130,12 +154,16 @@ const fetchVitalsPriorToEncounter = async (input: FetchHistoricalVitalsInput, oy
     (res) => res.resourceType === 'Practitioner'
   ) as Practitioner[];
 
-  return parseResourcesToDTOs(observations, practitioners);
+  return parseResourcesToDTOs(observations, practitioners, alertContext);
 };
 
 const fieldNameSchema = z.nativeEnum(VitalFieldNames);
 
-const parseResourcesToDTOs = (observations: Observation[], practitioners: Practitioner[]): VitalsObservationDTO[] => {
+const parseResourcesToDTOs = (
+  observations: Observation[],
+  practitioners: Practitioner[],
+  alertContext: VitalAlertContext
+): VitalsObservationDTO[] => {
   const observationPerformerMap = new Map<string, Practitioner>();
   observations.forEach((obs) => {
     const performer = practitioners.find(
@@ -180,7 +208,7 @@ const parseResourcesToDTOs = (observations: Observation[], practitioners: Practi
       }
 
       if (vitalObservation) {
-        vitalObservation.alertCriticality = getVitalDTOCriticalityFromObservation(observation);
+        vitalObservation.alertCriticality = resolveVitalAlertCriticality(observation, vitalObservation, alertContext);
         return vitalObservation;
       }
       return [];
@@ -294,7 +322,15 @@ const parseVisionObservation = (
     visionOptions,
   } = extractVisionValues(components);
 
-  if (leftEyeVisionText === undefined && rightEyeVisionText === undefined && bothEyesVisionText === undefined) {
+  const dotVisionScreening = extractDotVisionScreening(components, observation.derivedFrom);
+
+  if (
+    leftEyeVisionText === undefined &&
+    rightEyeVisionText === undefined &&
+    bothEyesVisionText === undefined &&
+    (!visionOptions || visionOptions.length === 0) &&
+    dotVisionScreening === undefined
+  ) {
     return undefined;
   }
 
@@ -308,6 +344,7 @@ const parseVisionObservation = (
     authorName: getFullName(performer),
     lastUpdated: observation.effectiveDateTime || '',
     extraVisionOptions: visionOptions,
+    dotVisionScreening,
   };
 };
 
@@ -317,7 +354,8 @@ type AllOtherFields =
   | VitalFieldNames.VitalTemperature
   | VitalFieldNames.VitalRespirationRate
   | VitalFieldNames.VitalHeight
-  | VitalFieldNames.VitalWeight;
+  | VitalFieldNames.VitalWeight
+  | VitalFieldNames.VitalBMI;
 
 const parseNumericValueObservation = (
   observation: Observation,
@@ -405,6 +443,7 @@ interface EffectInput {
   encounter: EncounterWithId;
   mode: { historical: true; searchBefore: string } | { historical: false };
   patientId: string;
+  patient: Patient;
 }
 
 const complexValidation = async (input: InputParameters, oystehr: Oystehr): Promise<EffectInput> => {
@@ -430,13 +469,14 @@ const complexValidation = async (input: InputParameters, oystehr: Oystehr): Prom
     })
   ).unbundle();
   const maybeEncounter = resourcesFound.find((res) => res.resourceType === 'Encounter') as Encounter | undefined;
-  const patientId = resourcesFound.find((res) => res.resourceType === 'Patient')?.id;
+  const patient = resourcesFound.find((res) => res.resourceType === 'Patient') as Patient | undefined;
+  const patientId = patient?.id;
   const maybeAppointment = resourcesFound.find((res) => res.resourceType === 'Appointment') as Appointment | undefined;
 
   if (!maybeEncounter) {
     throw FHIR_RESOURCE_NOT_FOUND('Encounter');
   }
-  if (!patientId) {
+  if (!patient || !patientId) {
     throw FHIR_RESOURCE_NOT_FOUND_CUSTOM(`No patient found for Encounter/${encounterId}`);
   }
   if (!maybeEncounter.id) {
@@ -462,6 +502,7 @@ const complexValidation = async (input: InputParameters, oystehr: Oystehr): Prom
       encounter,
       mode: { historical: true, searchBefore: start || '' },
       patientId,
+      patient,
     };
   }
 
@@ -469,5 +510,6 @@ const complexValidation = async (input: InputParameters, oystehr: Oystehr): Prom
     encounter,
     mode: { historical: false },
     patientId,
+    patient,
   };
 };

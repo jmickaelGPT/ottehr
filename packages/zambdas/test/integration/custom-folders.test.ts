@@ -1,20 +1,22 @@
 import Oystehr from '@oystehr/sdk';
 import { randomUUID } from 'crypto';
 import { List, Patient } from 'fhir/r4b';
+import { M2MClientMockType } from 'utils/lib/auth/user-me.helper';
+import { FOLDERS_CONFIG } from 'utils/lib/fhir/constants';
 import {
-  APIErrorCode,
-  CreateCustomFolderOutput,
   createCustomPatientDocumentList,
   CUSTOM_FOLDERS_CATALOG_IDENTIFIER,
   deriveInternalFolderName,
-  FOLDERS_CONFIG,
-  M2MClientMockType,
-  makeSyntheticFolderId,
   parseCustomFoldersCatalog,
   parseCustomFoldersCatalogIncludingDeleted,
-  RoleType,
+} from 'utils/lib/fhir/list';
+import { RoleType } from 'utils/lib/types/api/user.types';
+import {
+  CreateCustomFolderOutput,
+  makeSyntheticFolderId,
   SYNTHETIC_FOLDER_ID_PREFIX,
-} from 'utils';
+} from 'utils/lib/types/data/custom-folder.types';
+import { APIErrorCode } from 'utils/lib/types/errors';
 import { addProcessIdMetaTagToResource, setupIntegrationTest } from '../helpers/integration-test-seed-data-setup';
 
 // These tests cover the three folder catalog zambdas plus the lazy-create path of
@@ -521,8 +523,8 @@ describe('custom folders zambdas integration tests', () => {
       // Pure unit — exercises the same util `createPatientDocumentLists` that the patient
       // registration path uses. We don't run that path here because it would require
       // the full registration flow. The util is the source of truth.
-      const utils = await import('utils');
-      const lists = utils.createPatientDocumentLists('Patient/abc');
+      const { createPatientDocumentLists } = await import('utils/lib/fhir/list');
+      const lists = createPatientDocumentLists('Patient/abc');
       expect(lists.length).toBe(FOLDERS_CONFIG.length);
       for (const list of lists) {
         const isCustom = (list.code?.coding ?? []).some((c) => c.code === 'custom');

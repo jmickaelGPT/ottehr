@@ -1,8 +1,14 @@
+import Oystehr from '@oystehr/sdk';
+import { randomUUID } from 'crypto';
+import { DocumentReference, List } from 'fhir/r4b';
+import { DateTime } from 'luxon';
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
-import { BRANDING_CONFIG, fitWrappedTextToBanner, PatientEducationSection } from 'utils';
+import { createFilesDocumentReferences, FileDocDataForDocReference } from 'utils/lib/fhir/helpers';
+import { BRANDING_CONFIG } from 'utils/lib/ottehr-config/branding';
+import { PATIENT_EDUCATION_DOC_TYPE_CODE } from 'utils/lib/types/data/paperwork/paperwork.constants';
+import { PatientEducationLanguage, PatientEducationSection } from 'utils/lib/types/data/patient-education.types';
+import { fitWrappedTextToBanner } from 'utils/lib/utils/pdf';
 import { rgbNormalized, splitLongStringToPageSize } from './pdf-utils';
-
-export type { PatientEducationSection };
 
 function parseHexChannels(hex: string): [number, number, number] {
   const clean = hex.replace('#', '');
@@ -18,7 +24,10 @@ const WARNING_RE = /seek.*(?:emergency|immediate|urgent)|call\s+911|go\s+to\s+(?
 const MARKDOWN_HEADING_PREFIX_RE = /^#{1,3}\s*/;
 const MARKDOWN_BOLD_RE = /\*\*/g;
 
-export async function createPatientEducationPdf(sections: PatientEducationSection[]): Promise<Uint8Array> {
+export async function createPatientEducationPdf(
+  sections: PatientEducationSection[],
+  language: PatientEducationLanguage = 'en'
+): Promise<Uint8Array> {
   const pdfDoc = await PDFDocument.create();
   const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
@@ -134,16 +143,26 @@ export async function createPatientEducationPdf(sections: PatientEducationSectio
       font: helveticaOblique,
       color: styles.colors.textLight,
     });
-    const formattedDate = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-    page.drawText(`Generated: ${formattedDate}  |  Source: MedlinePlus`, {
+    const formattedDate = new Date().toLocaleDateString(language === 'es' ? 'es-US' : 'en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    });
+    const sourceText =
+      language === 'es'
+        ? `Generado: ${formattedDate}  |  Fuente: MedlinePlus`
+        : `Generated: ${formattedDate}  |  Source: MedlinePlus`;
+    page.drawText(sourceText, {
       x: styles.page.margin,
       y: styles.page.margin - styles.footer.secondaryLineOffset,
       size: styles.fontSize.footer,
       font: helvetica,
       color: styles.colors.textLight,
     });
-    page.drawText(`Page ${pageNum} of ${totalPages}`, {
-      x: styles.page.width - styles.page.margin - styles.footer.pageNumberRightInset,
+    const pageNumberText =
+      language === 'es' ? `Página ${pageNum} de ${totalPages}` : `Page ${pageNum} of ${totalPages}`;
+    page.drawText(pageNumberText, {
+      x: styles.page.width - styles.page.margin - helvetica.widthOfTextAtSize(pageNumberText, styles.fontSize.footer),
       y: styles.page.margin - styles.footer.primaryLineOffset,
       size: styles.fontSize.footer,
       font: helvetica,
@@ -465,4 +484,46 @@ export async function createPatientEducationPdf(sections: PatientEducationSectio
   allPages.forEach(({ page, icdLabel }, idx) => drawFooter(page, idx + 1, totalPages, icdLabel));
 
   return pdfDoc.save();
+}
+
+export async function makePatientEducationPdfDocumentReference(
+  oystehr: Oystehr,
+  fileDoc: FileDocDataForDocReference,
+  patientId: string,
+  encounterId: string,
+  listResources: List[]
+): Promise<DocumentReference> {
+  const { docRefs } = await createFilesDocumentReferences({
+    files: [fileDoc],
+    type: {
+      coding: [
+        {
+          system: 'https://fhir.ottehr.com/CodeSystem/document-type',
+          code: PATIENT_EDUCATION_DOC_TYPE_CODE,
+          display: 'Patient Education',
+        },
+      ],
+    },
+    references: {
+      subject: {
+        reference: `Patient/${patientId}`,
+      },
+      context: {
+        encounter: [{ reference: `Encounter/${encounterId}` }],
+      },
+    },
+    dateCreated: DateTime.now().setZone('UTC').toISO() ?? '',
+    oystehr,
+    generateUUID: randomUUID,
+    searchParams: [
+      { name: 'encounter', value: `Encounter/${encounterId}` },
+      { name: 'subject', value: `Patient/${patientId}` },
+    ],
+    listResources,
+  });
+  const docRef = docRefs[0];
+  if (!docRef) {
+    throw new Error('createFilesDocumentReferences returned no DocumentReference for patient education PDF');
+  }
+  return docRef;
 }

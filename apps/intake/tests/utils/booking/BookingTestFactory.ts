@@ -11,17 +11,14 @@
  */
 
 import { Page } from '@playwright/test';
-import { isTelemedEnabled } from 'test-utils';
-import {
-  BOOKING_CONFIG,
-  BookingConfig,
-  CanonicalUrl,
-  CONFIG_INJECTION_KEYS,
-  CreateAppointmentResponse,
-  INTAKE_PAPERWORK_CONFIG,
-  serviceCategorySupportsContext,
-  VIRTUAL_INTAKE_PAPERWORK_CONFIG,
-} from 'utils';
+import { isTelemedEnabled } from 'test-utils/lib/telemed-config';
+import { serviceCategorySupportsContext } from 'utils/lib/config-helpers/booking';
+import { CONFIG_INJECTION_KEYS } from 'utils/lib/config-helpers/helpers';
+import { BOOKING_CONFIG, BookingConfig } from 'utils/lib/ottehr-config/booking';
+import { INTAKE_PAPERWORK_CONFIG } from 'utils/lib/ottehr-config/intake-paperwork';
+import { VIRTUAL_INTAKE_PAPERWORK_CONFIG } from 'utils/lib/ottehr-config/intake-paperwork-virtual';
+import { CreateAppointmentResponse } from 'utils/lib/types/api/prebook-create-appointment/prebook-create-appointment.types';
+import { CanonicalUrl } from 'utils/lib/types/common';
 import { injectTestConfig } from '../config/injectTestConfig';
 import { PagedQuestionnaireFlowHelper } from '../paperwork/PagedQuestionnaireFlowHelper';
 import { getTestDataForPage } from '../paperwork/paperworkDataTemplates';
@@ -412,9 +409,14 @@ export async function executeBookingScenario(
   // - Walk-in in-person: patient info → location
   if (scenario.visitType === 'prebook') {
     if (scenario.bookableEntityType === 'Group' && scenario.groupBookingSlug) {
-      // Group booking: navigate directly to prebook URL with bookingOn and scheduleType params
-      // This bypasses the location dropdown since the HealthcareService is specified in the URL
-      const groupBookingUrl = `/prebook/${scenario.serviceMode}?bookingOn=${scenario.groupBookingSlug}&scheduleType=group`;
+      // Group booking: navigate directly to prebook URL with bookingOn and scheduleType params.
+      // This bypasses the location dropdown since the HealthcareService is specified in the URL.
+      // Includes serviceCategory so we bypass PrebookVisit's category-picker redirect — that
+      // redirect now fires when a scoped deep link lands without a category and the destination
+      // supports multiple. The scenario already declares which category it's exercising; passing
+      // it on the URL mirrors what the picker would have produced and keeps this test focused
+      // on the post-pick booking flow rather than the picker UI itself.
+      const groupBookingUrl = `/prebook/${scenario.serviceMode}?bookingOn=${scenario.groupBookingSlug}&scheduleType=group&serviceCategory=${scenario.serviceCategory}`;
       console.log(`Navigating to Group booking URL: ${groupBookingUrl}`);
       await page.goto(groupBookingUrl, { waitUntil: 'networkidle' });
     } else {
@@ -433,7 +435,7 @@ export async function executeBookingScenario(
   }
 
   // 4. Fill patient info based on visible fields
-  const patientTestData = BookingFlowHelpers.getSamplePatientData(scenario.serviceCategory);
+  const patientTestData = BookingFlowHelpers.getSamplePatientData(scenario.serviceCategory, scenario.serviceMode);
   await BookingFlowHelpers.completePatientInfoStep(
     page,
     resolvedConfig,
@@ -623,12 +625,9 @@ async function fillPaperworkPages(params: FillPaperworkParams): Promise<void> {
   await page.waitForURL(/\/review/);
   console.log('On review page');
 
-  // Click the submit button on review page
-  // Virtual flows show "Finish", in-person flows show "Continue"
-  let submitButtonText: RegExp = /continue/i;
-  if (serviceMode === 'virtual' && visitType === 'prebook') {
-    submitButtonText = /finish/i;
-  } else if (serviceMode === 'virtual' && visitType === 'walk-in') {
+  // Click the submit button on review page.
+  let submitButtonText: RegExp = /^(finish|continue)$/i;
+  if (serviceMode === 'virtual' && visitType === 'walk-in') {
     submitButtonText = /Go to the Waiting Room/i;
   }
   const submitButton = page.getByRole('button', { name: submitButtonText });

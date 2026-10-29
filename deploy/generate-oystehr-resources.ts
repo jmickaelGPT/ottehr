@@ -11,12 +11,30 @@
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { BRANDING_CONFIG, FEATURE_FLAGS_CONFIG, SENDGRID_CONFIG } from 'utils';
+import { BRANDING_CONFIG } from 'utils/lib/ottehr-config/branding';
+import { FEATURE_FLAGS_CONFIG } from 'utils/lib/ottehr-config/feature-flags';
+import { SENDGRID_CONFIG } from 'utils/lib/ottehr-config/sendgrid';
+import { StripeWebhookSigningSecretsSchema } from 'utils/lib/types/data/stripe-webhook.schemas';
 import { SpecFile } from '../packages/spec/src/schema';
 import { Schema20250319 } from '../packages/spec/src/schema-20250319';
 import { Schema20250925 } from '../packages/spec/src/schema-20250925';
 
 const validSchemas = ['2025-03-19', '2025-09-25'];
+
+// Environments that don't configure it fall back to these defaults so the
+// deploy still succeeds, without them the unresolved "#{var/...}" literal is rejected by Oystehr at app create time.
+const VAR_DEFAULTS: { [key: string]: string } = {
+  BILLING_APP_NAME: 'Ottehr Billing',
+  BILLING_APP_LOGO_URI:
+    'https://assets-global.website-files.com/653fce065d76f84cf31488ae/65438838a5f9308ca9498887_otter%20logo%20dark.svg',
+  BILLING_LOGIN_REDIRECT_URL: 'https://billing-local.ottehr.com',
+  BILLING_ALLOWED_URL_1: 'https://billing-local.ottehr.com',
+  BILLING_INTEGRATION: '',
+  PATIENT_BALANCE_SOURCE: 'candid',
+  STRIPE_WEBHOOK_SECRET: '',
+  STRIPE_PLATFORM_WEBHOOK_SECRET: '',
+  STRIPE_CLINICAL_WEBHOOK_SECRET: '',
+};
 
 const zambdasDirPath = path.resolve(__dirname, '../packages/zambdas');
 
@@ -29,10 +47,65 @@ async function generate(input: GenerateResourcesArgs): Promise<void> {
   await generateOystehrResources({
     configDir: `${configDir}/oystehr`,
     coreConfigDir: `${configDir}/oystehr-core`,
+    billingCoreConfigDir: `${configDir}/billing-app-core`,
     varFile,
-    outputPath,
+    outputPath: `${outputPath}/oystehr`,
+    billingOutputPath: `${outputPath}/billing_app`,
     env,
   });
+  await generateRuntimeSeedRemovals({
+    runtimeSeedDir: `${configDir}/runtime-seed`,
+    outputFile: `${outputPath}/oystehr/removed-locations.tf.json`,
+  });
+}
+
+/**
+ * Resources under config/runtime-seed/ are provisioned at runtime by seed
+ * scripts (e.g. seed-runtime-resources), NOT emitted as Terraform resources.
+ * Environments that were deployed before this move still have those resources
+ * in Terraform state, so a plain apply would try to destroy them. This emits a
+ * `removed { ... destroy = false }` block per resource key, dropping them from
+ * state without touching the live FHIR resource — letting the runtime seed
+ * adopt their lifecycle. It reads whatever the active instance actually ships,
+ * so the removals are always instance-correct. Once every environment has
+ * applied past this migration, this file (and config/runtime-seed itself
+ * remaining in state) is a no-op and the generated output is empty.
+ */
+async function generateRuntimeSeedRemovals(input: { runtimeSeedDir: string; outputFile: string }): Promise<void> {
+  const { runtimeSeedDir, outputFile } = input;
+  const resourceKeys: string[] = [];
+  try {
+    const files = await fs.readdir(runtimeSeedDir, { withFileTypes: true });
+    for (const file of files) {
+      if (!file.name.endsWith('.json')) {
+        continue;
+      }
+      const content = await fs.readFile(path.join(runtimeSeedDir, file.name), 'utf-8');
+      let parsed: { fhirResources?: Record<string, unknown> };
+      try {
+        parsed = JSON.parse(content);
+      } catch (err) {
+        throw new Error(`Error parsing runtime-seed file ${file.name}: ${err}`);
+      }
+      resourceKeys.push(...Object.keys(parsed.fhirResources ?? {}));
+    }
+  } catch (err: any) {
+    // No runtime-seed directory → nothing has been moved out of Terraform.
+    if (err.code !== 'ENOENT') {
+      throw err;
+    }
+  }
+
+  if (resourceKeys.length === 0) {
+    await fs.rm(outputFile, { force: true });
+    return;
+  }
+
+  const removed = resourceKeys.map((key) => ({
+    from: `oystehr_fhir_resource.${key}`,
+    lifecycle: { destroy: false },
+  }));
+  await fs.writeFile(outputFile, JSON.stringify({ removed }, null, 2));
 }
 interface GenerateSendgridResources {
   configDir: string;
@@ -72,12 +145,14 @@ async function generateSendgridResources(input: GenerateSendgridResources): Prom
 interface GenerateFhirResourcesArgs {
   configDir: string;
   coreConfigDir: string;
+  billingCoreConfigDir: string;
   varFile: string;
   outputPath: string;
+  billingOutputPath: string;
   env: string;
 }
 async function generateOystehrResources(input: GenerateFhirResourcesArgs): Promise<void> {
-  const { configDir, coreConfigDir, varFile, outputPath, env } = input;
+  const { configDir, coreConfigDir, billingCoreConfigDir, varFile, outputPath, billingOutputPath, env } = input;
 
   if (!configDir) {
     throw new Error('Config directory is required.');
@@ -91,20 +166,76 @@ async function generateOystehrResources(input: GenerateFhirResourcesArgs): Promi
     throw new Error('Output path is required.');
   }
 
-  // Ensure output directory exists
+  // Ensure output directories exist
   await fs.mkdir(outputPath, { recursive: true });
+  await fs.mkdir(billingOutputPath, { recursive: true });
 
+  const coreSpecs = await getCoreSpecs(configDir, coreConfigDir, env);
+  const billingSpecs = await getBillingSpecs(billingCoreConfigDir);
+
+  let vars: any;
+  try {
+    vars = JSON.parse(await fs.readFile(varFile, 'utf-8'));
+  } catch (err) {
+    throw new Error(`Error parsing variable file ${varFile}: ${err}`);
+  }
+  if (!isObject(vars)) {
+    throw new Error(`Variable file ${varFile} is not a valid JSON map.`);
+  }
+  for (const key of ['STRIPE_WEBHOOK_SECRET', 'STRIPE_CLINICAL_WEBHOOK_SECRET']) {
+    if (Array.isArray(vars[key])) {
+      StripeWebhookSigningSecretsSchema.parse(vars[key]);
+      vars[key] = JSON.stringify(vars[key]);
+    }
+  }
+  const coreVars = { ...VAR_DEFAULTS, ...vars };
+  const billingVars = { ...VAR_DEFAULTS, ...vars };
+
+  assertBillingIntegrationSupportsNios(coreVars, env);
+
+  await validateAndGenerateSpecFiles(coreSpecs, coreVars, outputPath);
+  if (billingSpecs.length > 0) {
+    await validateAndGenerateSpecFiles(billingSpecs, billingVars, billingOutputPath);
+  }
+}
+
+/**
+ * With customOrganizationsEnabled on, employer billing lives in the billing app and Candid
+ * can't see it, so Ottehr billing must be in the claims path: 'ottehr' alone, or 'all' to also
+ * send comparison claims to Candid (those go out without the NIO employer). Candid-only routing —
+ * 'candid', or unset, whose runtime default is Candid while secrets migrate — would silently drop
+ * employer billing, so generation fails loudly; shouldUseCandid in packages/zambdas backstops
+ * secrets edited outside IaC.
+ */
+function assertBillingIntegrationSupportsNios(vars: { [key: string]: unknown }, env: string): void {
+  if (!FEATURE_FLAGS_CONFIG.customOrganizationsEnabled) {
+    return;
+  }
+  const billingIntegration = vars.BILLING_INTEGRATION;
+  if (billingIntegration !== 'ottehr' && billingIntegration !== 'all') {
+    throw new Error(
+      `BILLING_INTEGRATION is '${
+        billingIntegration || '(unset)'
+      }' for env '${env}', which routes claims through Candid only, but the customOrganizationsEnabled ` +
+        `feature flag is on. Non-insurance organizations need Ottehr billing as the system of record: set ` +
+        `BILLING_INTEGRATION to 'ottehr' (or 'all' to also send comparison claims to Candid) in ` +
+        `config/.env/${env}.json, or turn off customOrganizationsEnabled.`
+    );
+  }
+}
+
+async function getCoreSpecs(configDir: string, coreConfigDir: string, env: string): Promise<SpecFile[]> {
   // Read all spec files from the config directory
   const specFiles = await fs.readdir(configDir, { withFileTypes: true });
   const jsonSpecFiles = specFiles
-    .filter((file) => file.isFile() && file.name.endsWith('.json'))
+    .filter((file) => file.name.endsWith('.json'))
     .map((file) => path.join(configDir, file.name));
 
   // Read core config spec files if the directory exists
   try {
     const coreSpecFiles = await fs.readdir(coreConfigDir, { withFileTypes: true });
     const coreJsonSpecFiles = coreSpecFiles
-      .filter((file) => file.isFile() && file.name.endsWith('.json'))
+      .filter((file) => file.name.endsWith('.json'))
       .map((file) => path.join(coreConfigDir, file.name));
     jsonSpecFiles.push(...coreJsonSpecFiles);
   } catch (err: any) {
@@ -122,7 +253,7 @@ async function generateOystehrResources(input: GenerateFhirResourcesArgs): Promi
       console.log(`Loading environment-specific configs from: ${envConfigDir}`);
       const envSpecFiles = await fs.readdir(envConfigDir, { withFileTypes: true });
       const envJsonSpecFiles = envSpecFiles
-        .filter((file) => file.isFile() && file.name.endsWith('.json'))
+        .filter((file) => file.name.endsWith('.json'))
         .map((file) => path.join(envConfigDir, file.name));
 
       jsonSpecFiles.push(...envJsonSpecFiles);
@@ -146,6 +277,40 @@ async function generateOystehrResources(input: GenerateFhirResourcesArgs): Promi
     })
   );
 
+  return specs;
+}
+
+async function getBillingSpecs(billingCoreConfigDir: string): Promise<SpecFile[]> {
+  // Read core config spec files if the directory exists
+  const jsonSpecFiles: string[] = [];
+  try {
+    const coreSpecFiles = await fs.readdir(billingCoreConfigDir, { withFileTypes: true });
+    const coreJsonSpecFiles = coreSpecFiles
+      .filter((file) => (file.isFile() || file.isSymbolicLink()) && file.name.endsWith('.json'))
+      .map((file) => path.join(billingCoreConfigDir, file.name));
+    jsonSpecFiles.push(...coreJsonSpecFiles);
+  } catch (err: any) {
+    if (err.code !== 'ENOENT') {
+      throw err;
+    }
+    console.log(`No core config directory found at: ${billingCoreConfigDir}`);
+  }
+
+  const specs: SpecFile[] = await Promise.all(
+    jsonSpecFiles.map(async (file) => {
+      const content = await fs.readFile(file, 'utf-8');
+      try {
+        return { path: file, spec: JSON.parse(content) as { [key: string]: unknown } };
+      } catch (err) {
+        throw new Error(`Error parsing JSON file ${file}: ${err}`);
+      }
+    })
+  );
+
+  return specs;
+}
+
+async function validateAndGenerateSpecFiles(specs: SpecFile[], vars: any, outputPath: string): Promise<void> {
   if (!specs.every((spec) => isObject(spec) && isObject(spec.spec))) {
     throw new Error('One or more spec files are not valid JSON maps.');
   }
@@ -155,16 +320,6 @@ async function generateOystehrResources(input: GenerateFhirResourcesArgs): Promi
   }
   if (!specs.every((spec) => isObject(spec.spec) && spec.spec['schema-version'] === schemaVersion)) {
     throw new Error('All spec files must have the same schema version.');
-  }
-
-  let vars: any;
-  try {
-    vars = JSON.parse(await fs.readFile(varFile, 'utf-8'));
-  } catch (err) {
-    throw new Error(`Error parsing variable file ${varFile}: ${err}`);
-  }
-  if (!isObject(vars)) {
-    throw new Error(`Variable file ${varFile} is not a valid JSON map.`);
   }
 
   // Generate resources for specs
@@ -217,6 +372,7 @@ const validateInput = (): GenerateResourcesArgs => {
 export {
   generate,
   generateOystehrResources,
+  generateRuntimeSeedRemovals,
   isObject,
   validateInput,
   validSchemas,

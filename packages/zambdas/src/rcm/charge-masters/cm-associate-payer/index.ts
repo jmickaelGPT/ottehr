@@ -1,7 +1,11 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { ChargeItemDefinition, UsageContext } from 'fhir/r4b';
-import { getPayerUrl, orgIdMatchesReference, uuidRegex } from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../shared';
+import { getPayerUrl, orgIdMatchesReference } from 'utils/lib/helpers/helpers';
+import { uuidRegex } from 'utils/lib/validation/regex';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 let m2mToken: string;
@@ -9,7 +13,7 @@ export const index = wrapHandler('cm-associate-payer', async (input: ZambdaInput
   const { chargeMasterId, organizationId, locationId, secrets } = validateRequestParameters(input);
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   const existing = await oystehr.fhir.get<ChargeItemDefinition>({
     resourceType: 'ChargeItemDefinition',

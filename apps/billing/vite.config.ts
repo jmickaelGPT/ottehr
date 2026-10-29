@@ -14,6 +14,9 @@ export default ({ mode }: { mode: string }): UserConfig => {
 
   return defineConfig({
     envDir,
+    legacy: {
+      inconsistentCjsInterop: true,
+    },
     plugins: [react(), viteTsconfigPaths()],
     server: {
       open: !process.env.VITE_NO_OPEN,

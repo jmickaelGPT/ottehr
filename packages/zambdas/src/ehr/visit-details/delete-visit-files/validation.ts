@@ -1,15 +1,17 @@
 import Oystehr from '@oystehr/sdk';
 import { DocumentReference } from 'fhir/r4b';
+import { Secrets } from 'utils/lib/secrets';
+import { DeleteVisitFilesInput } from 'utils/lib/types/api/update-visit-details.types';
 import {
-  DeleteVisitFilesInput,
   FHIR_RESOURCE_NOT_FOUND,
   INVALID_INPUT_ERROR,
   MISSING_REQUEST_BODY,
   NO_READ_ACCESS_TO_PATIENT_ERROR,
-  Secrets,
-} from 'utils';
+} from 'utils/lib/types/errors';
 import z from 'zod';
-import { checkIsEHRUser, getUser, isTestUser, userHasAccessToPatient, ZambdaInput } from '../../../shared';
+import { checkIsEHRUser, getUser, isTestUser, userHasAccessToPatient } from '../../../shared/auth';
+import { ZambdaInput } from '../../../shared/types/common';
+import { safeJsonParse } from '../../../shared/validation';
 
 export interface ValidatedInput {
   body: DeleteVisitFilesInput;
@@ -52,9 +54,8 @@ export async function validateRequestParameters(input: ZambdaInput): Promise<Val
   if (!input.body) {
     throw MISSING_REQUEST_BODY;
   }
-  console.log('input', JSON.stringify(input, null, 2));
 
-  const parsedBody = JSON.parse(input.body);
+  const parsedBody = safeJsonParse(input.body);
 
   // Validate with Zod
   const validationResult = DeleteVisitFilesInputSchema.safeParse(parsedBody);

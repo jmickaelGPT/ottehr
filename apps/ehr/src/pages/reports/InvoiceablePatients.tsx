@@ -6,6 +6,7 @@ import SaveAltIcon from '@mui/icons-material/SaveAlt';
 import {
   Button,
   Checkbox,
+  Chip,
   CircularProgress,
   FormControlLabel,
   IconButton,
@@ -28,23 +29,26 @@ import { enqueueSnackbar } from 'notistack';
 import React, { useEffect, useState } from 'react';
 import { FormProvider, useForm } from 'react-hook-form';
 import { Link, useSearchParams } from 'react-router-dom';
-import { SendInvoiceToPatientDialog, SendStatementToPatientDialog } from 'src/components/dialogs';
+import SendInvoiceToPatientDialog from 'src/components/dialogs/SendInvoiceToPatientDialog';
+import SendStatementToPatientDialog from 'src/components/dialogs/SendStatementToPatientDialog';
 import ChatModal from 'src/features/chat/ChatModal';
+import { PRIVATE_EXTENSION_BASE_URL } from 'utils/lib/fhir/constants';
+import { getCoding } from 'utils/lib/fhir/helpers';
+import { getSMSNumberForIndividual } from 'utils/lib/fhir/patient';
+import { chooseJson } from 'utils/lib/helpers/oystehrApi';
 import {
-  AppointmentMessaging,
-  chooseJson,
+  getInvoiceTaskOutputs,
+  mapDisplayToInvoiceTaskStatus,
+  mapInvoiceTaskStatusToDisplay,
+} from 'utils/lib/helpers/tasks/invoices-tasks';
+import {
   EXPORT_INVOICES_ZAMBDA_KEY,
   ExportInvoicesCsvKickOffResponse,
   ExportInvoicesCsvStatusResponse,
   ExportInvoicesTasksCsvInput,
-  formatDateConfigurable,
   GET_INVOICES_TASKS_ZAMBDA_KEY,
-  getCoding,
   GetInvoicesTasksInput,
   GetInvoicesTasksResponse,
-  getLatestTaskOutput,
-  getSMSNumberForIndividual,
-  getSupportPhoneFor,
   INVOICEABLE_PATIENTS_PAGE_SIZE,
   InvoiceablePatientReport,
   InvoiceSortDirection,
@@ -54,14 +58,16 @@ import {
   InvoiceTaskDisplayStatus,
   InvoiceTaskDisplayStatuses,
   InvoiceTaskInput,
-  mapDisplayToInvoiceTaskStatus,
-  mapInvoiceTaskStatusToDisplay,
-  PRIVATE_EXTENSION_BASE_URL,
-} from 'utils';
+  InvoiceTaskSource,
+} from 'utils/lib/types/api/invoicing.types';
+import { AppointmentMessaging } from 'utils/lib/types/api/messaging.types';
+import { formatDateConfigurable } from 'utils/lib/utils/dateUtils';
+import { getSupportPhoneFor } from 'utils/lib/utils/support-dialog';
 import { updateInvoiceTask } from '../../api/api';
 import { GenericToolTip } from '../../components/GenericToolTip';
 import { SelectInput } from '../../components/input/SelectInput';
 import { MappedStatusChip } from '../../components/MappedStatusChip';
+import { FEATURE_FLAGS } from '../../constants/feature-flags';
 import { useApiClients } from '../../hooks/useAppClients';
 import { useSupportPhonesMap } from '../../hooks/useLocationSupportPhones';
 
@@ -71,6 +77,11 @@ type QuickTextsContextValue = React.ComponentProps<typeof ChatModal>['quickTexts
 
 const LOCAL_STORAGE_FILTERS_KEY = 'invoices-tasks.filters';
 
+export const INVOICE_TASK_SOURCE_LABELS: Record<InvoiceTaskSource, string> = {
+  candid: 'Candid',
+  'ottehr-billing': 'Ottehr Billing',
+};
+
 const SP = {
   page: 'page',
   status: 'status',
@@ -79,6 +90,14 @@ const SP = {
   sortDirection: 'sortDirection',
   hideZeroBalance: 'hideZeroBalance',
 } as const;
+
+const STRIPE_INVOICE_STATUS_COLORS: Record<string, { background: string; color: string }> = {
+  open: { background: '#E3F2FD', color: '#0D47A1' },
+  paid: { background: '#C8E6C9', color: '#1B5E20' },
+  void: { background: '#EEEEEE', color: '#616161' },
+  uncollectible: { background: '#FFCCBC', color: '#BF360C' },
+  draft: { background: '#F5F5F5', color: '#9E9E9E' },
+};
 
 const INVOICEABLE_TASK_STATUS_COLORS_MAP: {
   [status in InvoiceTaskDisplayStatus]: {
@@ -134,8 +153,13 @@ const INVOICEABLE_TASK_STATUS_COLORS_MAP: {
   },
 };
 
-export default function InvoiceablePatients(): React.ReactElement {
+interface InvoiceablePatientsProps {
+  source: InvoiceTaskSource;
+}
+
+export default function InvoiceablePatients({ source }: InvoiceablePatientsProps): React.ReactElement {
   const { oystehrZambda, oystehr } = useApiClients();
+  const localStorageFiltersKey = `${LOCAL_STORAGE_FILTERS_KEY}.${source}`;
   const methods = useForm();
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedReportToSend, setSelectedReportToSend] = useState<InvoiceablePatientReport | undefined>();
@@ -157,7 +181,8 @@ export default function InvoiceablePatients(): React.ReactElement {
     (searchParams.get(SP.sortField) as InvoiceSortField | null) ?? InvoiceSortFieldValues.finalizationDate;
   const sortDirectionSP =
     (searchParams.get(SP.sortDirection) as InvoiceSortDirection | null) ?? InvoiceSortDirectionValues.desc;
-  const hideZeroBalanceSP = searchParams.get(SP.hideZeroBalance) !== 'false';
+  const zeroBalanceFilterEnabled = source !== 'ottehr-billing';
+  const hideZeroBalanceSP = zeroBalanceFilterEnabled ? searchParams.get(SP.hideZeroBalance) !== 'false' : false;
   const {
     data: invoiceablePatients,
     isLoading: isInvoiceablePatientsLoading,
@@ -165,6 +190,7 @@ export default function InvoiceablePatients(): React.ReactElement {
   } = useQuery<GetInvoicesTasksResponse>({
     queryKey: [
       GET_INVOICES_TASKS_ZAMBDA_KEY,
+      source,
       pageSP,
       statusSP,
       patientSP,
@@ -181,6 +207,7 @@ export default function InvoiceablePatients(): React.ReactElement {
         sortField: sortFieldSP,
         sortDirection: sortDirectionSP,
         hideZeroBalance: hideZeroBalanceSP,
+        source,
       };
       const response = await oystehrZambda.zambda.execute({
         id: GET_INVOICES_TASKS_ZAMBDA_KEY,
@@ -299,6 +326,7 @@ export default function InvoiceablePatients(): React.ReactElement {
         sortField: sortFieldSP,
         sortDirection: sortDirectionSP,
         hideZeroBalance: hideZeroBalanceSP,
+        source,
       };
       const kickOffResponse = await oystehrZambda.zambda.execute({
         id: EXPORT_INVOICES_ZAMBDA_KEY,
@@ -341,7 +369,7 @@ export default function InvoiceablePatients(): React.ReactElement {
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
-        link.download = `invoiceable-patients-report.csv`;
+        link.download = `invoiceable-patients-report-${source}.csv`;
         link.click();
         URL.revokeObjectURL(url);
       } else {
@@ -462,17 +490,17 @@ export default function InvoiceablePatients(): React.ReactElement {
           queryParams.set(SP.hideZeroBalance, searchParams.get(SP.hideZeroBalance)!);
         setSearchParams(queryParams);
         if (Object.keys(filtersToPersist).length > 0) {
-          localStorage.setItem(LOCAL_STORAGE_FILTERS_KEY, JSON.stringify(filtersToPersist));
+          localStorage.setItem(localStorageFiltersKey, JSON.stringify(filtersToPersist));
         } else {
-          localStorage.removeItem(LOCAL_STORAGE_FILTERS_KEY);
+          localStorage.removeItem(localStorageFiltersKey);
         }
       },
     });
     return () => callback();
-  }, [methods, searchParams, setSearchParams]);
+  }, [methods, searchParams, setSearchParams, localStorageFiltersKey]);
 
   useEffect(() => {
-    const persistedFilters = localStorage.getItem(LOCAL_STORAGE_FILTERS_KEY);
+    const persistedFilters = localStorage.getItem(localStorageFiltersKey);
     if (searchParams.size === 0) {
       const queryParams = new URLSearchParams();
       if (persistedFilters != null) {
@@ -483,10 +511,10 @@ export default function InvoiceablePatients(): React.ReactElement {
       }
       if (!queryParams.has(SP.sortField)) queryParams.set(SP.sortField, InvoiceSortFieldValues.finalizationDate);
       if (!queryParams.has(SP.sortDirection)) queryParams.set(SP.sortDirection, InvoiceSortDirectionValues.desc);
-      if (!queryParams.has(SP.hideZeroBalance)) queryParams.set(SP.hideZeroBalance, 'true');
+      if (zeroBalanceFilterEnabled && !queryParams.has(SP.hideZeroBalance)) queryParams.set(SP.hideZeroBalance, 'true');
       setSearchParams(queryParams);
     }
-  }, [searchParams, setSearchParams]);
+  }, [searchParams, setSearchParams, localStorageFiltersKey, zeroBalanceFilterEnabled]);
 
   return (
     <Box>
@@ -502,20 +530,25 @@ export default function InvoiceablePatients(): React.ReactElement {
               sx={{ width: '30%', flex: 1 }}
               size="small"
             />
-            <FormControlLabel
-              control={
-                <Checkbox
-                  checked={hideZeroBalanceSP}
-                  onChange={(e) => {
-                    searchParams.set(SP.hideZeroBalance, e.target.checked ? 'true' : 'false');
-                    searchParams.set(SP.page, '0');
-                    setSearchParams(searchParams);
-                  }}
-                />
-              }
-              label="Hide $0 balances"
-              sx={{ whiteSpace: 'nowrap' }}
-            />
+            {zeroBalanceFilterEnabled && (
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={hideZeroBalanceSP}
+                    onChange={(e) => {
+                      searchParams.set(SP.hideZeroBalance, e.target.checked ? 'true' : 'false');
+                      searchParams.set(SP.page, '0');
+                      setSearchParams(searchParams);
+                    }}
+                  />
+                }
+                label="Hide $0 balances"
+                sx={{ whiteSpace: 'nowrap' }}
+              />
+            )}
+            {FEATURE_FLAGS.OTTEHR_BILLING_INVOICING_ENABLED && (
+              <Chip label={INVOICE_TASK_SOURCE_LABELS[source]} variant="outlined" color="primary" size="small" />
+            )}
             <Button
               variant="text"
               size="small"
@@ -578,6 +611,11 @@ export default function InvoiceablePatients(): React.ReactElement {
                   Invoice Status
                 </Typography>
               </TableCell>
+              <TableCell>
+                <Typography fontWeight="500" fontSize="14px">
+                  Payment Status
+                </Typography>
+              </TableCell>
               <TableCell align="right">
                 <Typography fontWeight="500" fontSize="14px">
                   Actions
@@ -588,14 +626,14 @@ export default function InvoiceablePatients(): React.ReactElement {
           <TableBody>
             {isInvoiceablePatientsLoading ? (
               <TableRow>
-                <TableCell colSpan={6} align="center">
+                <TableCell colSpan={7} align="center">
                   <CircularProgress />
                 </TableCell>
               </TableRow>
             ) : null}
             {!isInvoiceablePatientsLoading && (invoiceablePatients?.reports ?? []).length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} align="center">
+                <TableCell colSpan={7} align="center">
                   <Typography variant="body2">No reports</Typography>
                 </TableCell>
               </TableRow>
@@ -609,12 +647,7 @@ export default function InvoiceablePatients(): React.ReactElement {
                   : isSending
                   ? 'sending'
                   : mapInvoiceTaskStatusToDisplay(report.task.status);
-                const lastTaskOutput = getLatestTaskOutput(report.task);
-                const statusTooltipMessage = lastTaskOutput
-                  ? lastTaskOutput.type === 'success'
-                    ? 'Invoice id: ' + lastTaskOutput.message
-                    : 'Error: ' + lastTaskOutput.message
-                  : displayStatus;
+                const { invoiceId, error, stripeInvoiceStatus } = getInvoiceTaskOutputs(report.task);
                 const maskedClaimId =
                   report.claimId.length > 12
                     ? `${report.claimId.slice(0, 6)}...${report.claimId.slice(-4)}`
@@ -689,20 +722,70 @@ export default function InvoiceablePatients(): React.ReactElement {
                       <Typography variant="body1">${(report.amountInvoiceable / 100).toFixed(2)}</Typography>
                     </TableCell>
                     <TableCell>
-                      <Tooltip title={`${statusTooltipMessage} (click to copy)`}>
-                        <span
-                          onClick={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            void navigator.clipboard
-                              .writeText(statusTooltipMessage)
-                              .then(() => enqueueSnackbar('Status copied to clipboard', { variant: 'success' }));
-                          }}
-                          style={{ cursor: 'pointer' }}
+                      {invoiceId || (error && displayStatus === 'error') ? (
+                        <GenericToolTip
+                          customWidth={340}
+                          title={
+                            <Box sx={{ p: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                              {invoiceId && (
+                                <Box>
+                                  <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                                    Last invoice ID
+                                  </Typography>
+                                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                                    <Typography variant="body2" sx={{ wordBreak: 'break-all' }}>
+                                      {invoiceId}
+                                    </Typography>
+                                    <IconButton
+                                      size="small"
+                                      onClick={(event) => {
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                        void navigator.clipboard
+                                          .writeText(invoiceId)
+                                          .then(() =>
+                                            enqueueSnackbar('Invoice ID copied to clipboard', { variant: 'success' })
+                                          );
+                                      }}
+                                    >
+                                      <ContentCopyIcon fontSize="small" />
+                                    </IconButton>
+                                  </Box>
+                                </Box>
+                              )}
+                              {error && displayStatus === 'error' && (
+                                <Box>
+                                  <Typography variant="subtitle2" sx={{ fontWeight: 600, color: '#BF360C' }}>
+                                    Error
+                                  </Typography>
+                                  <Typography variant="body2">{error}</Typography>
+                                </Box>
+                              )}
+                            </Box>
+                          }
                         >
-                          <MappedStatusChip status={displayStatus} mapper={INVOICEABLE_TASK_STATUS_COLORS_MAP} />
-                        </span>
-                      </Tooltip>
+                          <span>
+                            <MappedStatusChip status={displayStatus} mapper={INVOICEABLE_TASK_STATUS_COLORS_MAP} />
+                          </span>
+                        </GenericToolTip>
+                      ) : (
+                        <MappedStatusChip status={displayStatus} mapper={INVOICEABLE_TASK_STATUS_COLORS_MAP} />
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      {stripeInvoiceStatus && (
+                        <Chip
+                          label={stripeInvoiceStatus}
+                          size="small"
+                          sx={{
+                            backgroundColor: (
+                              STRIPE_INVOICE_STATUS_COLORS[stripeInvoiceStatus] ?? { background: '#EEE' }
+                            ).background,
+                            color: (STRIPE_INVOICE_STATUS_COLORS[stripeInvoiceStatus] ?? { color: '#333' }).color,
+                            textTransform: 'capitalize',
+                          }}
+                        />
+                      )}
                     </TableCell>
                     <TableCell sx={{ whiteSpace: 'nowrap', textAlign: 'right' }}>
                       <Tooltip title="Refresh invoice">

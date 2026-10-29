@@ -1,12 +1,9 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { ChargeItemDefinition } from 'fhir/r4b';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  RCM_TAG_SYSTEM,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient, RCM_TAG_SYSTEM } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 let m2mToken: string;
@@ -14,7 +11,7 @@ export const index = wrapHandler('list-fee-schedules', async (input: ZambdaInput
   const { secrets } = validateRequestParameters(input);
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   const results = await oystehr.fhir.search<ChargeItemDefinition>({
     resourceType: 'ChargeItemDefinition',

@@ -1,4 +1,9 @@
-import { FEATURE_FLAGS_CONFIG } from 'utils';
+import { FEATURE_FLAGS_CONFIG } from 'utils/lib/ottehr-config/feature-flags';
+
+// Where claims are routed, from the BILLING_INTEGRATION secret. Mirrors shouldUseCandid /
+// shouldUseOttehrBilling in packages/zambdas, including the unset → Candid default.
+// import.meta.env is undefined when e2e specs import this module under plain Node (no Vite).
+const BILLING_INTEGRATION = import.meta.env?.VITE_APP_BILLING_INTEGRATION || 'candid';
 
 // todo: use FEATURE_FLAGS_CONFIG directly instead of re-exporting it
 export const FEATURE_FLAGS = {
@@ -9,11 +14,16 @@ export const FEATURE_FLAGS = {
   SUPERVISOR_APPROVAL_ENABLED: FEATURE_FLAGS_CONFIG.supervisorApprovalEnabled,
   DEMO_VISITS_ENABLED: FEATURE_FLAGS_CONFIG.demoVisitsEnabled,
   GLOBAL_TEMPLATES_ENABLED: FEATURE_FLAGS_CONFIG.globalTemplatesEnabled,
-  FORMS_ENABLED: FEATURE_FLAGS_CONFIG.formsEnabled,
   LEGACY_DATA_ENABLED: FEATURE_FLAGS_CONFIG.legacyDataEnabled,
   LEGACY_PATIENT_FOLLOWUPS_ENABLED: FEATURE_FLAGS_CONFIG.legacyPatientFollowupsEnabled,
   MAILING_PAPER_STATEMENTS_ENABLED: FEATURE_FLAGS_CONFIG.mailingPaperStatementsEnabled,
   AUTOMATED_PATIENT_OUTREACH_ENABLED: FEATURE_FLAGS_CONFIG.automatedPatientOutreachEnabled,
+  CANDID_INVOICING_ENABLED: ['candid', 'all'].includes(BILLING_INTEGRATION),
+  OTTEHR_BILLING_INVOICING_ENABLED:
+    ['ottehr', 'all'].includes(BILLING_INTEGRATION) && (FEATURE_FLAGS_CONFIG.ottehrBillingInvoicingEnabled ?? false),
+  EMPLOYEE_CHAT_ENABLED: FEATURE_FLAGS_CONFIG.employeeChatEnabled ?? false,
+  CUSTOM_ORGANIZATIONS_ENABLED: FEATURE_FLAGS_CONFIG.customOrganizationsEnabled ?? false,
+  EASY_CHART_ENABLED: FEATURE_FLAGS_CONFIG.easyChartEnabled ?? false,
   SKIP_SENDING_VISIT_NOTE_TO_PATIENT_PORTAL_WHEN_THE_NOTE_IS_SIGNED_FEATURE_FLAG:
     FEATURE_FLAGS_CONFIG.skipSendingVisitNoteToPatientPortalEnabled,
 };

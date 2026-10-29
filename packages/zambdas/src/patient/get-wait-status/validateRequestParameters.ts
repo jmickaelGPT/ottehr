@@ -1,6 +1,9 @@
-import { MISSING_REQUEST_BODY, Secrets, WaitingRoomInput } from 'utils';
+import { Secrets } from 'utils/lib/secrets';
+import { WaitingRoomInput } from 'utils/lib/types/data/get-wait-status.types';
+import { MISSING_REQUEST_BODY } from 'utils/lib/types/errors';
 import { z } from 'zod';
-import { safeValidate, ZambdaInput } from '../../shared';
+import { ZambdaInput } from '../../shared/types/common';
+import { safeJsonParse, safeValidate } from '../../shared/validation';
 
 const bodySchema = z.object({
   appointmentID: z.string().uuid(),
@@ -11,7 +14,7 @@ export function validateRequestParameters(input: ZambdaInput): WaitingRoomInput 
     throw MISSING_REQUEST_BODY;
   }
 
-  const parsed = JSON.parse(input.body);
+  const parsed = safeJsonParse(input.body);
   const { appointmentID } = safeValidate(bodySchema, parsed);
 
   const authorization = input.headers.Authorization;

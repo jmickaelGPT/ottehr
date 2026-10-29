@@ -1,17 +1,20 @@
-import { MISSING_REQUIRED_PARAMETERS } from 'utils';
-import { ZambdaInput } from '../../../shared';
+import { z } from 'zod';
+import { ZambdaInput } from '../../../shared/types/common';
+import { safeJsonParse, safeValidate } from '../../../shared/validation';
 
 export interface GetVersionHistoryParams {
   secrets: ZambdaInput['secrets'];
   resourceId: string;
 }
 
-export function validateRequestParameters(input: ZambdaInput): GetVersionHistoryParams {
-  const { resourceId } = input.body ? JSON.parse(input.body) : input;
+const GetVersionHistoryBodySchema = z.object({
+  resourceId: z.string().uuid(),
+});
 
-  if (!resourceId) {
-    throw MISSING_REQUIRED_PARAMETERS(['resourceId']);
-  }
+export function validateRequestParameters(input: ZambdaInput): GetVersionHistoryParams {
+  const raw = input.body ? safeJsonParse(input.body) : input;
+
+  const { resourceId } = safeValidate(GetVersionHistoryBodySchema, raw);
 
   return {
     secrets: input.secrets,

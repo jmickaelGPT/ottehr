@@ -1,6 +1,6 @@
 import Oystehr from '@oystehr/sdk';
 import { useEffect } from 'react';
-import { getSelectors } from 'utils';
+import { getSelectors } from 'utils/lib/store';
 import { create } from 'zustand';
 import { useAuthToken } from './useAuthToken';
 
@@ -17,6 +17,7 @@ export function useApiClients(): ApiClientsState {
   const { oystehrZambda } = getSelectors(useApiClientsStore, ['oystehrZambda']);
 
   useEffect(() => {
+    if (!token) return;
     if (!oystehrZambda || oystehrZambda.config.accessToken !== token) {
       const config: ConstructorParameters<typeof Oystehr>[0] = {
         accessToken: token,

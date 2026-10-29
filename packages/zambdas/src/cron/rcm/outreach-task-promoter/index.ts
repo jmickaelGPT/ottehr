@@ -1,15 +1,20 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Task } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import { FEATURE_FLAGS_CONFIG } from 'utils';
-import { OUTREACH_TASK_TAG_SYSTEM } from '../../../rcm/scheduled-outreach/producers/shared/produce-outreach-tasks';
+import { PRIVATE_EXTENSION_BASE_URL } from 'utils/lib/fhir/constants';
+import { FEATURE_FLAGS_CONFIG } from 'utils/lib/ottehr-config/feature-flags';
 import {
   getOrCreateOutreachConfig,
   NotificationsTimeRestriction,
   parseNotificationsTimeRestriction,
 } from '../../../rcm/scheduled-outreach-config/helpers';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../shared';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { dedupeOutreachTasks } from './dedupe-outreach-tasks';
+
+const OUTREACH_TASK_TAG_SYSTEM = `${PRIVATE_EXTENSION_BASE_URL}/outreach-task`;
 
 let m2mToken: string;
 
@@ -24,7 +29,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   }
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, input.secrets);
-  const oystehr = createOystehrClient(m2mToken, input.secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, input.secrets);
 
   // Load SMS time restriction from PlanDefinition
   const planDefinition = await getOrCreateOutreachConfig(oystehr);

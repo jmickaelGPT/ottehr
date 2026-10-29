@@ -2,21 +2,16 @@ import Oystehr from '@oystehr/sdk';
 import { randomUUID } from 'crypto';
 import { HealthcareService, Location, Schedule } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import {
-  getScheduleExtension,
-  GetScheduleResponse,
-  getSlugForBookableResource,
-  getTimezone,
-  ScheduleOwnerFhirResource,
-  SERVICE_CATEGORY_SYSTEM,
-  SERVICE_CATEGORY_TAG,
-  serviceCategoryCharacteristics,
-  ServiceMode,
-  ServiceVisitType,
-  SLUG_SYSTEM,
-} from 'utils';
+import { SERVICE_CATEGORY_SYSTEM, SERVICE_CATEGORY_TAG, SLUG_SYSTEM } from 'utils/lib/fhir/constants';
+import { serviceCategoryCharacteristics } from 'utils/lib/fhir/healthcareService';
+import { getSlugForBookableResource } from 'utils/lib/fhir/helpers';
+import { ScheduleOwnerFhirResource } from 'utils/lib/types/api/schedules';
+import { ServiceMode, ServiceVisitType } from 'utils/lib/types/common';
+import { GetScheduleResponse } from 'utils/lib/types/data/get-schedule.types';
+import { getScheduleExtension, getTimezone } from 'utils/lib/utils/scheduleUtils';
 import { afterAll, assert, beforeAll, describe, expect, inject, test } from 'vitest';
-import { getAuth0Token } from '../../src/shared';
+import { getAuth0Token } from '../../src/shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../src/shared/helpers';
 import { SECRETS } from '../data/secrets';
 import {
   buildSimpleScheduleExt,
@@ -53,11 +48,12 @@ describe('get-schedule cadence plumbing', () => {
       AUTH0_SECRET: AUTH0_SECRET_TESTS,
       AUTH0_AUDIENCE,
     });
-    oystehr = new Oystehr({
-      accessToken: token,
-      fhirApiUrl: FHIR_API,
-      projectApiUrl: EXECUTE_ZAMBDA_URL,
-      services: { zambdaApiUrl: EXECUTE_ZAMBDA_URL },
+    oystehr = createClinicalOystehrClient(token, SECRETS, {
+      services: {
+        fhirApiUrl: FHIR_API,
+        projectApiUrl: EXECUTE_ZAMBDA_URL,
+        zambdaApiUrl: EXECUTE_ZAMBDA_URL,
+      },
       projectId: PROJECT_ID,
     });
   });

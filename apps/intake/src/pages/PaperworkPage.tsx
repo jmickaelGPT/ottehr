@@ -18,33 +18,31 @@ import { t } from 'i18next';
 import { FC, ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Navigate, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { useGetPaymentMethods, useSetupPaymentMethod } from 'src/telemed/features/paperwork';
+import ottehrApi from 'src/api/ottehrApi';
+import { PageContainer } from 'src/components/CustomContainer';
+import { usePaperworkComponentHelpers } from 'src/hooks/usePaperworkComponentHelpers';
+import { useGetPaymentMethods, useSetupPaymentMethod } from 'src/telemed/features/paperwork/paperwork.queries';
+import { PaperworkContext } from 'ui-components/lib/components/paperwork/context';
+import { usePaperworkContext } from 'ui-components/lib/components/paperwork/context';
+import PagedQuestionnaire from 'ui-components/lib/components/paperwork/PagedQuestionnaire';
+import { getIntakeFormPageSubtitle } from 'utils/lib/config-helpers/intake-paperwork';
+import { convertQRItemToLinkIdMap, convertQuestionnaireItemToQRLinkIdMap } from 'utils/lib/helpers/paperwork/paperwork';
+import { evalComplexValidationTrigger, evalEnableWhen } from 'utils/lib/helpers/paperwork/validation';
+import { getSelectors } from 'utils/lib/store';
 import {
-  APIError,
   ComplexValidationResult,
   ComplexValidationResultFailureCase,
-  convertQRItemToLinkIdMap,
-  convertQuestionnaireItemToQRLinkIdMap,
-  evalComplexValidationTrigger,
-  evalEnableWhen,
   findQuestionnaireResponseItemLinkId,
   flattenIntakeQuestionnaireItems,
-  getIntakeFormPageSubtitle,
-  getSelectors,
   IntakeQuestionnaireItem,
-  isApiError,
-  NO_READ_ACCESS_TO_PATIENT_ERROR,
   QuestionnaireFormFields,
   UCGetPaperworkResponse,
-  uuidRegex,
-} from 'utils';
+} from 'utils/lib/types/data/paperwork/paperwork.types';
+import { APIError, isApiError, NO_READ_ACCESS_TO_PATIENT_ERROR } from 'utils/lib/types/errors';
+import { uuidRegex } from 'utils/lib/validation/regex';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { ottehrApi } from '../api';
 import api from '../api/ottehrApi';
-import { PageContainer } from '../components';
-import { PaperworkContext, usePaperworkContext } from '../features/paperwork';
-import PagedQuestionnaire from '../features/paperwork/PagedQuestionnaire';
 import useAppointmentNotFoundInformation from '../helpers/information';
 import { useGetFullName } from '../hooks/useGetFullName';
 import { useUCZambdaClient, ZambdaClient } from '../hooks/useUCZambdaClient';
@@ -60,11 +58,13 @@ type PaperworkState = {
   updateTimestamp: number | undefined;
   paperworkInProgress: { [pageId: string]: QuestionnaireFormFields };
   paperworkResponse: UCGetPaperworkResponse | undefined;
+  // The appointment `paperworkInProgress` belongs to (see setResponse).
+  paperworkAppointmentId: string | undefined;
   continueLabel: string | undefined;
 };
 
 interface PaperworkStateActions {
-  setResponse: (response: UCGetPaperworkResponse) => void;
+  setResponse: (response: UCGetPaperworkResponse, appointmentId: string) => void;
   saveProgress: (pageId: string, responses: any) => void;
   patchCompletedPaperwork: (QR: QuestionnaireResponse) => void;
   setContinueLabel: (label: string | undefined) => void;
@@ -75,6 +75,7 @@ const PAPERWORK_STATE_INITIAL: PaperworkState = {
   updateTimestamp: undefined,
   paperworkInProgress: {},
   paperworkResponse: undefined,
+  paperworkAppointmentId: undefined,
   continueLabel: undefined,
 };
 
@@ -82,11 +83,17 @@ export const usePaperworkStore = create<PaperworkState & PaperworkStateActions>(
   persist(
     (set) => ({
       ...PAPERWORK_STATE_INITIAL,
-      setResponse: (response: UCGetPaperworkResponse) => {
+      setResponse: (response: UCGetPaperworkResponse, appointmentId: string) => {
         set((state) => {
+          // Drop persisted in-progress answers when the appointment changes so a prior
+          // interrupted session can't override this appointment's server answers; the
+          // same appointment (e.g. a mid-paperwork refresh) keeps its progress.
+          const appointmentChanged = state.paperworkAppointmentId !== appointmentId;
           return {
             ...state,
             paperworkResponse: response,
+            paperworkAppointmentId: appointmentId,
+            paperworkInProgress: appointmentChanged ? {} : state.paperworkInProgress,
           };
         });
       },
@@ -163,7 +170,7 @@ export const PaperworkHome: FC = () => {
         const paperworkResponse = await ottehrApi.getPaperwork(zambdaClient, {
           appointmentID: apptId,
         });
-        setResponse(paperworkResponse);
+        setResponse(paperworkResponse, apptId);
         setAuthedFetchState(AuthedLoadingState.complete);
       } catch (e) {
         if (isApiError(e)) {
@@ -229,6 +236,8 @@ export const PaperworkHome: FC = () => {
     setupCompleted: Boolean(stripeSetupData),
   });
 
+  const paperworkComponentHelpers = usePaperworkComponentHelpers();
+
   const outletContext: PaperworkContext = useMemo(() => {
     return {
       appointment,
@@ -253,6 +262,7 @@ export const PaperworkHome: FC = () => {
       findAnswerWithLinkId: (linkId: string): QuestionnaireResponseItem | undefined => {
         return findQuestionnaireResponseItemLinkId(linkId, completedPaperwork);
       },
+      paperworkComponentHelpers,
     };
   }, [
     appointment,
@@ -271,6 +281,7 @@ export const PaperworkHome: FC = () => {
     setContinueLabel,
     refetchPaymentMethods,
     refetchSetupData,
+    paperworkComponentHelpers,
   ]);
 
   const redirectTarget = useMemo(() => {
@@ -560,6 +571,7 @@ export const PaperworkPage: FC = () => {
                 saveProgress(pageId, data);
               }
             }}
+            skipValidation={false}
           />
           <ComplexValidationRoadblock
             open={validationRoadblockConfig !== undefined}

@@ -1,14 +1,14 @@
 import { progressNoteIcon } from '@ehrTheme/icons';
 import CallSplitIcon from '@mui/icons-material/CallSplit';
 import ChatOutlineIcon from '@mui/icons-material/ChatOutlined';
-import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
+import CheckIcon from '@mui/icons-material/Check';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import MedicalInformationIcon from '@mui/icons-material/MedicalInformationOutlined';
-import PriorityHighRoundedIcon from '@mui/icons-material/PriorityHighRounded';
 import { LoadingButton } from '@mui/lab';
 import {
   Badge,
   Box,
+  Button,
   capitalize,
   darken,
   Grid,
@@ -23,7 +23,6 @@ import {
   useMediaQuery,
   useTheme,
 } from '@mui/material';
-import { Operation } from 'fast-json-patch';
 import { Appointment } from 'fhir/r4b';
 import { DateTime } from 'luxon';
 import { enqueueSnackbar } from 'notistack';
@@ -37,28 +36,22 @@ import {
 import { ROUTER_PATH } from 'src/features/visits/in-person/routing/routesInPerson';
 import { VitalsIconTooltip } from 'src/features/visits/shared/components/VitalsIconTooltip';
 import { otherColors } from 'src/themes/ottehr/colors';
+import { updateAppointmentRoom } from 'utils/lib/fhir/appointments';
+import { LOCATION_REVIEW_LINK_EXTENSION_URL, ROOM_EXTENSION_URL } from 'utils/lib/fhir/constants';
+import { getAdmitterPractitionerId, getAttendingPractitionerId } from 'utils/lib/fhir/practitioners';
+import { getAbnormalVitals } from 'utils/lib/helpers/vitals/utils';
+import { VisitStatusHistoryEntry, VisitStatusWithoutUnknown } from 'utils/lib/types/api/appointment.types';
+import { GetVitalsResponseData } from 'utils/lib/types/api/chart-data/get-vitals.types';
+import { ProviderDetails } from 'utils/lib/types/api/encounter.types';
 import {
-  formatMinutes,
-  getAbnormalVitals,
-  getAdmitterPractitionerId,
-  getAttendingPractitionerId,
-  getDurationOfStatus,
-  getPatchBinary,
-  getSupportPhoneFor,
-  getVisitTotalTime,
-  GetVitalsResponseData,
   InPersonAppointmentInformation,
-  LOCATION_REVIEW_LINK_EXTENSION_URL,
-  makeAbbreviation,
-  mdyStringFromISOString,
-  NON_LOS_STATUSES,
-  OrdersForTrackingBoardRow,
   PRACTITIONER_CODINGS,
-  ProviderDetails,
-  ROOM_EXTENSION_URL,
-  VisitStatusHistoryEntry,
-  VisitStatusWithoutUnknown,
-} from 'utils';
+} from 'utils/lib/types/data/appointments/appointments.types';
+import { OrdersForTrackingBoardRow } from 'utils/lib/types/data/orders/types';
+import { mdyStringFromISOString } from 'utils/lib/utils/date';
+import { getSupportPhoneFor } from 'utils/lib/utils/support-dialog';
+import { formatMinutes, getDurationOfStatus, getVisitTotalTime, NON_LOS_STATUSES } from 'utils/lib/utils/visitUtils';
+import { NOTES_WIDTH_MIN } from '../constants';
 import { dataTestIds } from '../constants/data-test-ids';
 import ChatModal from '../features/chat/ChatModal';
 import { InfoIconsToolTip } from '../features/visits/shared/components/InfoIconsToolTip';
@@ -74,10 +67,12 @@ import { getTrackingBoardPrimaryAction } from '../helpers/trackingBoardPrimaryAc
 import { useApiClients } from '../hooks/useAppClients';
 import useEvolveUser from '../hooks/useEvolveUser';
 import { useSupportPhonesMap } from '../hooks/useLocationSupportPhones';
+import { useServiceCategoryAbbreviationResolver } from '../hooks/useServiceCategoryAbbreviation';
 import AppointmentNote from './AppointmentNote';
 import AppointmentTablePractitionerSelect from './AppointmentTablePractitionerSelect';
 import AppointmentTableRowMobile from './AppointmentTableRowMobile';
 import { ApptTab } from './AppointmentTabs';
+import { FlaggedReasonIcon } from './FlaggedReasonIcon';
 import GoToButton from './GoToButton';
 import { IN_PERSON_CHIP_STATUS_MAP, InPersonAppointmentStatusChip } from './InPersonAppointmentStatusChip';
 import { PatientDateOfBirth } from './PatientDateOfBirth';
@@ -199,6 +194,7 @@ export default function AppointmentTableRow({
   const { oystehr, oystehrZambda } = useApiClients();
   const apiClient = useOystehrAPIClient();
   const { phonesByLocationName } = useSupportPhonesMap();
+  const resolveServiceCategoryAbbr = useServiceCategoryAbbreviationResolver();
   const theme = useTheme();
   const navigate = useNavigate();
   const { encounter } = appointment;
@@ -211,12 +207,15 @@ export default function AppointmentTableRow({
   const user = useEvolveUser();
 
   const [primaryActionButtonLoading, setPrimaryActionButtonLoading] = useState(false);
-  const [progressNoteButtonLoading, setProgressNoteButtonLoading] = useState(false);
   const [approveButtonLoading, setApproveButtonLoading] = useState(false);
   const [reviewAndSignButtonLoading, setReviewAndSignButtonLoading] = useState(false);
 
   const { mutateAsync: signAppointment, isPending: isSignLoading } = useSignAppointmentMutation();
   const { handleUpdatePractitioner } = usePractitionerActions(encounter, 'end', PRACTITIONER_CODINGS.Admitter);
+
+  useEffect(() => {
+    setRoom(appointment.room || '');
+  }, [appointment.room]);
 
   const rooms = useMemo(() => {
     return appointment.location?.extension
@@ -236,7 +235,9 @@ export default function AppointmentTableRow({
       })) ||
     'Unknown';
 
-  const start = appointment.start ? DateTime.fromISO(appointment.start).toFormat('h:mm a') : undefined;
+  const appointmentStart = appointment.start ? DateTime.fromISO(appointment.start) : undefined;
+  const start = appointmentStart?.isValid ? appointmentStart.toFormat('h:mm a') : undefined;
+  const appointmentDate = appointmentStart?.isValid ? appointmentStart.toFormat('MM/dd/yyyy') : undefined;
 
   const showChatIcon = appointment.smsModel !== undefined;
   // console.log('sms model', appointment.smsModel);
@@ -268,65 +269,20 @@ export default function AppointmentTableRow({
       throw new Error('error getting appointment id');
     }
     setRoomSaving(true);
-
-    const appointmentToUpdate = await oystehr.fhir.get<Appointment>({
-      resourceType: 'Appointment',
-      id: appointment.id,
-    });
-
-    let patchOp: Operation;
-
-    if (!room) {
-      const extension = (appointmentToUpdate.extension || []).filter((ext) => ext.url !== ROOM_EXTENSION_URL);
-
-      if (extension?.length === 0) {
-        patchOp = {
-          op: 'remove',
-          path: '/extension',
-        };
-      } else {
-        patchOp = {
-          op: 'replace',
-          path: '/extension',
-          value: extension,
-        };
-      }
-    } else {
-      if (appointmentToUpdate.extension?.find((ext) => ext.url === ROOM_EXTENSION_URL)) {
-        patchOp = {
-          op: 'replace',
-          path: '/extension',
-          value: appointmentToUpdate.extension.map((ext) => {
-            if (ext.url === ROOM_EXTENSION_URL) {
-              return { url: ROOM_EXTENSION_URL, valueString: room };
-            }
-            return ext;
-          }),
-        };
-      } else {
-        if ((appointmentToUpdate.extension || []).length === 0) {
-          patchOp = {
-            op: 'add',
-            path: '/extension',
-            value: [{ url: ROOM_EXTENSION_URL, valueString: room }],
-          };
-        } else {
-          patchOp = {
-            op: 'replace',
-            path: '/extension',
-            value: [...(appointmentToUpdate.extension || []), { url: ROOM_EXTENSION_URL, valueString: room }],
-          };
-        }
-      }
+    try {
+      const appointmentToUpdate = await oystehr.fhir.get<Appointment>({
+        resourceType: 'Appointment',
+        id: appointment.id,
+      });
+      await updateAppointmentRoom(appointmentToUpdate, room || undefined, oystehr);
+      updateAppointments();
+    } catch (error) {
+      console.error('error updating room', error);
+      setRoom(appointment.room || '');
+      enqueueSnackbar('An error occurred trying to update the room. Please try again.', { variant: 'error' });
+    } finally {
+      setRoomSaving(false);
     }
-
-    await oystehr.fhir.batch({
-      requests: [
-        getPatchBinary({ resourceId: appointment.id, resourceType: 'Appointment', patchOperations: [patchOp] }),
-      ],
-    });
-
-    setRoomSaving(false);
   };
 
   const recentStatus = appointment?.visitStatusHistory[appointment.visitStatusHistory.length - 1];
@@ -365,20 +321,6 @@ export default function AppointmentTableRow({
   const patientDateOfBirth = appointment.patient?.dateOfBirth;
 
   const isLongWaitingTime = getIsLongWaitTime(appointment, recentStatus, now);
-
-  const formattedPriorityHighIcon = (
-    <PriorityHighRoundedIcon
-      style={{
-        height: '14px',
-        width: '14px',
-        padding: '2px',
-        color: theme.palette.primary.contrastText,
-        backgroundColor: otherColors.priorityHighIcon,
-        borderRadius: '4px',
-        marginRight: '4px',
-      }}
-    />
-  );
 
   const longWaitFlag = (
     <Box
@@ -556,9 +498,11 @@ export default function AppointmentTableRow({
       <AppointmentTableRowMobile
         appointment={appointment}
         patientName={patientName}
+        patientFriendlyId={appointment.patient.friendlyId}
+        appointmentDate={appointmentDate}
         start={start}
         tab={tab}
-        formattedPriorityHighIcon={formattedPriorityHighIcon}
+        formattedPriorityHighIcon={<FlaggedReasonIcon />}
         statusTime={statusTime}
         statusChip={<InPersonAppointmentStatusChip status={appointment.status} />}
         isLongWaitingTime={isLongWaitingTime}
@@ -576,6 +520,7 @@ export default function AppointmentTableRow({
   }
   const encounterId: string = encounter.id;
   const primaryAction = getTrackingBoardPrimaryAction(appointment.status, { isVirtualVisit: isVirtual(appointment) });
+  const progressNoteUrl = getInPersonUrlByAppointmentType(appointment, ROUTER_PATH.REVIEW_AND_SIGN);
   const assignedIntakePerformerId = getAdmitterPractitionerId(encounter);
   const assignedProviderId = getAttendingPractitionerId(encounter);
   // Read-only display (Discharged/Cancelled tabs) uses the names resolved on the appointment's
@@ -717,22 +662,6 @@ export default function AppointmentTableRow({
     return renderActionButton(primaryAction.label, handlePrimaryActionButton, primaryAction.dataTestId);
   };
 
-  const navigateToReviewAndSign = async (setLoading: (loading: boolean) => void): Promise<void> => {
-    setLoading(true);
-    try {
-      navigate(getInPersonUrlByAppointmentType(appointment, ROUTER_PATH.REVIEW_AND_SIGN));
-    } catch (error) {
-      console.error(error);
-      enqueueSnackbar('An error occurred. Please try again.', { variant: 'error' });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleProgressNoteButton = async (): Promise<void> => {
-    await navigateToReviewAndSign(setProgressNoteButtonLoading);
-  };
-
   const renderProgressNoteButton = (): ReactElement | undefined => {
     if (
       appointment.status === 'intake' ||
@@ -740,15 +669,13 @@ export default function AppointmentTableRow({
       appointment.status === 'provider' ||
       appointment.status === 'awaiting supervisor approval' ||
       appointment.status === 'completed' ||
-      appointment.status === 'discharged'
+      appointment.status === 'discharged' ||
+      appointment.status === 'pending' ||
+      appointment.status === 'arrived' ||
+      appointment.status === 'ready'
     ) {
       return (
-        <GoToButton
-          text="Progress Note"
-          loading={progressNoteButtonLoading}
-          onClick={handleProgressNoteButton}
-          dataTestId={dataTestIds.dashboard.progressNoteButton}
-        >
+        <GoToButton text="Progress Note" to={progressNoteUrl} dataTestId={dataTestIds.dashboard.progressNoteButton}>
           <img src={progressNoteIcon} />
         </GoToButton>
       );
@@ -757,7 +684,15 @@ export default function AppointmentTableRow({
   };
 
   const handleReviewAndSignButton = async (): Promise<void> => {
-    await navigateToReviewAndSign(setReviewAndSignButtonLoading);
+    setReviewAndSignButtonLoading(true);
+    try {
+      navigate(progressNoteUrl);
+    } catch (error) {
+      console.error(error);
+      enqueueSnackbar('An error occurred. Please try again.', { variant: 'error' });
+    } finally {
+      setReviewAndSignButtonLoading(false);
+    }
   };
 
   const renderReviewAndSignButton = (): ReactElement | undefined => {
@@ -805,29 +740,33 @@ export default function AppointmentTableRow({
       user?.profileResource &&
       isEligibleSupervisor(user.profileResource!, appointment.attenderProviderType)
     ) {
-      return (
-        <GoToButton
-          text="Approve"
-          loading={approveButtonLoading || isSignLoading}
-          onClick={handleApprove}
-          dataTestId={dataTestIds.dashboard.approveButton}
-        >
-          <CheckCircleOutlineIcon />
-        </GoToButton>
+      return renderActionButton(
+        'Approve',
+        handleApprove,
+        dataTestIds.dashboard.approveButton,
+        approveButtonLoading || isSignLoading
       );
     } else if (appointment.status === 'completed' && appointment.approvalDate) {
       return (
-        <Box
-          sx={{
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'center',
-            color: theme.palette.text.secondary,
-          }}
-        >
-          <Typography align="center">Approved</Typography>
-          <Typography align="center">{mdyStringFromISOString(appointment.approvalDate)}</Typography>
-        </Box>
+        <Tooltip title={`Approved ${mdyStringFromISOString(appointment.approvalDate)}`} placement="top">
+          <span>
+            <Button
+              disabled
+              variant="contained"
+              startIcon={<CheckIcon />}
+              sx={{
+                borderRadius: 8,
+                textTransform: 'none',
+                fontSize: '15px',
+                fontWeight: 500,
+                whiteSpace: 'nowrap',
+                px: 2.5,
+              }}
+            >
+              Approved
+            </Button>
+          </span>
+        </Tooltip>
       );
     }
     return undefined;
@@ -863,7 +802,8 @@ export default function AppointmentTableRow({
   // if visit components, there is always something in this cell, hence the default to true
   const showPointerForInfoIcons = displayOrdersToolTip(appointment, tab) ? hasAtLeastOneOrder(orders) : true;
 
-  const serviceCategory = appointment.serviceCategory ? ' | ' + makeAbbreviation(appointment.serviceCategory) : '';
+  const serviceCategoryAbbr = resolveServiceCategoryAbbr(appointment.serviceCategory);
+  const serviceCategory = serviceCategoryAbbr ? ' | ' + serviceCategoryAbbr : '';
 
   return (
     <TableRow
@@ -923,18 +863,23 @@ export default function AppointmentTableRow({
         </Box>
       </TableCell>
       <TableCell sx={{ verticalAlign: 'center' }}>
-        {capitalize?.(
-          appointment.appointmentType === 'pre-booked'
-            ? 'Scheduled'
-            : appointment.appointmentType === 'walk-in'
-            ? 'On Demand'
-            : appointment.appointmentType === 'post-telemed'
-            ? 'Post Telemed'
-            : ''
-        )}
         <Typography variant="body2">
-          <strong>{start}</strong>
+          {capitalize?.(
+            appointment.appointmentType === 'pre-booked'
+              ? 'Scheduled'
+              : appointment.appointmentType === 'walk-in'
+              ? 'On Demand'
+              : appointment.appointmentType === 'post-telemed'
+              ? 'Post Telemed'
+              : ''
+          )}
         </Typography>
+        {appointmentDate && <Typography variant="body2">{appointmentDate}</Typography>}
+        {start && (
+          <Typography variant="body2">
+            <strong>{start}</strong>
+          </Typography>
+        )}
         {showStatusTimer && (
           <Tooltip
             componentsProps={{
@@ -975,6 +920,15 @@ export default function AppointmentTableRow({
                 {patientName}
               </Typography>
             </Link>
+            {appointment.patient.friendlyId && (
+              <Typography
+                variant="body2"
+                sx={{ color: theme.palette.text.secondary, whiteSpace: 'nowrap' }}
+                data-testid={dataTestIds.dashboard.patientFriendlyId}
+              >
+                {appointment.patient.friendlyId}
+              </Typography>
+            )}
             {appointment.isFollowUp && (
               <Tooltip title="Follow-up visit">
                 <CallSplitIcon sx={{ fontSize: 16, color: 'text.secondary', transform: 'rotate(180deg)' }} />
@@ -990,7 +944,7 @@ export default function AppointmentTableRow({
           <ReasonsForVisit
             reasonsForVisit={appointment.reasonForVisit}
             tab={tab}
-            formattedPriorityHighIcon={formattedPriorityHighIcon}
+            formattedPriorityHighIcon={<FlaggedReasonIcon />}
             lineMax={2}
           ></ReasonsForVisit>
         </Box>
@@ -1076,7 +1030,7 @@ export default function AppointmentTableRow({
       >
         <InfoIconsToolTip appointment={appointment} tab={tab} orders={orders} />
       </TableCell>
-      <TableCell sx={{ verticalAlign: 'center' }}>
+      <TableCell sx={{ verticalAlign: 'center', minWidth: NOTES_WIDTH_MIN }}>
         <AppointmentNote
           appointment={appointment}
           oystehr={oystehr}
@@ -1145,7 +1099,7 @@ export default function AppointmentTableRow({
         <Stack direction={'row'} spacing={1} alignItems="center" justifyContent="center" sx={{ width: '100%' }}>
           <GoToButton
             text="Visit Details"
-            onClick={() => navigate(getInPersonVisitDetailsUrl(appointment.id))}
+            to={getInPersonVisitDetailsUrl(appointment.id)}
             dataTestId={dataTestIds.dashboard.visitDetailsButton}
           >
             <MedicalInformationIcon />

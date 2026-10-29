@@ -20,17 +20,19 @@ import { dataTestIds } from 'src/constants/data-test-ids';
 import { useDebounce } from 'src/shared/hooks/useDebounce';
 import {
   dispositionCheckboxOptions,
+  mapDispositionTypeToLabel,
+  OTHER_SPECIALTY_TRANSFER_OPTION,
+  specialtyTransferOptions,
+} from 'utils/lib/fhir/disposition';
+import {
   DispositionType,
   followUpInOptions,
   getDefaultNote,
-  mapDispositionTypeToLabel,
   NOTHING_TO_EAT_OR_DRINK_FIELD,
   NOTHING_TO_EAT_OR_DRINK_LABEL,
-  OTHER_SPECIALTY_TRANSFER_OPTION,
   REFUSAL_OF_EMS_TRANSPORT_FIELD,
   REFUSAL_OF_EMS_TRANSPORT_LABEL,
-  specialtyTransferOptions,
-} from 'utils';
+} from 'utils/lib/types/api/chart-data/chart-data.types';
 import { AccordionCard } from '../../../../components/AccordionCard';
 import { ContainedPrimaryToggleButton } from '../../../../components/ContainedPrimaryToggleButton';
 import { RoundedButton } from '../../../../components/RoundedButton';
@@ -44,7 +46,7 @@ import {
   SEND_OUT_VIRUS_TEST_LABEL,
   virusTestsOptions,
 } from '../../telemed/utils/disposition.helper';
-import { useChartFields } from '../hooks/useChartFields';
+import { useChartSection } from '../hooks/useChartSection';
 import { useDispositionMultipleNotes } from '../hooks/useDispositionMultipleNotes';
 import { useGetAppointmentAccessibility } from '../hooks/useGetAppointmentAccessibility';
 import { useSaveChartData } from '../stores/appointment/appointment.store';
@@ -73,10 +75,9 @@ export const DispositionCard: FC = () => {
 
   const {
     data: chartFields,
-    setQueryCache,
+    setSectionData,
     isLoading: isChartFieldsLoading,
-  } = useChartFields({
-    requestedFields: { disposition: {} },
+  } = useChartSection('plan', {
     onSuccess: (data) => {
       isResetting.current = true;
       reset(data?.disposition ? mapDispositionToForm(data.disposition) : DEFAULT_DISPOSITION_VALUES);
@@ -115,7 +116,7 @@ export const DispositionCard: FC = () => {
               if (requestId === latestRequestId.current) {
                 const disposition = data.chartData?.disposition;
                 if (disposition) {
-                  setQueryCache({ disposition });
+                  setSectionData({ disposition });
                   isResetting.current = true;
                   reset(mapDispositionToForm(disposition));
                   isResetting.current = false;
@@ -134,7 +135,7 @@ export const DispositionCard: FC = () => {
         );
       });
     },
-    [debounce, mutate, withNote, setQueryCache, reset]
+    [debounce, mutate, withNote, setSectionData, reset]
   );
 
   useEffect(() => {
@@ -146,7 +147,9 @@ export const DispositionCard: FC = () => {
     return () => subscription.unsubscribe();
   }, [handleSubmit, onSubmit, watch]);
   const isEmsTransportRefused = watch(REFUSAL_OF_EMS_TRANSPORT_FIELD);
-  const fields = dispositionFieldsPerType[currentType];
+  // Guard against a saved disposition type outside the known union (bad/legacy data) —
+  // an undefined lookup here would crash the whole card on `fields.includes(...)`.
+  const fields = dispositionFieldsPerType[currentType] ?? [];
   const tabs: DispositionType[] = ['pcp-no-type', 'another', 'ed', 'specialty'];
 
   if (isChartFieldsLoading || !chartFields?.disposition) {

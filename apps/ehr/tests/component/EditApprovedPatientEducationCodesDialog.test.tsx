@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { EditApprovedPatientEducationCodesDialog } from 'src/features/admin/patient-education/EditApprovedPatientEducationCodesDialog';
-import { ApprovedPatientEducationItem } from 'utils';
+import { ApprovedPatientEducationItem } from 'utils/lib/types/api/approved-patient-education.types';
 import { describe, expect, it, vi } from 'vitest';
 
 const updateApprovedPatientEducationCodes = vi.fn();
@@ -42,6 +42,7 @@ const item: ApprovedPatientEducationItem = {
   title: 'Patient Education: Example',
   icdCodes: [],
   pdfPresignedUrl: 'https://example.com/doc.pdf',
+  language: 'en',
 };
 
 describe('EditApprovedPatientEducationCodesDialog', () => {

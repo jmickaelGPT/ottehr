@@ -7,7 +7,9 @@ import LocationSelect from 'src/components/LocationSelect';
 import { useApiClients } from 'src/hooks/useAppClients';
 import { LocationWithWalkinSchedule } from 'src/pages/AddPatient';
 import { useDebounce } from 'src/shared/hooks/useDebounce';
-import { FOLLOWUP_REASONS, FOLLOWUP_SYSTEMS, FollowupReason, PatientFollowupDetails } from 'utils';
+import { FOLLOWUP_REASONS, FOLLOWUP_SYSTEMS, FollowupReason } from 'utils/lib/fhir/encounter';
+import { PatientFollowupDetails } from 'utils/lib/types/api/encounter.types';
+import { useGetAppointmentAccessibility } from '../../../shared/hooks/useGetAppointmentAccessibility';
 import { useAppointmentData } from '../../../shared/stores/appointment/appointment.store';
 
 interface FormData {
@@ -29,6 +31,7 @@ export const FollowUpSummaryCard: React.FC = () => {
     encounter,
     resources: { patient },
   } = useAppointmentData();
+  const { isAppointmentReadOnly } = useGetAppointmentAccessibility();
   const [locations, setLocations] = useState<LocationWithWalkinSchedule[]>([]);
 
   const [formData, setFormData] = useState<FormData>({
@@ -58,9 +61,16 @@ export const FollowUpSummaryCard: React.FC = () => {
     return Object.keys(newErrors).length === 0;
   };
 
-  const { debounce } = useDebounce(1000);
+  const { debounce, clear } = useDebounce(1000);
+
+  useEffect(() => {
+    if (isAppointmentReadOnly) clear();
+  }, [isAppointmentReadOnly, clear]);
+
   const debouncedSave = (data: FormData): void => {
     debounce(async () => {
+      // Don't persist edits once the follow-up is locked (signed); it must be unlocked first.
+      if (isAppointmentReadOnly) return;
       if (!oystehrZambda || !patient?.id || !encounter?.id) return;
 
       if (!validateForm(data)) {
@@ -137,6 +147,7 @@ export const FollowUpSummaryCard: React.FC = () => {
       <Stack spacing={2} sx={{ p: 2 }}>
         <Box sx={{ display: 'flex', gap: 2 }}>
           <Autocomplete
+            disabled={isAppointmentReadOnly}
             options={FOLLOWUP_REASONS}
             onChange={(_, newVal) => {
               const newData: Partial<FormData> = { reason: newVal || null };
@@ -163,6 +174,7 @@ export const FollowUpSummaryCard: React.FC = () => {
           {formData.reason === 'Other' && (
             <TextField
               fullWidth
+              disabled={isAppointmentReadOnly}
               size="small"
               label="Other reason"
               variant="outlined"
@@ -181,6 +193,7 @@ export const FollowUpSummaryCard: React.FC = () => {
               updateURL={false}
               renderInputProps={{
                 size: 'small',
+                disabled: isAppointmentReadOnly,
               }}
               setLocations={setLocations}
             />
@@ -190,6 +203,7 @@ export const FollowUpSummaryCard: React.FC = () => {
         <TextField
           label="Summary"
           multiline
+          disabled={isAppointmentReadOnly}
           rows={3}
           value={formData.message}
           onChange={(e) => updateFormData({ message: e.target.value })}

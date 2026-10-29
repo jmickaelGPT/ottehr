@@ -5,7 +5,12 @@ import { Box, Typography } from '@mui/material';
 import { FC, Fragment, ReactElement } from 'react';
 import { Link } from 'react-router-dom';
 import { dataTestIds } from 'src/constants/data-test-ids';
-import { ExternalLabOrderResult, InHouseLabResult, LabType, NonNormalResult } from 'utils';
+import {
+  SectionHeading,
+  useNoteSectionTitleInCardHeader,
+} from 'src/features/visits/shared/components/NoteSectionHeading';
+import { ExternalLabOrderResult, InHouseLabResult, NonNormalResult } from 'utils/lib/types/api/lab';
+import { LabType } from 'utils/lib/types/data/labs/labs.types';
 
 interface LabResultsReviewContainerProps {
   resultDetails:
@@ -21,6 +26,7 @@ interface LabResultsReviewContainerProps {
 }
 
 export const LabResultsReviewContainer: FC<LabResultsReviewContainerProps> = ({ resultDetails, resultsPending }) => {
+  const titleInCardHeader = useNoteSectionTitleInCardHeader();
   const isExternal = resultDetails.type === LabType.external;
   const title = isExternal ? 'External Labs' : 'In-House Labs';
   const keyIdentifier = isExternal ? 'external-lab-result' : 'in-house-lab-result';
@@ -72,9 +78,7 @@ export const LabResultsReviewContainer: FC<LabResultsReviewContainerProps> = ({ 
       data-testid={dataTestIds.progressNotePage.labsTitle(title)}
       sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, width: '100%' }}
     >
-      <Typography variant="h5" color="primary.dark">
-        {title}
-      </Typography>
+      {!titleInCardHeader && <SectionHeading>{title}</SectionHeading>}
       {resultDetails.results?.map((res, idx) => (
         <Fragment key={`${keyIdentifier}-${idx}`}>
           <Box sx={{ display: 'flex', alignItems: 'end' }}>

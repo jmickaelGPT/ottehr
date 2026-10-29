@@ -1,8 +1,15 @@
 import { otherColors } from '@ehrTheme/colors';
+import { ArrowDropDown } from '@mui/icons-material';
+import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
 import AssignmentIndOutlinedIcon from '@mui/icons-material/AssignmentIndOutlined';
-import CancelIcon from '@mui/icons-material/Cancel';
-import DownloadIcon from '@mui/icons-material/Download';
-import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined';
+import AssignmentOutlinedIcon from '@mui/icons-material/AssignmentOutlined';
+import CollectionsOutlinedIcon from '@mui/icons-material/CollectionsOutlined';
+import ContactPageOutlinedIcon from '@mui/icons-material/ContactPageOutlined';
+import ErrorOutlineOutlinedIcon from '@mui/icons-material/ErrorOutlineOutlined';
+import EventBusyOutlinedIcon from '@mui/icons-material/EventBusyOutlined';
+import HistoryOutlinedIcon from '@mui/icons-material/HistoryOutlined';
+import PictureAsPdfOutlinedIcon from '@mui/icons-material/PictureAsPdfOutlined';
+import SubdirectoryArrowRightIcon from '@mui/icons-material/SubdirectoryArrowRight';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import { LoadingButton } from '@mui/lab';
 import {
@@ -10,95 +17,97 @@ import {
   Button,
   Checkbox,
   Grid,
-  IconButton,
-  Link as MUILink,
+  ListItemIcon,
+  Menu,
   MenuItem,
   Paper,
   Select,
   Skeleton,
-  Stack,
   TextField,
+  Tooltip,
   Typography,
-  useMediaQuery,
   useTheme,
 } from '@mui/material';
 import Alert, { AlertColor } from '@mui/material/Alert';
 import Snackbar from '@mui/material/Snackbar';
-import { useMutation, UseMutationResult, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Appointment, Attachment, Flag, Organization } from 'fhir/r4b';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Appointment, Encounter, Flag, Organization } from 'fhir/r4b';
 import { DateTime } from 'luxon';
 import { enqueueSnackbar } from 'notistack';
-import React, { ReactElement, useCallback, useEffect, useMemo, useState } from 'react';
+import React, { ReactElement, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
-  createZ3Object,
-  deleteVisitFiles,
+  deleteVisitForm,
   generatePaperworkPdf,
   getOrCreateVisitDetailsPdf,
   getPatientVisitDetails,
-  getPatientVisitFiles,
   getVisitFaxHistory,
   listServiceCategories,
   updatePatientVisitDetails,
-  updateVisitFiles,
 } from 'src/api/api';
-import ImageCarousel, { ImageCarouselObject } from 'src/components/ImageCarousel';
-import ImageUploader from 'src/components/ImageUploader';
+import CardThumbnail from 'src/components/CardThumbnail';
+import { CustomFormCard } from 'src/components/CustomFormCard';
+import ActivityLogDialog from 'src/components/dialogs/ActivityLogDialog';
+import CancellationReasonDialog from 'src/components/dialogs/CancellationReasonDialog';
+import { CustomDialog } from 'src/components/dialogs/CustomDialog';
+import DeleteDialog from 'src/components/dialogs/DeleteDialog';
+import { EditFormResponseDialog } from 'src/components/dialogs/EditFormResponseDialog';
+import EditPatientInfoDialog from 'src/components/dialogs/EditPatientInfoDialog';
+import ReportIssueDialog from 'src/components/dialogs/ReportIssueDialog';
+import { SendFormDialog } from 'src/components/dialogs/SendFormDialog';
+import InsuranceCardOrientationHint from 'src/components/InsuranceCardOrientationHint';
 import PatientBalances from 'src/components/PatientBalances';
 import { RoundedButton } from 'src/components/RoundedButton';
 import { ScannerModal } from 'src/components/ScannerModal';
+import { getInPersonUrlByAppointmentType } from 'src/features/visits/in-person/routing/helpers';
+import { ROUTER_PATH } from 'src/features/visits/in-person/routing/routesInPerson';
+import { PatientDocumentsExplorer } from 'src/features/visits/shared/components/patient/docs/PatientDocumentsExplorer';
+import { IdentifiersRow } from 'src/features/visits/shared/components/patient/info/IdentifiersRow';
 import { useOystehrAPIClient } from 'src/features/visits/shared/hooks/useOystehrAPIClient';
 import { useGetPatientAccount, useGetPatientCoverages } from 'src/hooks/useGetPatient';
 import { useGetPatientBalances } from 'src/hooks/useGetPatientBalances';
 import { useGetPatientDocs } from 'src/hooks/useGetPatientDocs';
 import { useGetPatientPaymentsList } from 'src/hooks/useGetPatientPaymentsList';
+import { DEFAULT_TAB_TITLE, formatPatientTabTitle } from 'src/shared/utils/patientTabTitle';
+import { getReasonForVisitOptionsForServiceCategory } from 'utils/lib/config-helpers/booking';
 import {
-  BOOKING_CONFIG,
-  DocumentInfo,
-  DocumentType,
-  EHRVisitDetails,
-  FHIR_EXTENSION,
-  FhirAppointmentType,
-  formatDateForDisplay,
   getCancellationReasonDisplay,
-  getCoding,
-  getFormattedPatientFullName,
-  getInPersonVisitStatus,
-  getPatchOperationForNewMetaTag,
   getReasonForVisitAndAdditionalDetailsFromAppointment,
-  getReasonForVisitOptionsForServiceCategory,
-  GetVisitFaxHistoryOutput,
+} from 'utils/lib/fhir/appointments';
+import { FHIR_EXTENSION, ROOM_EXTENSION_URL, SERVICE_CATEGORY_SYSTEM } from 'utils/lib/fhir/constants';
+import {
+  getFollowUpProgressNotePathSegment,
+  getFollowupSubtype,
   getVisitOccupationalMedicineEmployerFromEncounter,
-  isApiError,
-  isInPersonAppointment,
+  isFollowupEncounter,
   isScheduledFollowupEncounter,
-  isTelemedAppointment,
-  makeAbbreviation,
-  OrderedCoveragesWithSubscribers,
-  PATIENT_INFO_META_DATA_RETURNING_PATIENT_CODE,
-  PATIENT_INFO_META_DATA_SYSTEM,
-  PatientAccountResponse,
   SCHEDULED_FOLLOWUP_OTHER_REASON,
   SCHEDULED_FOLLOWUP_REASONS,
-  SERVICE_CATEGORY_SYSTEM,
-  ServiceCategoryCode,
-  ServiceMode,
-  UpdateVisitDetailsInput,
-  UpdateVisitFilesInput,
-  VisitDocuments,
-  VisitStatusLabel,
-} from 'utils';
+} from 'utils/lib/fhir/encounter';
+import { getCoding, getCriticalUpdateTagOp } from 'utils/lib/fhir/helpers';
+import { isInPersonAppointment, isTelemedAppointment } from 'utils/lib/fhir/moduleIdentification';
+import { getFormattedPatientFullName, getFullestAvailableName } from 'utils/lib/fhir/patient';
+import { getPatchOperationForNewMetaTag } from 'utils/lib/fhir/resourcePatch';
+import { resolveServiceCategoryAbbreviation } from 'utils/lib/helpers/helpers';
+import { BOOKING_CONFIG, ServiceCategoryCode } from 'utils/lib/ottehr-config/booking';
+import { VisitStatusLabel } from 'utils/lib/types/api/appointment.types';
+import { PatientAccountResponse } from 'utils/lib/types/api/patient-account';
+import { UpdateVisitDetailsInput } from 'utils/lib/types/api/update-visit-details.types';
+import { GetVisitFaxHistoryOutput } from 'utils/lib/types/api/visit-details/visit-details.types';
+import { FhirAppointmentType, ServiceMode } from 'utils/lib/types/common';
+import {
+  PATIENT_INFO_META_DATA_RETURNING_PATIENT_CODE,
+  PATIENT_INFO_META_DATA_SYSTEM,
+} from 'utils/lib/types/constants';
+import { OrderedCoveragesWithSubscribers } from 'utils/lib/types/data/account';
+import { StandaloneFormDTO } from 'utils/lib/types/data/practice-managed-questionnaires/practice-managed-questionnaire.types';
+import { EHRVisitDetails } from 'utils/lib/types/data/visit-details.types';
+import { isApiError } from 'utils/lib/types/errors';
+import { formatDateForDisplay } from 'utils/lib/utils/dateUtils';
+import { getInPersonVisitStatus } from 'utils/lib/utils/visitUtils';
 import AppointmentNotesHistory from '../components/AppointmentNotesHistory';
-import CardGridItem from '../components/CardGridItem';
 import CustomBreadcrumbs from '../components/CustomBreadcrumbs';
 import DateSearch from '../components/DateSearch';
-import {
-  ActivityLogDialog,
-  CancellationReasonDialog,
-  CustomDialog,
-  EditPatientInfoDialog,
-  ReportIssueDialog,
-} from '../components/dialogs';
 import { InPersonAppointmentStatusChip } from '../components/InPersonAppointmentStatusChip';
 import PaperworkFlagIndicator from '../components/PaperworkFlagIndicator';
 import PatientInformation, { IconProps } from '../components/PatientInformation';
@@ -107,6 +116,8 @@ import { PriorityIconWithBorder } from '../components/PriorityIconWithBorder';
 import { HOP_QUEUE_URI } from '../constants';
 import { dataTestIds } from '../constants/data-test-ids';
 import { FEATURE_FLAGS } from '../constants/feature-flags';
+import { PatientNotesButton } from '../features/patient-notes/components/PatientNotesButton';
+import { ConfirmSave } from '../features/visits/shared/components/patient/SaveConfirmationContext';
 import { PencilIconButton } from '../features/visits/telemed/components/patient-visit-details/PencilIconButton';
 import { formatLastModifiedTag } from '../helpers';
 import {
@@ -115,15 +126,32 @@ import {
   formatActivityLogs,
   formatNotesHistory,
   getAppointmentAndPatientHistory,
-  getCriticalUpdateTagOp,
   NoteHistory,
 } from '../helpers/activityLogsUtils';
+import { getLegacyDataUrl } from '../helpers/legacyData';
 import { useApiClients } from '../hooks/useAppClients';
 import useEvolveUser from '../hooks/useEvolveUser';
+import { useVisitCards } from '../hooks/useVisitCards';
 import PageContainer from '../layout/PageContainer';
 import { PatientAccountComponent } from './PatientInformationPage';
 
 const consentToTreatPatientDetailsKey = 'Consent Forms signed?';
+
+const MENU_ITEM_SX = { color: 'primary.main', fontWeight: 500 };
+const DESTRUCTIVE_MENU_ITEM_SX = { color: 'error.main', fontWeight: 500 };
+const MENU_ITEM_ICON_SX = { color: 'inherit' };
+
+// The "About this patient" saves - the bottom "Save All" button and each section's own Save button
+// alike - are reminders, not gates: with the attestation checkbox unchecked they still save, but
+// only after the staff member acknowledges this dialog. The "Booking details" pencil-icon dialogs
+// (DOB, reason for visit, service category, non-legal guardians) and the payments, notes and
+// document blocks carry no reminder at all.
+//
+// The reminder reads the *checkbox*, not the persisted attestation, so checking the box quiets it
+// immediately - the separate Save in the "Completed consent forms" block is what persists it.
+const CONSENT_REMINDER_TITLE = 'Reminder: consent not signed';
+const CONSENT_REMINDER_MESSAGE =
+  "Consent forms are not yet signed for this encounter. Please verify consent and check the 'I verify that patient consent has been obtained.' checkbox before the patient is marked 'Ready'.";
 
 interface EditDOBParams {
   dob?: DateTime | null;
@@ -153,7 +181,7 @@ type EditDialogConfig =
   | {
       type: 'reason-for-visit';
       values: EditReasonForVisitParams;
-      keyTitleMap: { reasonForVisit: 'Reason for Visit'; additionalDetails: 'Additional Details' };
+      keyTitleMap: { reasonForVisit: "Reason for today's visit"; additionalDetails: 'Additional Details' };
       requiredKeys: string[];
     }
   | { type: 'nlg'; values: EditNLGParams; keyTitleMap: { guardians: 'Guardians' }; requiredKeys: string[] }
@@ -169,7 +197,7 @@ const dialogTitleFromType = (type: EditDialogConfig['type']): string => {
     case 'dob':
       return "Please enter patient's confirmed date of birth";
     case 'reason-for-visit':
-      return "Please enter patient's reason for visit";
+      return "Please enter patient's reason for today's visit";
     case 'nlg':
       return "Please enter patient's Authorized Non-Legal Guardians";
     case 'service-category':
@@ -184,15 +212,6 @@ const CLOSED_EDIT_DIALOG: EditDialogConfig = Object.freeze({
   values: {},
   keyTitleMap: {},
 });
-
-interface SavedCardItem {
-  front: DocumentInfo | null;
-  frontId: string | null;
-  back: DocumentInfo | null;
-  backId: string | null;
-}
-
-type SavedCardCategory = 'id' | 'primary-ins' | 'secondary-ins';
 
 const usePatientData = (
   patientId?: string
@@ -227,8 +246,6 @@ export default function VisitDetailsPage(): ReactElement {
   const { id: appointmentID } = useParams();
   const { oystehr, oystehrZambda } = useApiClients();
   const theme = useTheme();
-  const isSmallScreen = useMediaQuery(theme.breakpoints.down('lg'));
-  const cardSectionHeight = isSmallScreen ? '120px' : '180px';
 
   const queryClient = useQueryClient();
 
@@ -244,214 +261,32 @@ export default function VisitDetailsPage(): ReactElement {
   const [visitDetailsPdfLoading, setVisitDetailsPdfLoading] = React.useState<boolean>(false);
 
   const [consentAttested, setConsentAttested] = useState<boolean | null>(null);
+  // A save waiting on the consent reminder dialog. Held in an object so `setPendingSave` is never
+  // handed a bare function (React would run it as a state updater instead of storing it).
+  const [pendingSave, setPendingSave] = useState<{ proceed: () => Promise<void>; cancel: () => void } | null>(null);
+  const [pendingSaveIsRunning, setPendingSaveIsRunning] = useState(false);
+  // Mirrors `pendingSave` for the check-and-set in the guard below, which has to be synchronous:
+  // reading the state there would see a value one render stale, and doing the check inside a
+  // `setPendingSave` updater would run it twice under StrictMode and drop a resolver.
+  const pendingSaveExists = useRef(false);
 
   const [editDialogConfig, setEditDialogConfig] = useState<EditDialogConfig>(CLOSED_EDIT_DIALOG);
 
-  // File variables
-
   const [cancelDialogOpen, setCancelDialogOpen] = useState<boolean>(false);
   const [hopQueueDialogOpen, setHopQueueDialogOpen] = useState<boolean>(false);
-  const [photoZoom, setPhotoZoom] = useState<boolean>(false);
-  const [zoomedIdx, setZoomedIdx] = useState<number>(0);
   const [issueDialogOpen, setIssueDialogOpen] = useState<boolean>(false);
   const [activityLogDialogOpen, setActivityLogDialogOpen] = useState<boolean>(false);
   const [activityLogsLoading, setActivityLogsLoading] = useState<boolean>(true);
   const [activityLogs, setActivityLogs] = useState<ActivityLogData[] | undefined>(undefined);
   const [notesHistory, setNotesHistory] = useState<NoteHistory[] | undefined>(undefined);
-  const [scannerModalOpen, setScannerModalOpen] = useState<boolean>(false);
-  const [scannerFileType, setScannerFileType] = useState<UpdateVisitFilesInput['fileType'] | null>(null);
-  const [uploadingFileType, setUploadingFileType] = useState<UpdateVisitFilesInput['fileType'] | null>(null);
-  const [deletingFileId, setDeletingFile] = useState<string | null>(null);
   const user = useEvolveUser();
 
-  const {
-    data: imageFileData,
-    isLoading: imagesLoading,
-    refetch: refetchFileData,
-  } = useQuery({
-    queryKey: ['get-visit-files', appointmentID],
-
-    queryFn: async (): Promise<VisitDocuments> => {
-      if (oystehrZambda && appointmentID) {
-        return getPatientVisitFiles(oystehrZambda, { appointmentId: appointmentID });
-      }
-      throw new Error('fhir client not defined or patientIds not provided');
-    },
-
-    enabled: Boolean(oystehrZambda) && appointmentID !== undefined,
-  });
-
-  const { fullCardPdfs, consentPdfUrls } = imageFileData || {
-    fullCardPdfs: [],
-    consentPdfUrls: [],
-  };
-
-  const { idCards, primaryInsuranceCards, secondaryInsuranceCards, imageCarouselObjs } = (() => {
-    const { photoIdCards, insuranceCards, insuranceCardsSecondary } = imageFileData || {
-      photoIdCards: [],
-      insuranceCards: [],
-      insuranceCardsSecondary: [],
-    };
-    const idCards: SavedCardItem = { front: null, frontId: null, back: null, backId: null };
-    const imageCarouselObjs: ImageCarouselObject[] = [];
-    const primaryInsuranceCards: SavedCardItem = {
-      front: null,
-      frontId: null,
-      back: null,
-      backId: null,
-    };
-    const secondaryInsuranceCards: SavedCardItem = {
-      front: null,
-      frontId: null,
-      back: null,
-      backId: null,
-    };
-    insuranceCards.forEach((card) => {
-      imageCarouselObjs.push({ alt: card.type, url: card.presignedUrl || '' });
-      if (card.type === DocumentType.InsuranceFront) {
-        primaryInsuranceCards.front = card;
-        primaryInsuranceCards.frontId = card.id;
-      } else if (card.type === DocumentType.InsuranceBack) {
-        primaryInsuranceCards.back = card;
-        primaryInsuranceCards.backId = card.id;
-      }
-    });
-    insuranceCardsSecondary.forEach((card) => {
-      imageCarouselObjs.push({ alt: card.type, url: card.presignedUrl || '' });
-      if (card.type === DocumentType.InsuranceFrontSecondary) {
-        secondaryInsuranceCards.front = card;
-        secondaryInsuranceCards.frontId = card.id;
-      } else if (card.type === DocumentType.InsuranceBackSecondary) {
-        secondaryInsuranceCards.back = card;
-        secondaryInsuranceCards.backId = card.id;
-      }
-    });
-    photoIdCards.forEach((card) => {
-      imageCarouselObjs.push({ alt: card.type, url: card.presignedUrl || '' });
-      if (card.type === DocumentType.PhotoIdFront) {
-        idCards.front = card;
-        idCards.frontId = card.id;
-      } else if (card.type === DocumentType.PhotoIdBack) {
-        idCards.back = card;
-        idCards.backId = card.id;
-      }
-    });
-    return {
-      idCards,
-      primaryInsuranceCards,
-      secondaryInsuranceCards,
-      imageCarouselObjs,
-    };
-  })();
-
-  const handleCardImageClick = (imageType: string): void => {
-    const index = imageCarouselObjs.findIndex((obj) => obj.alt === imageType);
-    if (index > -1) {
-      setZoomedIdx(index);
-      setPhotoZoom(true);
-    }
-  };
-
-  const handleDeleteClick = async (id: string | null): Promise<void> => {
-    if (!oystehrZambda || !id) return;
-
-    try {
-      setDeletingFile(id);
-      await deleteVisitFiles(oystehrZambda, { documentId: id, patientId: patientId ?? '' });
-      setDeletingFile(null);
-      enqueueSnackbar('File deleted successfully', { variant: 'success' });
-      await refetchFileData();
-    } catch (error) {
-      console.error('Error deleting document:', error);
-      setDeletingFile(null);
-      enqueueSnackbar('Error deleting document', { variant: 'error' });
-    }
-  };
-
-  // Handler for opening the scanner modal
-  const handleOpenScanner = (fileType: UpdateVisitFilesInput['fileType']): void => {
-    setScannerFileType(fileType);
-    setScannerModalOpen(true);
-  };
-
-  // Handler for when scanning is complete
-  const handleScanComplete = async (fileBlob: Blob | Blob[], fileName: string): Promise<void> => {
-    if (!oystehrZambda || !appointmentID || !scannerFileType) return;
-
-    try {
-      setUploadingFileType(scannerFileType);
-      // Handle PNG blobs (array of blobs)
-      if (Array.isArray(fileBlob)) {
-        // Upload each PNG file
-        for (let i = 0; i < fileBlob.length; i++) {
-          const blob = fileBlob[i];
-          const pngFileName = fileBlob.length > 1 ? `${fileName}-${i + 1}.png` : `${fileName}.png`;
-
-          const z3URL = await createZ3Object(
-            {
-              appointmentID,
-              fileType: scannerFileType,
-              fileFormat: 'png',
-              file: new File([blob], pngFileName, { type: 'image/png' }),
-            },
-            oystehrZambda
-          );
-
-          const attachment: Attachment = {
-            url: z3URL,
-            title: scannerFileType,
-            creation: DateTime.now().toISO(),
-          };
-
-          await filesMutation.mutateAsync({
-            appointmentId: appointmentID,
-            attachment,
-            fileType: scannerFileType,
-          });
-        }
-
-        setScannerModalOpen(false);
-        setUploadingFileType(null);
-        enqueueSnackbar(
-          `Successfully uploaded ${fileBlob.length} scanned ${fileBlob.length === 1 ? 'image' : 'images'}`,
-          { variant: 'success' }
-        );
-      } else {
-        // Handle single PDF blob (backward compatibility)
-        const pdfFileName = fileName.endsWith('.pdf') ? fileName : `${fileName}.pdf`;
-
-        const z3URL = await createZ3Object(
-          {
-            appointmentID,
-            fileType: scannerFileType,
-            fileFormat: 'pdf',
-            file: new File([fileBlob], pdfFileName, { type: 'application/pdf' }),
-          },
-          oystehrZambda
-        );
-
-        const attachment: Attachment = {
-          url: z3URL,
-          title: scannerFileType,
-          creation: DateTime.now().toISO(),
-        };
-
-        await filesMutation.mutateAsync({
-          appointmentId: appointmentID,
-          attachment,
-          fileType: scannerFileType,
-        });
-
-        setScannerModalOpen(false);
-        setUploadingFileType(null);
-        enqueueSnackbar('Scanned document uploaded successfully', { variant: 'success' });
-      }
-    } catch (error) {
-      console.error('Error uploading scanned document:', error);
-      setUploadingFileType(null);
-      enqueueSnackbar('Error uploading scanned document', { variant: 'error' });
-    }
-  };
+  const [sendFormDialogOpen, setSendFormDialogOpen] = useState(false);
+  const [formToEdit, setFormToEdit] = useState<StandaloneFormDTO | undefined>(undefined);
+  const [formToDelete, setFormToDelete] = useState<StandaloneFormDTO | undefined>(undefined);
+  const [deletingForm, setDeletingForm] = useState(false);
+  const [actionsMenuAnchor, setActionsMenuAnchor] = useState<HTMLElement | null>(null);
+  const [docsMenuAnchor, setDocsMenuAnchor] = useState<HTMLElement | null>(null);
 
   const {
     data: visitDetailsData,
@@ -477,6 +312,38 @@ export default function VisitDetailsPage(): ReactElement {
   const patient = visitDetailsData?.patient;
   const patientId = patient?.id;
   const serverConsentAttested = visitDetailsData?.consentIsAttested ?? false;
+  const standAloneForms = visitDetailsData?.standAloneForms;
+  const intakePaperworkFlowForms = visitDetailsData?.intakePaperworkFlowForms;
+  // Custom forms bundled in the visit's paperwork flow render alongside manually-sent standalone forms,
+  // but only a manually-sent form owns its QuestionnaireResponse outright, so only it can be deleted.
+  const allCustomForms = useMemo(
+    () => [
+      ...(standAloneForms ?? []).map((form) => ({ form, deletable: true })),
+      ...(intakePaperworkFlowForms ?? []).map((form) => ({ form, deletable: false })),
+    ],
+    [standAloneForms, intakePaperworkFlowForms]
+  );
+
+  const {
+    imagesLoading,
+    refetchFileData,
+    consentPdfUrls,
+    idCards,
+    primaryInsuranceCards,
+    secondaryInsuranceCards,
+    filesMutation,
+    uploadingFileType,
+    deletingFileId,
+    handleDeleteClick,
+    scannerModalOpen,
+    setScannerModalOpen,
+    handleOpenScanner,
+    handleScanComplete,
+  } = useVisitCards({ appointmentId: appointmentID, patientId });
+
+  // Consent the patient signed in their paperwork. Same signal the "Completed consent forms" block
+  // renders its Signed/Not signed status from, so the checkbox and the status can never disagree.
+  const patientSignedConsent = consentPdfUrls.length > 0;
 
   const { data: faxData, isLoading: faxLoading } = useQuery({
     queryKey: ['get-visit-fax-history', appointmentID],
@@ -523,12 +390,92 @@ export default function VisitDetailsPage(): ReactElement {
   });
 
   useEffect(() => {
-    if (consentAttested === null) {
-      setConsentAttested(serverConsentAttested);
+    // The route can switch to a different visit while this page stays mounted, so drop the previous
+    // visit's attestation. Without this the seeding effect below never re-runs (the local value is
+    // no longer null) and the new visit would render with the old one's checkbox state. The
+    // functional form keeps the initial mount a no-op instead of a redundant state update.
+    setConsentAttested((previous) => (previous === null ? previous : null));
+  }, [appointmentID]);
+
+  // Consent the patient completed in their paperwork already is obtained consent, so a signed
+  // consent form counts as attested even when no staff attestation was ever recorded.
+  const consentAttestedOrSigned = serverConsentAttested || patientSignedConsent;
+
+  useEffect(() => {
+    // Seed the checkbox from the server only once the visit details and the consent files have
+    // actually loaded. Seeding it from the `?? false` defaults on the first render would latch an
+    // already-attested visit to unchecked, since this only ever runs while the local value is null.
+    // A signed consent starts the box checked, which leaves the consent block's own Save enabled so
+    // the attestation can still be persisted.
+    if (visitDetailsData && !imagesLoading && consentAttested === null) {
+      setConsentAttested(consentAttestedOrSigned);
     }
-  }, [serverConsentAttested, consentAttested]);
+  }, [visitDetailsData, imagesLoading, consentAttestedOrSigned, consentAttested]);
 
   const hasConsentChanged = consentAttested !== serverConsentAttested;
+
+  // What the reminder below keys off. The checkbox once it has been seeded; until then the value the
+  // seed is going to use, so a save landing in the loading window (the files query can still be in
+  // flight after the account form is editable) is judged on the server's answer rather than on
+  // `null` reading as unattested.
+  const consentVerified = consentAttested ?? consentAttestedOrSigned;
+
+  // Saving the patient record with the attestation unchecked is allowed, but the staff member is
+  // reminded first and the write only happens once they confirm. Passed down to every Save button
+  // in the "About this patient" section.
+  const confirmSaveWithConsentReminder = useCallback<ConfirmSave>(
+    async (proceed) => {
+      if (consentVerified) {
+        await proceed();
+        return;
+      }
+      if (pendingSaveExists.current) {
+        // A reminder is already up for an earlier save. The dialog is modal, so reaching this needs
+        // two saves to race inside the same tick (each Save button validates before it gets here).
+        // Abandon this one - overwriting `pendingSave` would strand the earlier caller's resolver.
+        return;
+      }
+      pendingSaveExists.current = true;
+      // Resolve either way so the caller's await never dangles: on confirm once the write settles,
+      // on cancel as soon as the dialog closes.
+      await new Promise<void>((resolve) => {
+        setPendingSave({
+          proceed: async () => {
+            try {
+              await proceed();
+            } finally {
+              resolve();
+            }
+          },
+          cancel: resolve,
+        });
+      });
+    },
+    [consentVerified]
+  );
+
+  const handleCancelPendingSave = useCallback((): void => {
+    if (pendingSaveIsRunning) return;
+    pendingSave?.cancel();
+    pendingSaveExists.current = false;
+    setPendingSave(null);
+  }, [pendingSave, pendingSaveIsRunning]);
+
+  const handleConfirmPendingSave = useCallback(async (): Promise<void> => {
+    if (!pendingSave) return;
+    setPendingSaveIsRunning(true);
+    try {
+      await pendingSave.proceed();
+    } catch (error) {
+      // The save's own mutation hooks already report failures as a snackbar; the dialog just
+      // closes so the still-dirty section can be retried.
+      console.error('Error saving after the consent reminder:', error);
+    } finally {
+      setPendingSaveIsRunning(false);
+      pendingSaveExists.current = false;
+      setPendingSave(null);
+    }
+  }, [pendingSave]);
 
   const paperworkModifiedFlag = useMemo(
     () =>
@@ -541,6 +488,36 @@ export default function VisitDetailsPage(): ReactElement {
 
   const encounter = visitDetailsData?.encounter;
   const qrId = visitDetailsData?.qrId;
+
+  const ownFollowUpsQueryEnabled = Boolean(oystehr) && Boolean(encounter?.id);
+  const { data: ownFollowUpCount, isPending: isOwnFollowUpCountPending } = useQuery({
+    queryKey: ['visit-details-own-follow-ups', encounter?.id],
+    queryFn: async (): Promise<number> =>
+      (
+        await oystehr!.fhir.search<Encounter>({
+          resourceType: 'Encounter',
+          params: [
+            { name: 'part-of', value: `Encounter/${encounter!.id}` },
+            { name: '_count', value: '1' },
+          ],
+        })
+      ).unbundle().length,
+    enabled: ownFollowUpsQueryEnabled,
+  });
+  const hasOwnFollowUps = (ownFollowUpCount ?? 0) > 0;
+  const isOwnFollowUpsUnresolved = ownFollowUpsQueryEnabled && isOwnFollowUpCountPending;
+
+  const parentEncounterId = encounter?.partOf?.reference?.replace('Encounter/', '');
+  const parentAppointmentQueryEnabled = Boolean(oystehr) && Boolean(parentEncounterId);
+  const { data: parentAppointmentId, isPending: isParentAppointmentPending } = useQuery({
+    queryKey: ['visit-details-parent-appointment', parentEncounterId],
+    queryFn: async (): Promise<string | undefined> =>
+      (
+        await oystehr!.fhir.get<Encounter>({ resourceType: 'Encounter', id: parentEncounterId! })
+      ).appointment?.[0]?.reference?.replace('Appointment/', ''),
+    enabled: parentAppointmentQueryEnabled,
+  });
+  const isParentAppointmentUnresolved = parentAppointmentQueryEnabled && isParentAppointmentPending;
 
   const {
     data: paymentData,
@@ -564,17 +541,19 @@ export default function VisitDetailsPage(): ReactElement {
 
   const fullName = (patient && getFormattedPatientFullName(patient)) ?? '';
 
-  const isInPerson = isInPersonAppointment(appointment);
+  const room = appointment?.extension?.find((ext) => ext.url === ROOM_EXTENSION_URL)?.valueString;
 
-  const filesMutation = useMutation({
-    mutationFn: async (input: UpdateVisitFilesInput) => {
-      if (!oystehrZambda) throw new Error('oystehrZambda not defined');
-      await updateVisitFiles(oystehrZambda, input);
-    },
-    onSuccess: async () => {
-      await refetchFileData();
-    },
-  });
+  useEffect(() => {
+    const tabTitle = patient && formatPatientTabTitle(getFullestAvailableName(patient), room);
+    if (tabTitle) {
+      document.title = tabTitle;
+    }
+    return () => {
+      document.title = DEFAULT_TAB_TITLE;
+    };
+  }, [patient, room]);
+
+  const isInPerson = isInPersonAppointment(appointment);
 
   const bookingDetailsMutation = useMutation({
     mutationFn: async (input: UpdateVisitDetailsInput) => {
@@ -874,6 +853,26 @@ export default function VisitDetailsPage(): ReactElement {
     getReasonForVisitAndAdditionalDetailsFromAppointment(appointment);
   // For scheduled follow-ups, a saved reason outside the fixed list is a free-text "Other".
   const isScheduledFollowUp = !!encounter && isScheduledFollowupEncounter(encounter);
+
+  const actionsMenuOpen = Boolean(actionsMenuAnchor);
+  const docsMenuOpen = Boolean(docsMenuAnchor);
+
+  const progressNoteUrl =
+    appointment?.id && encounter?.id && !isParentAppointmentUnresolved
+      ? getInPersonUrlByAppointmentType(
+          { id: appointment.id, parentAppointmentId, encounterId: encounter.id, isFollowUp: !!encounter.partOf },
+          isFollowupEncounter(encounter)
+            ? getFollowUpProgressNotePathSegment(getFollowupSubtype(encounter))
+            : ROUTER_PATH.REVIEW_AND_SIGN
+        )
+      : undefined;
+
+  const convertToFollowUpDisabledReason = ((): string | undefined => {
+    if (!appointment || !encounter || !patientId || isOwnFollowUpsUnresolved) return 'Loading the visit…';
+    if (isFollowupEncounter(encounter)) return 'This visit is already a follow-up';
+    if (hasOwnFollowUps) return 'This visit already has its own follow-ups';
+    return undefined;
+  })();
   const isOtherFollowUpReason =
     isScheduledFollowUp && !!maybeReasonForVisit && !SCHEDULED_FOLLOWUP_REASONS.includes(maybeReasonForVisit as never);
   const reasonForVisit = useMemo(() => {
@@ -904,6 +903,26 @@ export default function VisitDetailsPage(): ReactElement {
     } finally {
       setPaperworkPdfLoading(false);
     }
+  };
+
+  const handleDeleteForm = async (): Promise<void> => {
+    const questionnaireResponseId = formToDelete?.questionnaireResponse.id;
+    if (!oystehrZambda || !questionnaireResponseId || !patientId) return;
+
+    setDeletingForm(true);
+    try {
+      await deleteVisitForm(oystehrZambda, { questionnaireResponseId, patientId });
+    } catch (error) {
+      console.error(error);
+      enqueueSnackbar('Failed to delete form.', { variant: 'error' });
+      return;
+    } finally {
+      setDeletingForm(false);
+    }
+
+    setFormToDelete(undefined);
+    enqueueSnackbar('Form deleted', { variant: 'success' });
+    await refetchVisitDetails();
   };
 
   const downloadVisitDetailsPdf = async (): Promise<void> => {
@@ -950,17 +969,147 @@ export default function VisitDetailsPage(): ReactElement {
     [serviceCategory, appointment, reasonForVisit, encounter]
   );
 
+  // Renders the compact insurance-card thumbnail INSIDE the matching coverage block of the insurance
+  // section (0-based ordinal: 0 = primary, 1 = secondary), threaded down through
+  // PatientAccountComponent -> InsuranceSection -> InsuranceContainer. The clean thumbnail (front
+  // image + enlarge affordance only) opens the non-modal FloatingCardPreview, which hosts the
+  // front/back toggle, the rotate control, and a remove-and-reload control per face; a coverage with
+  // no card image gets a compact upload/scan affordance instead.
+  const renderInsuranceCardThumbnail = (ordinal: number): ReactNode => {
+    if (ordinal !== 0 && ordinal !== 1) {
+      return null;
+    }
+    const isPrimary = ordinal === 0;
+    const cards = isPrimary ? primaryInsuranceCards : secondaryInsuranceCards;
+    return (
+      <CardThumbnail
+        item={cards}
+        title={isPrimary ? 'Primary Insurance Card' : 'Secondary Insurance Card'}
+        appointmentID={appointmentID}
+        filesMutator={filesMutation}
+        uploadingFileType={uploadingFileType}
+        handleOpenScanner={handleOpenScanner}
+        imagesLoading={imagesLoading}
+        frontFileType={isPrimary ? 'insurance-card-front' : 'insurance-card-front-2'}
+        backFileType={isPrimary ? 'insurance-card-back' : 'insurance-card-back-2'}
+        handleDeleteClick={handleDeleteClick}
+        deletingFileId={deletingFileId}
+        previewHeaderActions={(face) => (
+          <InsuranceCardOrientationHint
+            patientId={patientId}
+            ordinal={isPrimary ? 'primary' : 'secondary'}
+            face={face}
+            documentReferenceId={face === 'front' ? cards.frontId : cards.backId}
+            onRotated={refetchFileData}
+          />
+        )}
+      />
+    );
+  };
+
+  // Clean photo-ID thumbnail rendered in the "Patient summary" section HEADER (right-aligned, next to
+  // the title), threaded down through PatientAccountComponent -> AboutPatientContainer. Same treatment
+  // as the insurance cards: front image + enlarge affordance only; clicking opens the non-modal
+  // FloatingCardPreview (front/back toggle lives there — no OCR/rotate for the ID, so no
+  // previewHeaderActions). Remove-and-reload is wired the same as the insurance cards. An ID with no
+  // image gets a compact upload/scan affordance instead.
+  const photoIdCardSlot = (
+    <CardThumbnail
+      item={idCards}
+      title="ID Card"
+      appointmentID={appointmentID}
+      filesMutator={filesMutation}
+      uploadingFileType={uploadingFileType}
+      handleOpenScanner={handleOpenScanner}
+      imagesLoading={imagesLoading}
+      frontFileType="photo-id-front"
+      backFileType="photo-id-back"
+      handleDeleteClick={handleDeleteClick}
+      deletingFileId={deletingFileId}
+    />
+  );
+
+  // The consent block's own Save commits the checkbox, and is the "save again" step after consent
+  // has been obtained. It stays disabled while the checkbox matches what's already persisted.
+  const convertToFollowUpItem = (
+    <MenuItem
+      data-testid={dataTestIds.visitDetailsPage.convertToFollowUpMenuItem}
+      disabled={!!convertToFollowUpDisabledReason}
+      onClick={() => {
+        setActionsMenuAnchor(null);
+        navigate(`/patient/${patientId}/followup/add`, {
+          state: {
+            convertFrom: { appointmentId: appointment?.id, encounterId: encounter?.id },
+          },
+        });
+      }}
+      sx={MENU_ITEM_SX}
+    >
+      <ListItemIcon sx={MENU_ITEM_ICON_SX}>
+        <SubdirectoryArrowRightIcon fontSize="small" />
+      </ListItemIcon>
+      Convert to Follow-up
+    </MenuItem>
+  );
+
+  // Only wrap when disabled: a Tooltip/Box wrapper stops MenuList from managing the item's
+  // keyboard focus, which matters for the actionable case but not for a disabled one.
+  const convertToFollowUpMenuItem = convertToFollowUpDisabledReason ? (
+    <Tooltip title={convertToFollowUpDisabledReason} placement="left">
+      <Box component="span">{convertToFollowUpItem}</Box>
+    </Tooltip>
+  ) : (
+    convertToFollowUpItem
+  );
+
+  const consentAttestationSaveButton = (
+    <LoadingButton
+      data-testid={dataTestIds.visitDetailsPage.consentAttestationSaveButton}
+      onClick={async () => {
+        await bookingDetailsMutation
+          .mutateAsync({
+            appointmentId: appointment?.id ?? '',
+            bookingDetails: {
+              consentForms: {
+                consentAttested: consentAttested ?? false,
+              },
+            },
+          })
+          .catch((error) => {
+            if (isApiError(error)) {
+              enqueueSnackbar(error.message, { variant: 'error' });
+            } else {
+              console.error('Error updating consent attestation:', error);
+              enqueueSnackbar('An unexpected error occurred.', { variant: 'error' });
+            }
+          });
+      }}
+      loading={bookingDetailsMutation.isPending && editDialogConfig.type === 'closed'}
+      disabled={!hasConsentChanged}
+    >
+      Save
+    </LoadingButton>
+  );
+
+  const consentAttestationFooter = consentAttested !== null && (
+    <Box style={{ display: 'flex', alignItems: 'center' }}>
+      <Checkbox
+        inputProps={
+          { 'data-testid': dataTestIds.visitDetailsPage.consentAttestationCheckbox } as Record<string, unknown>
+        }
+        checked={consentAttested ?? false}
+        onChange={(_e: any, checked: boolean) => {
+          setConsentAttested(checked);
+        }}
+      />
+      <Typography>I verify that patient consent has been obtained.</Typography>
+      {consentAttestationSaveButton}
+    </Box>
+  );
+
   return (
     <PageContainer>
       <>
-        {/* Card image zoom dialog */}
-        <ImageCarousel
-          imagesObj={imageCarouselObjs}
-          imageIndex={zoomedIdx}
-          setImageIndex={setZoomedIdx}
-          open={photoZoom}
-          setOpen={setPhotoZoom}
-        />
         {/* /* page */}
         <Grid container direction="row">
           <Grid item xs={0.25}></Grid>
@@ -975,41 +1124,175 @@ export default function VisitDetailsPage(): ReactElement {
                 />
               </Grid>
               <Grid item container xs={6} justifyContent="flex-end" gap={1}>
-                <LoadingButton
+                <RoundedButton
+                  id="visit-docs-menu-button"
+                  data-testid={dataTestIds.visitDetailsPage.docsAndDataMenuButton}
                   variant="outlined"
-                  sx={{
-                    borderRadius: '20px',
-                    textTransform: 'none',
-                  }}
-                  loading={visitDetailsPdfLoading}
-                  color="primary"
-                  disabled={isLoadingDocuments || !encounter?.id}
-                  onClick={downloadVisitDetailsPdf}
+                  onClick={(event) => setDocsMenuAnchor(event.currentTarget)}
+                  aria-haspopup="true"
+                  aria-expanded={docsMenuOpen ? 'true' : undefined}
+                  aria-controls={docsMenuOpen ? 'visit-docs-menu' : undefined}
+                  endIcon={<ArrowDropDown />}
                 >
-                  Visit Details PDF
-                </LoadingButton>
-                {FEATURE_FLAGS.LEGACY_DATA_ENABLED && (
-                  <Button
-                    variant="outlined"
-                    sx={{ borderRadius: '20px', textTransform: 'none' }}
-                    disabled={!patient}
+                  Docs & Data
+                </RoundedButton>
+                <Menu
+                  id="visit-docs-menu"
+                  anchorEl={docsMenuAnchor}
+                  open={docsMenuOpen}
+                  onClose={() => setDocsMenuAnchor(null)}
+                  MenuListProps={{ 'aria-labelledby': 'visit-docs-menu-button' }}
+                  anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+                  transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+                >
+                  <MenuItem
+                    data-testid={dataTestIds.visitDetailsPage.visitDetailsPdfMenuItem}
+                    disabled={isLoadingDocuments || !encounter?.id || visitDetailsPdfLoading}
                     onClick={() => {
-                      const patientLastName = patient?.name?.[0]?.family ?? '';
-                      const patientFirstName = patient?.name?.[0]?.given?.[0] ?? '';
-                      const rawDob = patient?.birthDate ?? '';
-                      // Convert YYYY-MM-DD to MM-DD-YYYY to match Z3 key format
-                      const dob = rawDob ? rawDob.split('-').slice(1).concat(rawDob.split('-')[0]).join('-') : '';
-                      const params = new URLSearchParams({
-                        lastName: patientLastName,
-                        firstName: patientFirstName,
-                        dob,
-                      });
-                      navigate(`/legacy-data?${params.toString()}`);
+                      setDocsMenuAnchor(null);
+                      void downloadVisitDetailsPdf();
                     }}
+                    sx={MENU_ITEM_SX}
                   >
-                    Legacy Data
-                  </Button>
-                )}
+                    <ListItemIcon sx={MENU_ITEM_ICON_SX}>
+                      <PictureAsPdfOutlinedIcon fontSize="small" />
+                    </ListItemIcon>
+                    Visit Details PDF
+                  </MenuItem>
+                  <MenuItem
+                    data-testid={dataTestIds.visitDetailsPage.patientPaperworkPdfMenuItem}
+                    disabled={isLoadingDocuments || !patientId || paperworkPdfLoading}
+                    onClick={() => {
+                      setDocsMenuAnchor(null);
+                      void downloadPaperworkPdf();
+                    }}
+                    sx={MENU_ITEM_SX}
+                  >
+                    <ListItemIcon sx={MENU_ITEM_ICON_SX}>
+                      <PictureAsPdfOutlinedIcon fontSize="small" />
+                    </ListItemIcon>
+                    Patient Paperwork PDF
+                  </MenuItem>
+                  <MenuItem
+                    data-testid={dataTestIds.visitDetailsPage.allPatientDocsMenuItem}
+                    disabled={!patientId}
+                    onClick={() => {
+                      setDocsMenuAnchor(null);
+                      navigate(`/patient/${patientId}/docs`);
+                    }}
+                    sx={MENU_ITEM_SX}
+                  >
+                    <ListItemIcon sx={MENU_ITEM_ICON_SX}>
+                      <CollectionsOutlinedIcon fontSize="small" />
+                    </ListItemIcon>
+                    All Patient Docs
+                  </MenuItem>
+                  {FEATURE_FLAGS.LEGACY_DATA_ENABLED && (
+                    <MenuItem
+                      data-testid={dataTestIds.visitDetailsPage.legacyDataMenuItem}
+                      disabled={!patient}
+                      onClick={() => {
+                        setDocsMenuAnchor(null);
+                        if (patient) navigate(getLegacyDataUrl(patient));
+                      }}
+                      sx={MENU_ITEM_SX}
+                    >
+                      <ListItemIcon sx={MENU_ITEM_ICON_SX}>
+                        <ContactPageOutlinedIcon fontSize="small" />
+                      </ListItemIcon>
+                      Legacy Data
+                    </MenuItem>
+                  )}
+                  <MenuItem
+                    data-testid={dataTestIds.visitDetailsPage.accessAndChangeLogMenuItem}
+                    disabled={activityLogsLoading}
+                    onClick={() => {
+                      setDocsMenuAnchor(null);
+                      setActivityLogDialogOpen(true);
+                    }}
+                    sx={MENU_ITEM_SX}
+                  >
+                    <ListItemIcon sx={MENU_ITEM_ICON_SX}>
+                      <HistoryOutlinedIcon fontSize="small" />
+                    </ListItemIcon>
+                    Access & Change Log
+                  </MenuItem>
+                </Menu>
+                <RoundedButton
+                  id="visit-actions-menu-button"
+                  data-testid={dataTestIds.visitDetailsPage.actionsMenuButton}
+                  variant="outlined"
+                  onClick={(event) => setActionsMenuAnchor(event.currentTarget)}
+                  aria-haspopup="true"
+                  aria-expanded={actionsMenuOpen ? 'true' : undefined}
+                  aria-controls={actionsMenuOpen ? 'visit-actions-menu' : undefined}
+                  endIcon={<ArrowDropDown />}
+                >
+                  Actions
+                </RoundedButton>
+                <Menu
+                  id="visit-actions-menu"
+                  anchorEl={actionsMenuAnchor}
+                  open={actionsMenuOpen}
+                  onClose={() => setActionsMenuAnchor(null)}
+                  MenuListProps={{ 'aria-labelledby': 'visit-actions-menu-button' }}
+                  anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+                  transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+                >
+                  <MenuItem
+                    data-testid={dataTestIds.visitDetailsPage.sendFormMenuItem}
+                    disabled={!appointment?.id}
+                    onClick={() => {
+                      setActionsMenuAnchor(null);
+                      setSendFormDialogOpen(true);
+                    }}
+                    sx={MENU_ITEM_SX}
+                  >
+                    <ListItemIcon sx={MENU_ITEM_ICON_SX}>
+                      <AssignmentOutlinedIcon fontSize="small" />
+                    </ListItemIcon>
+                    Send Form
+                  </MenuItem>
+                  {convertToFollowUpMenuItem}
+                  <MenuItem
+                    data-testid={dataTestIds.visitDetailsPage.reportIssueMenuItem}
+                    disabled={loading}
+                    onClick={() => {
+                      setActionsMenuAnchor(null);
+                      setIssueDialogOpen(true);
+                    }}
+                    sx={DESTRUCTIVE_MENU_ITEM_SX}
+                  >
+                    <ListItemIcon sx={MENU_ITEM_ICON_SX}>
+                      <ErrorOutlineOutlinedIcon fontSize="small" />
+                    </ListItemIcon>
+                    Report Issue
+                  </MenuItem>
+                  {appointment && encounter && appointment.status !== 'cancelled' && (
+                    <MenuItem
+                      data-testid={dataTestIds.visitDetailsPage.cancelVisitButton}
+                      onClick={() => {
+                        setActionsMenuAnchor(null);
+                        handleCancelDialogOpen();
+                      }}
+                      sx={DESTRUCTIVE_MENU_ITEM_SX}
+                    >
+                      <ListItemIcon sx={MENU_ITEM_ICON_SX}>
+                        <EventBusyOutlinedIcon fontSize="small" />
+                      </ListItemIcon>
+                      Cancel Visit
+                    </MenuItem>
+                  )}
+                </Menu>
+                <RoundedButton
+                  variant="contained"
+                  data-testid={dataTestIds.visitDetailsPage.progressNoteButton}
+                  disabled={!progressNoteUrl}
+                  onClick={() => progressNoteUrl && navigate(progressNoteUrl)}
+                  startIcon={<ArrowForwardIcon />}
+                >
+                  Progress Note
+                </RoundedButton>
               </Grid>
             </Grid>
             {/* page title row */}
@@ -1017,20 +1300,23 @@ export default function VisitDetailsPage(): ReactElement {
               {loading || activityLogsLoading || !patient ? (
                 <Skeleton aria-busy="true" width={200} height="" />
               ) : (
-                <Box
-                  onClick={() => navigate(`/patient/${patientId}/info`)}
-                  sx={{ cursor: 'pointer', display: 'flex', gap: 1 }}
-                >
-                  <AssignmentIndOutlinedIcon
-                    sx={{ width: '27px', height: '27px', color: 'primary.light', alignSelf: 'center' }}
-                  ></AssignmentIndOutlinedIcon>
-                  <Typography
-                    variant="h2"
-                    color="primary.dark"
-                    data-testid={dataTestIds.appointmentPage.patientFullName}
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <Box
+                    onClick={() => navigate(`/patient/${patientId}/info`)}
+                    sx={{ cursor: 'pointer', display: 'flex', gap: 1 }}
                   >
-                    {fullName}
-                  </Typography>
+                    <AssignmentIndOutlinedIcon
+                      sx={{ width: '27px', height: '27px', color: 'primary.light', alignSelf: 'center' }}
+                    ></AssignmentIndOutlinedIcon>
+                    <Typography
+                      variant="h2"
+                      color="primary.dark"
+                      data-testid={dataTestIds.appointmentPage.patientFullName}
+                    >
+                      {fullName}
+                    </Typography>
+                  </Box>
+                  <PatientNotesButton patientId={patientId} />
                 </Box>
               )}
 
@@ -1042,7 +1328,7 @@ export default function VisitDetailsPage(): ReactElement {
                   <Typography variant="body1" sx={{ alignSelf: 'center', marginLeft: 4 }}>
                     {isInPerson ? 'In-Person' : 'Virtual'}
                     {' | '}
-                    {makeAbbreviation(serviceCategoryLabel)}
+                    {resolveServiceCategoryAbbreviation(serviceCategory, fhirBackedCats)}
                   </Typography>
                   <Typography variant="body1" sx={{ alignSelf: 'center', marginLeft: 1 }}>
                     {getAppointmentType(appointmentType)}
@@ -1077,33 +1363,16 @@ export default function VisitDetailsPage(): ReactElement {
                 </>
               )}
               {appointment && encounter && appointment?.status !== 'cancelled' ? (
-                <>
-                  <Button
-                    data-testid={dataTestIds.visitDetailsPage.cancelVisitButton}
-                    variant="outlined"
-                    sx={{
-                      alignSelf: 'center',
-                      marginLeft: 'auto',
-                      // marginRight: 2,
-                      borderRadius: '20px',
-                      textTransform: 'none',
-                    }}
-                    color="error"
-                    onClick={handleCancelDialogOpen}
-                  >
-                    Cancel visit
-                  </Button>
-                  <CancellationReasonDialog
-                    handleClose={handleCancelDialogClose}
-                    refetchData={async () => {
-                      refetchVisitDetails().catch((error) => console.error('error refetching visit details', error));
-                    }}
-                    appointment={appointment}
-                    encounter={encounter}
-                    open={cancelDialogOpen}
-                    getAndSetResources={getAndSetHistoricResources}
-                  />
-                </>
+                <CancellationReasonDialog
+                  handleClose={handleCancelDialogClose}
+                  refetchData={async () => {
+                    refetchVisitDetails().catch((error) => console.error('error refetching visit details', error));
+                  }}
+                  appointment={appointment}
+                  encounter={encounter}
+                  open={cancelDialogOpen}
+                  getAndSetResources={getAndSetHistoricResources}
+                />
               ) : null}
               {status === 'arrived' ? (
                 <>
@@ -1111,7 +1380,7 @@ export default function VisitDetailsPage(): ReactElement {
                     variant="outlined"
                     sx={{
                       alignSelf: 'center',
-                      marginLeft: 1,
+                      marginLeft: 'auto',
                       borderRadius: '20px',
                       textTransform: 'none',
                     }}
@@ -1139,11 +1408,14 @@ export default function VisitDetailsPage(): ReactElement {
               ) : null}
             </Grid>
 
-            {(nameLastModifiedOld || nameLastModified) && (
-              <Grid container direction="row">
-                <Typography sx={{ alignSelf: 'center', marginLeft: 4, fontSize: '14px' }}>
-                  Name Last Modified {nameLastModifiedOld || nameLastModified}
-                </Typography>
+            {(patient || nameLastModifiedOld || nameLastModified) && (
+              <Grid container direction="row" alignItems="center" gap={2} sx={{ marginLeft: 4 }}>
+                {patient && <IdentifiersRow patient={patient} />}
+                {(nameLastModifiedOld || nameLastModified) && (
+                  <Typography sx={{ alignSelf: 'center', fontSize: '14px' }}>
+                    Name Last Modified {nameLastModifiedOld || nameLastModified}
+                  </Typography>
+                )}
               </Grid>
             )}
 
@@ -1165,71 +1437,6 @@ export default function VisitDetailsPage(): ReactElement {
               </Grid>
             )}
 
-            {/* new insurance card and photo id */}
-            <Grid container direction="row" marginTop={2}>
-              <Grid item container sx={{ padding: '10px' }}>
-                <Paper sx={{ width: '100%' }}>
-                  <Box padding={2}>
-                    <Grid container justifyContent="space-between" sx={{ p: '0 22px' }}>
-                      <Typography variant="h4" color="primary.dark">
-                        Cards & IDs
-                      </Typography>
-                      <RoundedButton
-                        to={`/patient/${patientId}/docs`}
-                        startIcon={<FolderOutlinedIcon></FolderOutlinedIcon>}
-                      >
-                        See All Patient Docs
-                      </RoundedButton>
-                    </Grid>
-                    <Grid container item direction="row" alignItems="center" minHeight={cardSectionHeight}>
-                      <CardCategoryGridItem
-                        category="primary-ins"
-                        item={primaryInsuranceCards}
-                        appointmentID={appointmentID}
-                        filesMutator={filesMutation}
-                        fullCardPdf={fullCardPdfs.find((pdf) => pdf.type === DocumentType.FullInsurance)}
-                        handleImageClick={handleCardImageClick}
-                        handleOpenScanner={handleOpenScanner}
-                        imagesLoading={imagesLoading}
-                        uploadingFileType={uploadingFileType}
-                        handleDeleteClick={handleDeleteClick}
-                        isDeletingFront={deletingFileId === primaryInsuranceCards.frontId}
-                        isDeletingBack={deletingFileId === primaryInsuranceCards.backId}
-                      />
-                      <CardCategoryGridItem
-                        category="secondary-ins"
-                        item={secondaryInsuranceCards}
-                        appointmentID={appointmentID}
-                        filesMutator={filesMutation}
-                        fullCardPdf={fullCardPdfs.find((pdf) => pdf.type === DocumentType.FullInsuranceSecondary)}
-                        handleImageClick={handleCardImageClick}
-                        handleOpenScanner={handleOpenScanner}
-                        imagesLoading={imagesLoading}
-                        uploadingFileType={uploadingFileType}
-                        handleDeleteClick={handleDeleteClick}
-                        isDeletingFront={deletingFileId === secondaryInsuranceCards.frontId}
-                        isDeletingBack={deletingFileId === secondaryInsuranceCards.backId}
-                      />
-                      <CardCategoryGridItem
-                        category="id"
-                        item={idCards}
-                        appointmentID={appointmentID}
-                        filesMutator={filesMutation}
-                        fullCardPdf={fullCardPdfs.find((pdf) => pdf.type === DocumentType.FullPhotoId)}
-                        handleImageClick={handleCardImageClick}
-                        handleOpenScanner={handleOpenScanner}
-                        imagesLoading={imagesLoading}
-                        uploadingFileType={uploadingFileType}
-                        handleDeleteClick={handleDeleteClick}
-                        isDeletingFront={deletingFileId === idCards.frontId}
-                        isDeletingBack={deletingFileId === idCards.backId}
-                      />
-                    </Grid>
-                  </Box>
-                </Paper>
-              </Grid>
-            </Grid>
-
             <Grid container item direction="column">
               <Grid item container sx={{ padding: '10px' }} marginBottom={2}>
                 <Typography variant="h3" color="primary.dark">
@@ -1243,7 +1450,7 @@ export default function VisitDetailsPage(): ReactElement {
                         loading={loading}
                         patientDetails={{
                           'Service category': serviceCategoryLabel,
-                          'Reason for visit': reasonForVisit
+                          "Reason for today's visit": reasonForVisit
                             ? `${reasonForVisit}${additionalDetails ? ` - ${additionalDetails}` : ''}`
                             : undefined,
                           'Authorized non-legal guardian(s)': patient?.extension?.find(
@@ -1291,7 +1498,7 @@ export default function VisitDetailsPage(): ReactElement {
                               sx={{ mr: '5px', padding: '10px' }}
                             />
                           ),
-                          'Reason for visit': (
+                          "Reason for today's visit": (
                             <PencilIconButton
                               onClick={() =>
                                 setEditDialogConfig({
@@ -1304,7 +1511,7 @@ export default function VisitDetailsPage(): ReactElement {
                                     additionalDetails,
                                   },
                                   keyTitleMap: {
-                                    reasonForVisit: 'Reason for Visit',
+                                    reasonForVisit: "Reason for today's visit",
                                     additionalDetails: 'Additional Details',
                                   },
                                   requiredKeys: [],
@@ -1347,46 +1554,29 @@ export default function VisitDetailsPage(): ReactElement {
                         patientDetails={{
                           ...signedConsentForm,
                         }}
-                        footerCellContent={
-                          consentAttested !== null && (
-                            <Box style={{ display: 'flex', alignItems: 'center' }}>
-                              <Checkbox
-                                checked={consentAttested ?? false}
-                                onChange={(_e: any, checked: boolean) => {
-                                  setConsentAttested(checked);
-                                }}
-                              />
-                              <Typography>I verify that patient consent has been obtained.</Typography>
-                              <LoadingButton
-                                onClick={async () => {
-                                  await bookingDetailsMutation
-                                    .mutateAsync({
-                                      appointmentId: appointment?.id ?? '',
-                                      bookingDetails: {
-                                        consentForms: {
-                                          consentAttested: consentAttested ?? false,
-                                        },
-                                      },
-                                    })
-                                    .catch((error) => {
-                                      if (isApiError(error)) {
-                                        enqueueSnackbar(error.message, { variant: 'error' });
-                                      } else {
-                                        console.error('Error updating consent attestation:', error);
-                                        enqueueSnackbar('An unexpected error occurred.', { variant: 'error' });
-                                      }
-                                    });
-                                }}
-                                loading={bookingDetailsMutation.isPending && editDialogConfig.type === 'closed'}
-                                disabled={!hasConsentChanged}
-                              >
-                                Save
-                              </LoadingButton>
-                            </Box>
-                          )
-                        }
+                        footerCellContent={consentAttestationFooter}
                       />
                     </Grid>
+                    {allCustomForms.length > 0 ? (
+                      allCustomForms.map(({ form, deletable }, idx) => (
+                        <Grid item key={`${form.questionnaireId}-${idx}`} sx={{ mt: 2 }}>
+                          <CustomFormCard
+                            form={form}
+                            deletable={deletable}
+                            onEdit={() => setFormToEdit(form)}
+                            onDelete={() => setFormToDelete(form)}
+                          />
+                        </Grid>
+                      ))
+                    ) : (
+                      <Grid item>
+                        <PatientInformation
+                          title="Custom Paperwork"
+                          loading={loading}
+                          patientDetails={{ Status: 'No custom questionnaires attached' }}
+                        />
+                      </Grid>
+                    )}
                   </Grid>
                   <Grid container item xs={12} sm={6} direction="column">
                     {!patientBalancesLoading &&
@@ -1415,6 +1605,7 @@ export default function VisitDetailsPage(): ReactElement {
                         refetchPaymentList={refetchAllPaymentData}
                         isRefetching={isPaymentListRefetching}
                         paymentListError={paymentListError}
+                        patientCreditCents={patientBalancesData?.patientCreditCents ?? 0}
                       />
                     </Grid>
                     <Grid item>
@@ -1441,54 +1632,30 @@ export default function VisitDetailsPage(): ReactElement {
                 renderBackButton={false}
                 appointmentContext={appointmentContext}
                 appointmentId={appointmentID}
+                renderInsuranceCardThumbnail={renderInsuranceCardThumbnail}
+                photoIdCardSlot={photoIdCardSlot}
+                confirmSave={confirmSaveWithConsentReminder}
               />
             </Grid>
           </Grid>
         </Grid>
-        <Grid container direction="row">
-          <Grid item sx={{ marginLeft: { xs: 0, sm: 8 }, marginTop: 2, marginBottom: 50 }}>
-            <Stack direction="row" spacing={1} useFlexGap>
-              <LoadingButton
-                variant="outlined"
-                sx={{
-                  borderRadius: '20px',
-                  textTransform: 'none',
-                }}
-                loading={paperworkPdfLoading}
-                color="primary"
-                disabled={isLoadingDocuments || !patientId}
-                onClick={downloadPaperworkPdf}
-              >
-                Patient Paperwork PDF
-              </LoadingButton>
-              <LoadingButton
-                loading={activityLogsLoading}
-                variant="outlined"
-                sx={{
-                  borderRadius: '20px',
-                  textTransform: 'none',
-                }}
-                size="medium"
-                color="primary"
-                onClick={() => setActivityLogDialogOpen(true)}
-              >
-                View activity logs
-              </LoadingButton>
-              <LoadingButton
-                loading={loading}
-                variant="outlined"
-                sx={{
-                  borderRadius: '20px',
-                  textTransform: 'none',
-                }}
-                color="error"
-                onClick={() => setIssueDialogOpen(true)}
-              >
-                Report Issue
-              </LoadingButton>
-            </Stack>
+        {patientId && encounter?.id && (
+          <Grid container direction="row">
+            <Grid item xs={12} sx={{ marginLeft: { xs: 0, sm: 8 }, marginRight: { xs: 0, sm: 8 }, marginTop: 2 }}>
+              <Typography variant="h3" color="primary.dark" marginBottom={2}>
+                Visit Documents
+              </Typography>
+              <Paper sx={{ padding: 3 }}>
+                <PatientDocumentsExplorer
+                  patientId={patientId}
+                  // Both linkages: EHR uploads link by encounter, while consent forms, condition
+                  // photos and school/work notes from intake link by appointment.
+                  visit={{ encounterId: encounter.id, appointmentId: appointmentID }}
+                />
+              </Paper>
+            </Grid>
           </Grid>
-        </Grid>
+        )}
         {/* Update details modal */}
         <EditPatientInfoDialog
           title={dialogTitleFromType(editDialogConfig.type)}
@@ -1598,7 +1765,7 @@ export default function VisitDetailsPage(): ReactElement {
                         {(() => {
                           // Merge BOOKING_CONFIG (compiled-in, source of truth on collision)
                           // with the FHIR-backed catalog so admins can switch a visit to a
-                          // runtime-registered category. Dedup by code. Filter inactive
+                          // runtime-registered category. Dedupe by code. Filter inactive
                           // FHIR-backed entries — the update-visit-details validator only
                           // resolves against `active=true` HSes, so offering an inactive
                           // category here would let the admin pick something that fails
@@ -1711,236 +1878,70 @@ export default function VisitDetailsPage(): ReactElement {
           outputFormat="png"
           onScanComplete={handleScanComplete}
         />
+        <CustomDialog
+          open={Boolean(pendingSave)}
+          handleClose={handleCancelPendingSave}
+          title={CONSENT_REMINDER_TITLE}
+          description={
+            <Typography variant="body2" data-testid={dataTestIds.dialog.message}>
+              {CONSENT_REMINDER_MESSAGE}
+            </Typography>
+          }
+          dataTestId={dataTestIds.visitDetailsPage.consentReminderDialog}
+          maxWidth="xs"
+          fullWidth
+          actions={
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
+              <Button
+                variant="outlined"
+                onClick={handleCancelPendingSave}
+                disabled={pendingSaveIsRunning}
+                data-testid={dataTestIds.dialog.cancelButton}
+              >
+                Cancel
+              </Button>
+              <LoadingButton
+                variant="contained"
+                onClick={handleConfirmPendingSave}
+                loading={pendingSaveIsRunning}
+                data-testid={dataTestIds.dialog.proceedButton}
+              >
+                Save
+              </LoadingButton>
+            </Box>
+          }
+        />
+        {appointmentID && (
+          <SendFormDialog
+            open={sendFormDialogOpen}
+            onClose={() => setSendFormDialogOpen(false)}
+            appointmentId={appointmentID}
+          />
+        )}
+        {formToEdit && (
+          <EditFormResponseDialog
+            form={formToEdit}
+            patientId={patientId}
+            onClose={() => setFormToEdit(undefined)}
+            onSaved={() => {
+              setFormToEdit(undefined);
+              void refetchVisitDetails();
+            }}
+          />
+        )}
+        <DeleteDialog
+          open={Boolean(formToDelete)}
+          title="Delete form?"
+          description={`"${
+            formToDelete?.questionnaireTitle ?? 'This form'
+          }" and the answers submitted on it will no longer show on this visit.`}
+          closeButtonText="Cancel"
+          handleClose={() => setFormToDelete(undefined)}
+          deleteButtonText="Delete"
+          handleDelete={() => void handleDeleteForm()}
+          loadingDelete={deletingForm}
+        />
       </>
     </PageContainer>
   );
 }
-
-interface CardCategoryGridItemInput {
-  item: SavedCardItem;
-  category: SavedCardCategory;
-  appointmentID: string | undefined;
-  filesMutator: UseMutationResult<void, Error, UpdateVisitFilesInput, unknown>;
-  imagesLoading?: boolean;
-  fullCardPdf?: DocumentInfo | undefined;
-  uploadingFileType: UpdateVisitFilesInput['fileType'] | null;
-  handleImageClick: (imageType: string) => void;
-  handleOpenScanner: (fileType: UpdateVisitFilesInput['fileType']) => void;
-  handleDeleteClick: (id: string | null) => Promise<void>;
-  isDeletingFront: boolean;
-  isDeletingBack: boolean;
-}
-
-function parseFiletype(fileUrl: string): string {
-  const filetype = fileUrl.match(/\w+$/)?.[0];
-  if (filetype) {
-    return filetype;
-  } else {
-    throw new Error('Failed to parse filetype from url');
-  }
-}
-
-const CardCategoryGridItem: React.FC<CardCategoryGridItemInput> = ({
-  item,
-  category,
-  appointmentID,
-  fullCardPdf,
-  filesMutator,
-  imagesLoading,
-  uploadingFileType,
-  handleImageClick,
-  handleOpenScanner,
-  handleDeleteClick,
-  isDeletingFront,
-  isDeletingBack,
-}) => {
-  const title = (() => {
-    if (category === 'primary-ins') {
-      return 'Primary Insurance Card';
-    } else if (category === 'secondary-ins') {
-      return 'Secondary Insurance Card';
-    } else {
-      return 'ID Card';
-    }
-  })();
-
-  const theme = useTheme();
-  const ASPECT_RATIO = 1.57; // Standard aspect ratio for ID and insurance cards
-  const isSmallScreen = useMediaQuery(theme.breakpoints.down('md'));
-  const downloadDisabled = imagesLoading || (!item.front && !item.back);
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState<'front' | 'back' | null>(null);
-
-  const itemIdentifier = (side: 'front' | 'back'): UpdateVisitFilesInput['fileType'] => {
-    if (category === 'primary-ins') {
-      return side === 'front' ? 'insurance-card-front' : 'insurance-card-back';
-    } else if (category === 'secondary-ins') {
-      return side === 'front' ? 'insurance-card-front-2' : 'insurance-card-back-2';
-    } else {
-      return side === 'front' ? 'photo-id-front' : 'photo-id-back';
-    }
-  };
-
-  const handleDownload = async (): Promise<void> => {
-    try {
-      for (const [key, card] of Array.from(Object.entries(item))) {
-        if (card?.presignedUrl) {
-          const fileType = parseFiletype(card.z3Url);
-
-          fetch(card.presignedUrl, { method: 'GET', headers: { 'Cache-Control': 'no-cache' } })
-            .then((response) => {
-              if (!response.ok) {
-                throw new Error('failed to fetch image from presigned url');
-              }
-              return response.blob();
-            })
-            .then((blob) => {
-              const url = window.URL.createObjectURL(new Blob([blob]));
-              const link = document.createElement('a');
-              link.href = url;
-              link.download = `${appointmentID}-${category}_${key}.${fileType}`;
-              link.style.display = 'none';
-              document.body.appendChild(link);
-              link.click();
-              document.body.removeChild(link);
-            })
-            .catch((error) => {
-              throw new Error(error);
-            });
-        }
-      }
-    } catch (error) {
-      console.error('Error downloading image:', error);
-    }
-  };
-
-  return (
-    <Grid container item direction="column" justifyContent="center" columnSpacing={1} xs={4} sm={4}>
-      <Grid
-        item
-        sx={{
-          paddingBottom: 1,
-          '& a': {
-            color: 'text.primary.light',
-          },
-        }}
-      >
-        {fullCardPdf?.presignedUrl && !downloadDisabled ? (
-          <MUILink
-            href={fullCardPdf.presignedUrl}
-            target="_blank"
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'flex-start',
-              paddingLeft: isSmallScreen ? 2 : 3,
-              cursor: 'pointer',
-              textDecoration: 'none',
-            }}
-          >
-            <Typography color="primary.dark" variant="body2" textAlign="right" marginRight={1}>
-              {title}
-            </Typography>
-            <DownloadIcon fontSize="small" color="primary" />
-          </MUILink>
-        ) : (
-          <Box
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: isSmallScreen ? 'center' : 'flex-start',
-              paddingLeft: isSmallScreen ? 1 : 3,
-              cursor: downloadDisabled ? 'default' : 'pointer',
-            }}
-            onClick={async () => {
-              if (downloadDisabled) return;
-              await handleDownload();
-            }}
-          >
-            <Typography color="primary.dark" variant="body2" marginRight={1}>
-              {title}
-            </Typography>
-            <DownloadIcon fontSize="small" color="primary" sx={{ display: downloadDisabled ? 'none' : 'initial' }} />
-          </Box>
-        )}
-      </Grid>
-      <Grid item container direction="row" justifyContent={'center'} spacing={1}>
-        {Object.entries(item)
-          .filter(([key]) => key !== 'frontId' && key !== 'backId')
-          .map(([key, card]) =>
-            card ? (
-              <Grid
-                item
-                key={card.type}
-                xs={5.5}
-                position={'relative'}
-                sx={{
-                  '&:hover .card-cancel-icon, &:focus-within .card-cancel-icon': {
-                    visibility: 'visible',
-                  },
-                }}
-              >
-                <CardGridItem
-                  card={card}
-                  appointmentID={appointmentID}
-                  fullCardPdf={fullCardPdf}
-                  aspectRatio={ASPECT_RATIO}
-                  handleClick={() => handleImageClick(card.type)}
-                  isLoading={key === 'front' ? isDeletingFront : isDeletingBack}
-                />
-                <IconButton
-                  className="card-cancel-icon"
-                  aria-label={`Delete ${key} card`}
-                  size="small"
-                  sx={{
-                    position: 'absolute',
-                    inset: '-4px -12px auto auto',
-                    color: theme.palette.error.dark,
-                    backgroundColor: theme.palette.background.paper,
-                    borderRadius: '50%',
-                    cursor: 'pointer',
-                    '&:hover, &:focus-within': { backgroundColor: theme.palette.background.paper },
-                    padding: 0,
-                    visibility: 'hidden',
-                  }}
-                  onClick={() => setDeleteDialogOpen(key as 'front' | 'back')}
-                >
-                  <CancelIcon />
-                </IconButton>
-                <CustomDialog
-                  open={deleteDialogOpen === key}
-                  handleClose={() => setDeleteDialogOpen(null)}
-                  title="Confirm card deletion"
-                  description="Are you sure you want to delete this image?"
-                  closeButtonText="Cancel"
-                  confirmText="Delete"
-                  confirmLoading={key === 'front' ? isDeletingFront : isDeletingBack}
-                  handleConfirm={async () => {
-                    await handleDeleteClick(key === 'front' ? item.frontId : item.backId);
-                    setDeleteDialogOpen(null);
-                  }}
-                />
-              </Grid>
-            ) : (
-              <Grid item key={itemIdentifier(key as 'front' | 'back')} xs={5.5}>
-                <ImageUploader
-                  fileName={itemIdentifier(key as 'front' | 'back')}
-                  appointmentId={appointmentID!}
-                  aspectRatio={ASPECT_RATIO}
-                  disabled={imagesLoading}
-                  isUploading={uploadingFileType === itemIdentifier(key as 'front' | 'back')}
-                  onScanClick={() => handleOpenScanner(itemIdentifier(key as 'front' | 'back'))}
-                  submitAttachment={async (attachment: Attachment) => {
-                    await filesMutator.mutateAsync({
-                      appointmentId: appointmentID!,
-                      attachment,
-                      fileType: itemIdentifier(key as 'front' | 'back'),
-                    });
-                  }}
-                />
-              </Grid>
-            )
-          )}
-      </Grid>
-    </Grid>
-  );
-};

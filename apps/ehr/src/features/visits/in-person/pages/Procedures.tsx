@@ -6,23 +6,33 @@ import { Box, Stack } from '@mui/system';
 import { useQueryClient } from '@tanstack/react-query';
 import { DateTime } from 'luxon';
 import { enqueueSnackbar } from 'notistack';
-import { ReactElement, useCallback, useMemo } from 'react';
+import { ReactElement, ReactNode, useCallback, useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { AccordionCard } from 'src/components/AccordionCard';
 import { RoundedButton } from 'src/components/RoundedButton';
 import { dataTestIds } from 'src/constants/data-test-ids';
 import AiSuggestion from 'src/features/visits/in-person/components/AiSuggestion';
-import { AiObservationField, CPTCodeDTO, ObservationTextFieldDTO } from 'utils';
+import { TRACKING_BOARD_QUERY_KEY } from 'src/hooks/useGetTrackingBoard';
+import { formatProcedureCptCode } from 'utils/lib/procedure-coding/format';
+import { AiObservationField } from 'utils/lib/types/api/chart-data/chart-data.constants';
+import { ObservationTextFieldDTO } from 'utils/lib/types/data/screening-questions/types';
 import { Loader } from '../../shared/components/Loader';
 import { PageTitle } from '../../shared/components/PageTitle';
+import { useChartData } from '../../shared/hooks/useChartData';
 import { useGetAppointmentAccessibility } from '../../shared/hooks/useGetAppointmentAccessibility';
-import { useChartData, useDeleteChartData } from '../../shared/stores/appointment/appointment.store';
+import { useDeleteChartData } from '../../shared/stores/appointment/appointment.store';
 import { useDeleteProcedureDialog } from '../components/DeleteProcedureDialog';
 import { ROUTER_PATH } from '../routing/routesInPerson';
 
-export default function Procedures(): ReactElement {
-  const navigate = useNavigate();
-  const { id: appointmentId } = useParams();
+interface ProceduresBodyProps {
+  onNewProcedure: () => void;
+  onProcedureClick: (procedureId: string | undefined) => void;
+  // Rendered to the left of the "Procedure" button; the page passes its PageTitle here,
+  // the inline flow leaves it empty so the button aligns to the right on its own.
+  pageTitle?: ReactNode;
+}
+
+export function ProceduresBody({ onNewProcedure, onProcedureClick, pageTitle }: ProceduresBodyProps): ReactElement {
   const { isChartDataLoading, chartData, refetch: refetchChartData } = useChartData();
   const appointmentAccessibility = useGetAppointmentAccessibility();
   const { mutateAsync: deleteChartData } = useDeleteChartData();
@@ -34,13 +44,6 @@ export default function Procedures(): ReactElement {
   const isReadOnly = useMemo(() => {
     return appointmentAccessibility.isAppointmentReadOnly;
   }, [appointmentAccessibility.isAppointmentReadOnly]);
-
-  const onNewProcedureClick = (): void => {
-    navigate(`/in-person/${appointmentId}/${ROUTER_PATH.PROCEDURES_NEW}`);
-  };
-  const onProcedureClick = (procedureId: string | undefined): void => {
-    navigate(`/in-person/${appointmentId}/procedures/${procedureId}`);
-  };
 
   const handleDeleteProcedure = useCallback(
     async ({ procedureId }: { procedureId: string; procedureName: string }): Promise<boolean> => {
@@ -54,13 +57,14 @@ export default function Procedures(): ReactElement {
         await deleteChartData(
           {
             procedures: [procedureToDelete],
+            cleanupProcedureDiagnoses: true,
           },
           {
             onSuccess: async () => {
               await refetchChartData();
 
               void queryClient.invalidateQueries({
-                queryKey: ['procedures-for-tracking-board'],
+                queryKey: [TRACKING_BOARD_QUERY_KEY],
                 refetchType: 'active',
               });
 
@@ -89,9 +93,9 @@ export default function Procedures(): ReactElement {
   if (isChartDataLoading) return <Loader />;
   return (
     <Box>
-      <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
-        <PageTitle label="Procedures" showIntakeNotesButton={false} dataTestId={dataTestIds.proceduresPage.title} />
-        <RoundedButton variant="contained" onClick={onNewProcedureClick} startIcon={<AddIcon />} disabled={isReadOnly}>
+      <Box display="flex" justifyContent={pageTitle != null ? 'space-between' : 'flex-end'} alignItems="center" mb={2}>
+        {pageTitle}
+        <RoundedButton variant="contained" onClick={onNewProcedure} startIcon={<AddIcon />} disabled={isReadOnly}>
           Procedure
         </RoundedButton>
       </Box>
@@ -129,14 +133,14 @@ export default function Procedures(): ReactElement {
                 >
                   <TableCell>
                     <Stack>
-                      {procedure.cptCodes?.map((cptCode) => {
+                      {procedure.cptCodes?.map((cptCode, index) => {
                         return (
                           <Typography
                             sx={{ fontSize: '14px' }}
-                            key={cptCode.code}
+                            key={cptCode.resourceId ?? index}
                             data-testid={dataTestIds.proceduresPage.cptCode}
                           >
-                            {cptCode.code}-{cptCode.display}
+                            {formatProcedureCptCode(cptCode)}
                           </Typography>
                         );
                       })}
@@ -166,7 +170,7 @@ export default function Procedures(): ReactElement {
                   <TableCell>
                     <Stack>
                       <Typography sx={{ fontSize: '14px' }}>
-                        {documentedDateTime != null ? documentedDateTime.toFormat('MM/dd/yyyy HH:mm a') : undefined}
+                        {documentedDateTime != null ? documentedDateTime.toFormat('MM/dd/yyyy hh:mm a') : undefined}
                       </Typography>
                       <Typography
                         sx={{ fontSize: '14px', color: '#00000099' }}
@@ -183,9 +187,7 @@ export default function Procedures(): ReactElement {
                           e.stopPropagation();
                           if (!procedure.resourceId) return;
                           const procedureName =
-                            procedure.cptCodes?.map((c: CPTCodeDTO) => `${c.code}-${c.display}`).join(', ') ||
-                            procedure.procedureType ||
-                            '';
+                            procedure.cptCodes?.map(formatProcedureCptCode).join(', ') || procedure.procedureType || '';
                           showDeleteProcedureDialog({
                             procedureId: procedure.resourceId,
                             procedureName,
@@ -215,5 +217,27 @@ export default function Procedures(): ReactElement {
       </AccordionCard>
       {DeleteProcedureDialog}
     </Box>
+  );
+}
+
+export default function Procedures(): ReactElement {
+  const navigate = useNavigate();
+  const { id: appointmentId } = useParams();
+
+  const onNewProcedureClick = (): void => {
+    navigate(`/in-person/${appointmentId}/${ROUTER_PATH.PROCEDURES_NEW}`);
+  };
+  const onProcedureClick = (procedureId: string | undefined): void => {
+    navigate(`/in-person/${appointmentId}/procedures/${procedureId}`);
+  };
+
+  return (
+    <ProceduresBody
+      onNewProcedure={onNewProcedureClick}
+      onProcedureClick={onProcedureClick}
+      pageTitle={
+        <PageTitle label="Procedures" showIntakeNotesButton={false} dataTestId={dataTestIds.proceduresPage.title} />
+      }
+    />
   );
 }

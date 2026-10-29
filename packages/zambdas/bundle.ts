@@ -1,11 +1,13 @@
 import { sentryEsbuildPlugin } from '@sentry/esbuild-plugin';
-import archiver from 'archiver';
 import dotenv from 'dotenv';
 import * as esbuild from 'esbuild';
 import { type Options } from 'execa';
 import fs from 'fs';
 import path from 'path';
+import billingZambdasSpec from '../../config/billing-app-core/zambdas.json';
 import zambdasSpec from '../../config/oystehr-core/zambdas.json';
+import { assetsRequiredBy, listAssetFiles } from './bundle-assets';
+import { zipZambda } from './bundle-zip';
 
 dotenv.config({ path: path.join(process.cwd(), '.env.sentry-build-plugin') });
 
@@ -37,7 +39,9 @@ const loadEnvZambdas = (env: string): ZambdaSpec[] => {
 };
 
 const zambdasList = (): ZambdaSpec[] => {
-  const baseZambdas = Object.entries(zambdasSpec.zambdas).map(([_key, spec]) => spec);
+  const baseZambdas = Object.entries({ ...zambdasSpec.zambdas, ...billingZambdasSpec.zambdas }).map(
+    ([_key, spec]) => spec
+  );
   const env = process.env.ENV || '';
   if (env) {
     const envZambdas = loadEnvZambdas(env);
@@ -94,6 +98,7 @@ const buildZambdaChunk = async (zambdas: ZambdaSpec[], outdir: string, isSentryE
       treeShaking: true,
       minify: true,
       plugins: getSentryPlugins(isSentryEnabled),
+      preserveSymlinks: true,
     });
   } catch (error) {
     console.log('Error bundling zambdas:', error);
@@ -109,6 +114,8 @@ const buildAllZambdas = async (zambdas: ZambdaSpec[], outdir: string, isSentryEn
     await buildZambdaChunk(chunks[i], outdir, isSentryEnabled);
   }
 };
+
+const formatMB = (bytes: number): string => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
 const copyAssets = async (from: string, to: string): Promise<void> => {
   if (!fs.existsSync(from)) {
@@ -195,29 +202,27 @@ const injectSourceMaps = async (zambdas: ZambdaSpec[]): Promise<void> => {
   );
 };
 
-const zipZambda = async (
-  sourceFilePath: string,
-  assetsDir: string,
-  assetsPath: string,
-  outPath: string
-): Promise<void> => {
-  const archive = archiver('zip', { zlib: { level: 1 } });
-  const stream = fs.createWriteStream(outPath);
-
-  return new Promise((resolve, reject) => {
-    let result = archive;
-    result = result.file(sourceFilePath, { name: 'index.js', date: new Date('2025-01-01') });
-    result = result.directory(assetsDir, assetsPath, { date: new Date('2025-01-01') });
-    result.on('error', (err) => reject(err)).pipe(stream);
-
-    stream.on('close', () => resolve());
-    void archive.finalize();
-  });
-};
-
 const zipInChunks = async (zambdas: ZambdaSpec[], assetsDir: string, assetsPath: string): Promise<void> => {
   const chunks = chunkArray(zambdas, ZIP_CHUNK_SIZE);
   console.log(`Zipping ${zambdas.length} zambdas in ${chunks.length} chunks of up to ${ZIP_CHUNK_SIZE}...`);
+
+  const allAssets = listAssetFiles(assetsDir);
+  const assetBytes = Object.fromEntries(allAssets.map((file) => [file, fs.statSync(path.join(assetsDir, file)).size]));
+  // The whole tree is at most a couple of MB and every zip draws from it, so
+  // read each asset once instead of once per zip.
+  const assetContents = new Map<string, Buffer>();
+  const contentsOf = (file: string): Buffer => {
+    let contents = assetContents.get(file);
+    if (!contents) {
+      contents = fs.readFileSync(path.join(assetsDir, file));
+      assetContents.set(file, contents);
+    }
+    return contents;
+  };
+  const fullTreeBytes = allAssets.reduce((sum, file) => sum + assetBytes[file], 0);
+  let includedBytes = 0;
+  let zambdasWithoutAssets = 0;
+  let zambdasWithFullTree = 0;
 
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
@@ -225,10 +230,22 @@ const zipInChunks = async (zambdas: ZambdaSpec[], assetsDir: string, assetsPath:
     await Promise.all(
       chunk.map((zambda) => {
         const sourceDir = `.dist/${zambda.src.substring('src/'.length)}.js`;
-        return zipZambda(sourceDir, assetsDir, assetsPath, zambda.zip);
+        const required = assetsRequiredBy(fs.readFileSync(sourceDir, 'utf-8'), allAssets);
+        includedBytes += required.reduce((sum, file) => sum + assetBytes[file], 0);
+        if (required.length === 0) zambdasWithoutAssets++;
+        if (required.length === allAssets.length) zambdasWithFullTree++;
+        const assets = required.map((file) => ({ name: file, contents: contentsOf(file) }));
+        return zipZambda(sourceDir, assetsPath, assets, zambda.zip);
       })
     );
   }
+
+  const wouldHaveBeen = fullTreeBytes * zambdas.length;
+  console.log(
+    `Assets: ${formatMB(includedBytes)} shipped across ${zambdas.length} zips, down from ${formatMB(wouldHaveBeen)} ` +
+      `if every zip carried the whole ${formatMB(fullTreeBytes)} tree ` +
+      `(${zambdasWithoutAssets} need none, ${zambdasWithFullTree} need all).`
+  );
 };
 
 const main = async (): Promise<void> => {
@@ -240,21 +257,16 @@ const main = async (): Promise<void> => {
   console.log('Bundling...');
   console.time('Bundle time');
 
-  const zambdasWithIcd10Search = ['icd-10-search', 'radiology-create-order', 'recommend-billing-suggestions'];
-  const icd10AssetDir = '.dist/icd-10-cm-tabular';
   const assetsDir = '.dist/assets';
 
   const isSentryEnabled =
-    !['local', 'e2e', 'e2e2', 'e2e3'].includes(process.env.ENV || '') &&
+    !['local', 'e2e', 'e2e2', 'e2e3', 'e2e4', 'e2e5'].includes(process.env.ENV || '') &&
     Boolean(process.env.SENTRY_AUTH_TOKEN && process.env.SENTRY_ORG && process.env.SENTRY_PROJECT);
-
-  const icd10Zambdas = zambdas.filter((zambda) => zambdasWithIcd10Search.includes(zambda.name));
-  const regularZambdas = zambdas.filter((zambda) => !zambdasWithIcd10Search.includes(zambda.name));
 
   await buildAllZambdas(zambdas, '.dist', isSentryEnabled);
 
   console.log('Copying assets...');
-  await Promise.all([copyAssets('icd-10-cm-tabular', icd10AssetDir), copyAssets('assets', assetsDir)]);
+  await copyAssets('assets', assetsDir);
 
   console.timeEnd('Bundle time');
   if (isSentryEnabled) {
@@ -266,10 +278,7 @@ const main = async (): Promise<void> => {
   console.log('Zipping...');
   console.time('Zip time');
 
-  await Promise.all([
-    zipInChunks(icd10Zambdas, icd10AssetDir, 'icd-10-cm-tabular'),
-    zipInChunks(regularZambdas, assetsDir, 'assets'),
-  ]);
+  await zipInChunks(zambdas, assetsDir, 'assets');
 
   console.timeEnd('Zip time');
   console.log('Zambdas successfully bundled and zipped into .dist/zips');

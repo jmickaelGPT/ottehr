@@ -10,17 +10,13 @@ import { InventoryRecord } from 'candidhealth/api/resources/patientAr/resources/
 import { Operation } from 'fast-json-patch';
 import { Appointment, Encounter, Encounter as FhirEncounter, Resource, Task as FhirTask, Task } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import {
-  createInvoiceTaskInput,
-  findClaimsBy,
-  getStartTimeFromEncounterStatusHistory,
-  parseInvoiceTaskInput,
-  RCM_TASK_SYSTEM,
-  RcmTaskCode,
-  ZERO_BALANCE_BUSINESS_STATUS,
-  ZERO_BALANCE_BUSINESS_STATUS_CODE,
-} from 'utils';
-import { getCandidEncounterIdFromEncounter } from 'zambdas/src/shared';
+import { RCM_TASK_SYSTEM, RcmTaskCode } from 'utils/lib/fhir/constants';
+import { getStartTimeFromEncounterStatusHistory } from 'utils/lib/fhir/helpers';
+import { findClaimsBy } from 'utils/lib/helpers/candidApi';
+import { createInvoiceTaskInput, parseInvoiceTaskInput } from 'utils/lib/helpers/tasks/invoices-tasks';
+import { ZERO_BALANCE_BUSINESS_STATUS, ZERO_BALANCE_BUSINESS_STATUS_CODE } from 'utils/lib/types/api/invoicing.types';
+import { getCandidEncounterIdFromEncounter } from 'zambdas/src/shared/candid';
+import { createClinicalOystehrClient } from 'zambdas/src/shared/helpers';
 
 const PAGE_SIZE = 100;
 
@@ -38,14 +34,11 @@ async function createOyst(): Promise<Oystehr> {
     PROJECT_ID: '<>',
     token: '<your-token>',
   };
-  const oystehr = new Oystehr({
-    accessToken: secrets.token,
-    projectId: secrets.PROJECT_ID,
-    services: {
-      fhirApiUrl: secrets.FHIR_API,
-      projectApiUrl: secrets.PROJECT_API,
-    },
-  });
+  const oystehr = createClinicalOystehrClient(
+    secrets.token,
+    {},
+    { projectId: secrets.PROJECT_ID, services: { fhirApiUrl: secrets.FHIR_API, projectApiUrl: secrets.PROJECT_API } }
+  );
   console.log(`Created Oystehr client`);
   return oystehr;
 }

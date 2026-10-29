@@ -1,4 +1,3 @@
-import { deepStrictEqual } from 'node:assert';
 import Oystehr, {
   BatchInputDeleteRequest,
   BatchInputPatchRequest,
@@ -10,96 +9,141 @@ import {
   Account,
   AccountCoverage,
   Appointment,
+  Basic,
   Claim,
   ClaimDiagnosis,
   ClaimItem,
   CodeableConcept,
+  Coding,
   Condition,
   Coverage,
   Encounter,
+  Extension,
+  Identifier,
   Location,
+  MedicationAdministration,
   Organization,
   Patient,
+  Period,
   Person,
   Practitioner,
   Procedure,
+  Provenance,
+  ProvenanceAgent,
   Reference,
   RelatedPerson,
-  Resource,
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
+import { isAppointmentOccupationalMedicine } from 'utils/lib/fhir/appointments';
 import {
-  ACCOUNT_TYPE_CODE_SYSTEM,
-  CODE_SYSTEM_CLAIM_TYPE,
-  CODE_SYSTEM_CMS_PLACE_OF_SERVICE,
-  CODE_SYSTEM_CPT_MODIFIER,
-  CODE_SYSTEM_OYSTEHR_CLAIM_PROCEDURE_MODIFIER,
-  CODE_SYSTEM_OYSTEHR_RCM_CMS1500_REFERRING_PROVIDER_TYPE,
-  CODE_SYSTEM_PROCESS_PRIORITY,
-  CreateBillingClaimFromEncounterInput,
-  CreateBillingClaimFromEncounterInputSchema,
-  EXTENSION_URL_CPT_MODIFIER,
-  FHIR_IDENTIFIER_NPI,
-  FHIR_RESOURCE_NOT_FOUND,
-  getCoding,
-  getNPIIdentifier,
-  getPayerId,
-  getSecret,
-  getTimezone,
-  InternalError,
-  isAppointmentAutoAccident,
-  isAppointmentOccupationalMedicine,
-  isAppointmentUrgentCare,
-  isAppointmentWorkersComp,
-  isValidUUID,
-  MISSING_REQUEST_SECRETS,
-  PARTICIPATION_CODE_SYSTEM,
-  Secrets,
-  SecretsKeys,
-  SERVICE_CATEGORY_SYSTEM,
-  TIMEZONES,
-} from 'utils';
-import { INVALID_INPUT_ERROR, MISSING_REQUEST_BODY } from 'utils';
+  claimNonInsurancePayerExtension,
+  claimNonInsurancePayerTag,
+  getCptBillableUnitsFromCoding,
+  getDefaultClaimSubmissionExtensions,
+  setCoveragePlanType,
+} from 'utils/lib/fhir/billing';
+import { FHIR_IDENTIFIER_NPI, SERVICE_CATEGORY_SYSTEM } from 'utils/lib/fhir/constants';
+import { getPaymentVariantFromEncounter, PaymentVariant } from 'utils/lib/fhir/encounter';
+import { codeableConcept, getCoding } from 'utils/lib/fhir/helpers';
+import {
+  getDosageFromMA,
+  getMedicationCptEntryFromMA,
+  getMedicationFromMA,
+  getNdcCodeFromMedication,
+  isInHouseMedicationOrder,
+  MedicationUnitOptions,
+} from 'utils/lib/fhir/medication-administration';
+import { getNPIIdentifier, getPatientFriendlyId } from 'utils/lib/fhir/patient';
+import { getAttendingPractitionerId } from 'utils/lib/fhir/practitioners';
 import { ottehrIdentifierSystem } from 'utils/lib/fhir/systemUrls';
 import {
-  assertDefined,
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  formatZodError,
-  sendErrors,
-  ZambdaInput,
-} from '../../shared';
+  extractCustomInsuranceOrgIdFromReferenceUrl,
+  getCandidPlanTypeCodeFromCoverage,
+  getPayerId,
+} from 'utils/lib/helpers/helpers';
+import { InternalError } from 'utils/lib/helpers/oystehrApi';
 import {
-  BILLING_RESOURCE_TAG,
-  BILLING_WORKING_COPY_TAG,
+  CODE_SYSTEM_CLAIM_INFORMATION_CATEGORY,
+  CODE_SYSTEM_CMS_PLACE_OF_SERVICE,
+  CODE_SYSTEM_CPT_MODIFIER,
+  CODE_SYSTEM_HL7_HCPCS,
+  CODE_SYSTEM_ICD_10,
+  CODE_SYSTEM_OYSTEHR_CLAIM_DATE_TYPE,
+  CODE_SYSTEM_OYSTEHR_CLAIM_PROCEDURE_MODIFIER,
+  CODE_SYSTEM_OYSTEHR_CLAIM_REFERRING_PROVIDER_TYPE,
+  CODE_SYSTEM_PROCESS_PRIORITY,
+  CODE_SYSTEM_SERVICE_CATEGORY_TAG_SYSTEM,
+  EXTENSION_CLAIM_AUTO_ACCIDENT,
+  EXTENSION_CLAIM_AUTO_ACCIDENT_STATE,
+  EXTENSION_CLAIM_EMPLOYMENT_ACCIDENT,
+  EXTENSION_CLAIM_OTHER_ACCIDENT,
+  EXTENSION_URL_CPT_MODIFIER,
+} from 'utils/lib/helpers/rcm/constants';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { AccidentDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
+import { TIMEZONES } from 'utils/lib/types/constants';
+import {
+  DrugUnitCode,
+  NDC_REGEX,
+  ndcToDigits,
+  normalizeNdcTo11Digits,
+} from 'utils/lib/types/data/billing/billing.constants';
+import { CreateBillingClaimFromEncounterInputSchema } from 'utils/lib/types/data/billing/billing.schemas';
+import {
+  AR_STAGE,
+  claimStatusValuesToTags,
+  withArStageInitialization,
+} from 'utils/lib/types/data/billing/claim-status';
+import { FHIR_RESOURCE_NOT_FOUND, INVALID_INPUT_ERROR } from 'utils/lib/types/errors';
+import { getTimezone } from 'utils/lib/utils/scheduleUtils';
+import { isValidUUID } from 'utils/lib/validation/helper';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { chartDataResourceHasMetaTagByCode, makeAccidentDTOFromFhirResources } from '../../shared/chart-data';
+import { sendErrors } from '../../shared/errors';
+import { assertDefined, createClinicalOystehrClient } from '../../shared/helpers';
+import { ZambdaInput } from '../../shared/types/common';
+import { ValidatedZambdaInput, validateWithSchema } from '../../shared/validation';
+import { claimProvenanceRequest, recordedNow, resolveClaimActor } from '../provenance';
+import {
+  billingCopyMatches,
+  BillingFhirResource,
+  buildClaimItemDrugDetail,
+  ClaimLineDrug,
+  copyBillingPatient,
+  copySourceRef,
   createBillingClient,
   CURRENT_STATUS_TAG_SYSTEM,
+  deriveClaimBillablePeriodFromEncounter,
+  determineRulesEngineForClaim,
+  ensureClaimInsurance,
+  EXCLUDE_WORKING_COPIES_PARAMS,
+  findOccupationalMedicineAccount,
   findRef,
+  getClaimTypeCoding,
+  getNonInsurancePayerReference,
+  isEmployerBilledVisit,
+  kickOffRulesEngine,
+  payerDisplay,
   prepareCopy,
   prepareWorkingCopy,
+  PROVIDER_ROLE_BILLING,
+  PROVIDER_ROLE_RENDERING,
+  PROVIDER_ROLE_TAG,
+  reconcilePaymentNoticesForClaim,
+  resourceDisplayName,
+  searchPatientsByClinicalIds,
+  selectClaimCoverages,
   SOURCE_IDENTIFIER_SYSTEM,
 } from '../shared';
 
-export interface CreateClaimFromEncounterParams extends CreateBillingClaimFromEncounterInput {
-  secrets: NonNullable<ZambdaInput['secrets']>;
-}
+type CreateClaimFromEncounterParams = ValidatedZambdaInput<typeof CreateBillingClaimFromEncounterInputSchema>;
+
+// Local const so that DEPRECATED system doesn't get imported from utils
+const CODE_SYSTEM_HCPCS = 'http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets'; // used by Ottehr clinical in-house meds
 
 export type ComplexValidationOutput = { clinicalResources: ClinicalResources; billingResources: BillingResources };
 
-// Type alias for resources relevant to billing
-type BillingFhirResource =
-  | Patient
-  | Coverage
-  | Practitioner
-  | Organization
-  | Location
-  | Person
-  | Claim
-  | Account
-  | RelatedPerson;
-
 type CoverageRefs = { coverageRef: Reference; payorRef: Reference }[];
-type EncounterType = 'uc' | 'wc' | 'occmed' | 'auto';
 
 interface ClinicalResources {
   encounter: Encounter;
@@ -113,6 +157,11 @@ interface ClinicalResources {
   payors: Organization[];
   diagnoses: Array<Condition>;
   procedures: Array<Procedure>;
+  /** In-house medication administrations the procedures are part of (Procedure.partOf). */
+  medicationAdministrations?: MedicationAdministration[];
+  accident?: AccidentDTO;
+  /** The patient's occ-med Account (owner = the visit's employer); resolved only for employer-billed visits. */
+  occupationalMedicineAccount?: Account;
 }
 
 interface BillingResources {
@@ -125,24 +174,32 @@ interface BillingResources {
   renderingProvider?: Practitioner;
   serviceFacility?: Location;
   billingProvider?: Organization;
+  billingService?: Basic;
 }
 
 interface ClaimResources {
   patientId: string;
   encounter: Encounter;
+  appointment: Appointment;
   // Only patient is required, everything else will prompt for data before claim submission in the UI
   /** Ordered list of coverages. First entry is the target of the claim. */
   coverageRefs: CoverageRefs;
+  /** The visit's non-insurance payer (billing-side NIO Organization reference), when one applies. */
+  nonInsurancePayer?: Reference;
+  // The per-claim working copies (their ids are urn:uuid placeholders the transaction resolves), so
+  // the claim references the copies and later edits (UI, rules engine) never touch the shared originals.
   serviceFacility?: Location;
   // Only rendering and billing providers handled now
   renderingProvider?: Practitioner;
   billingProvider?: Organization;
   diagnoses?: Array<Condition>;
   procedures?: Array<Procedure>;
+  medicationAdministrations?: MedicationAdministration[];
+  accident?: AccidentDTO;
 }
 
-type CreateClaimFromEncounterRequests = Array<
-  | BatchInputPostRequest<BillingFhirResource>
+export type CreateClaimFromEncounterRequests = Array<
+  | BatchInputPostRequest<BillingFhirResource | Provenance>
   | BatchInputPatchRequest<BillingFhirResource>
   | BatchInputPutRequest<BillingFhirResource>
   | BatchInputDeleteRequest
@@ -151,23 +208,30 @@ type CreateClaimFromEncounterRequests = Array<
 let m2mToken: string;
 
 export async function handler(input: ZambdaInput): Promise<APIGatewayProxyResult> {
-  const params = validateRequestParameters(input);
+  const params = validateWithSchema(CreateBillingClaimFromEncounterInputSchema, input);
+  const response = await createClaimFromEncounter(params);
+  return { statusCode: 200, body: JSON.stringify(response) };
+}
 
+export async function createClaimFromEncounter(params: CreateClaimFromEncounterParams): Promise<{ claimId: string }> {
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, params.secrets);
   const billingOystehr = createBillingClient(m2mToken, params.secrets);
-  // CW TODO: expand to helper and use in all zambdas
-  const clinicalOystehr = createOystehrClient(m2mToken, params.secrets, { ignoreTags: [BILLING_RESOURCE_TAG] });
+  const clinicalOystehr = createClinicalOystehrClient(m2mToken, params.secrets);
 
   const cvo = await complexValidation(clinicalOystehr, billingOystehr, params);
+  const agent = await resolveClaimActor('system', billingOystehr, undefined, params.secrets);
 
-  const response = await performEffect(billingOystehr, cvo);
-  return { statusCode: 200, body: JSON.stringify(response) };
+  const { claimId, claim } = await performEffect(billingOystehr, cvo, agent);
+  const engine = determineRulesEngineForClaim(claim);
+  if (engine) await kickOffRulesEngine(billingOystehr, engine, claimId, agent.who, params.secrets);
+  return { claimId };
 }
 
 export async function performEffect(
   billingOystehr: Oystehr,
-  cvo: ComplexValidationOutput
-): Promise<{ claimId: string }> {
+  cvo: ComplexValidationOutput,
+  agent: ProvenanceAgent
+): Promise<{ claimId: string; claim: Claim }> {
   const { clinicalResources, billingResources } = cvo;
 
   const requests: CreateClaimFromEncounterRequests = [];
@@ -176,17 +240,22 @@ export async function performEffect(
   // Create or update main billing patient from clinical patient
   let mainPatient = billingResources.mainPatient;
   if (!mainPatient) {
-    mainPatient = prepareCopy(clinicalResources.patient, clinicalResources.patient.id!);
+    mainPatient = copyBillingPatient({
+      patient: clinicalResources.patient,
+      clinicalId: clinicalResources.patient.id!,
+      clinicalFriendlyId: getPatientFriendlyId(clinicalResources.patient),
+    });
     mainPatient.id = 'urn:uuid:main-patient';
     requests.push({ method: 'POST', url: '/Patient', resource: mainPatient, fullUrl: mainPatient.id });
     order.push('patient');
   } else {
-    const updatedMainPatient = prepareCopy(clinicalResources.patient, clinicalResources.patient.id!);
+    const updatedMainPatient = copyBillingPatient({
+      patient: clinicalResources.patient,
+      clinicalId: clinicalResources.patient.id!,
+      clinicalFriendlyId: getPatientFriendlyId(clinicalResources.patient),
+    });
     updatedMainPatient.id = mainPatient.id;
-    try {
-      deepStrictEqual(mainPatient, updatedMainPatient);
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    } catch (_) {
+    if (!billingCopyMatches(withoutIdentifier(mainPatient), withoutIdentifier(updatedMainPatient))) {
       mainPatient = updatedMainPatient;
       requests.push({ method: 'PUT', url: `/Patient/${mainPatient.id}`, resource: updatedMainPatient });
       order.push('patient');
@@ -194,23 +263,23 @@ export async function performEffect(
   }
 
   // Create working copy from main patient
-  const claimPatient = prepareWorkingCopy(mainPatient, mainPatient.id!);
+  const claimPatient = copyBillingPatient({
+    patient: mainPatient,
+    workingCopy: true,
+    clinicalId: clinicalResources.patient.id!,
+    clinicalFriendlyId: getPatientFriendlyId(clinicalResources.patient),
+  });
+
   claimPatient.id = 'urn:uuid:claim-patient';
   requests.push({ method: 'POST', url: '/Patient', resource: claimPatient, fullUrl: claimPatient.id });
   order.push('patient');
 
   // Sync accounts, coverages, and subscriber between clinical and billing
-  let mainPatientCoverages: Coverage[] = [];
-  let mainPatientSubscribers: RelatedPerson[] = [];
-  const seenBillingAccountIds = new Set<string>();
+  const mainPatientCoverages: Coverage[] = [];
+  const mainPatientSubscribers: RelatedPerson[] = [];
   const mainPatientAccounts = clinicalResources.accounts.map((a) => {
     const existingBillingAccount = billingResources.accounts.find(
-      (bac) =>
-        bac.extension?.some(
-          (ext) =>
-            ext.url === SOURCE_IDENTIFIER_SYSTEM &&
-            ext.valueReference?.reference === uuidOrUrnReference('Account', a.id!).reference
-        )
+      (bac) => copySourceRef(bac) === uuidOrUrnReference('Account', a.id!).reference
     );
     if (!existingBillingAccount) {
       // No existing billing copy, create new everything
@@ -221,12 +290,18 @@ export async function performEffect(
         mainPatient.id!,
         clinicalResources.payors
       );
-      mainPatientCoverages = covRequests
-        .filter((cov): cov is BatchInputPostRequest<Coverage> => cov.method === 'POST' && cov.url === '/Coverage')
-        .map((cov) => cov.resource);
-      mainPatientSubscribers = covRequests
-        .filter((rp): rp is BatchInputPostRequest<RelatedPerson> => rp.method === 'POST' && rp.url === '/RelatedPerson')
-        .map((rp) => rp.resource);
+      mainPatientCoverages.push(
+        ...covRequests
+          .filter((cov): cov is BatchInputPostRequest<Coverage> => cov.method === 'POST' && cov.url === '/Coverage')
+          .map((cov) => cov.resource)
+      );
+      mainPatientSubscribers.push(
+        ...covRequests
+          .filter(
+            (rp): rp is BatchInputPostRequest<RelatedPerson> => rp.method === 'POST' && rp.url === '/RelatedPerson'
+          )
+          .map((rp) => rp.resource)
+      );
       requests.push(...covRequests);
       order.push(...covOrder);
       const accountCopy = copyAccount(a, mainPatient.id!, mainPatientCoverages);
@@ -237,46 +312,40 @@ export async function performEffect(
       // Update billing copy if changed
       let accountCopy = copyAccount(a, mainPatient.id!, billingResources.coverages);
       accountCopy.id = existingBillingAccount.id;
-      try {
-        deepStrictEqual(existingBillingAccount, accountCopy);
-        mainPatientCoverages = billingResources.coverages;
-        mainPatientSubscribers = billingResources.subscribers;
+      if (billingCopyMatches(existingBillingAccount, accountCopy)) {
+        const accountCoverages = coveragesForAccount(existingBillingAccount, billingResources.coverages);
+        mainPatientCoverages.push(...accountCoverages);
+        mainPatientSubscribers.push(...subscribersForCoverages(accountCoverages, billingResources.subscribers));
         return existingBillingAccount;
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      } catch (_) {
-        // This leaks coverages, but we decided it is safe to do
-        const [covRequests, covOrder] = copyCoverageAndSubscriberForAccount(
-          billingOystehr,
-          clinicalResources.coverages,
-          a,
-          mainPatient.id!,
-          clinicalResources.payors
-        );
-        mainPatientCoverages = covRequests
+      }
+      // This leaks coverages, but we decided it is safe to do
+      const [covRequests, covOrder] = copyCoverageAndSubscriberForAccount(
+        billingOystehr,
+        clinicalResources.coverages,
+        a,
+        mainPatient.id!,
+        clinicalResources.payors
+      );
+      mainPatientCoverages.push(
+        ...covRequests
           .filter((cov): cov is BatchInputPostRequest<Coverage> => cov.method === 'POST' && cov.url === '/Coverage')
-          .map((cov) => cov.resource);
-        mainPatientSubscribers = covRequests
+          .map((cov) => cov.resource)
+      );
+      mainPatientSubscribers.push(
+        ...covRequests
           .filter(
             (rp): rp is BatchInputPostRequest<RelatedPerson> => rp.method === 'POST' && rp.url === '/RelatedPerson'
           )
-          .map((rp) => rp.resource);
-        requests.push(...covRequests);
-        order.push(...covOrder);
-        accountCopy = copyAccount(a, mainPatient.id!, mainPatientCoverages);
-        requests.push({ method: 'PUT', url: `/Account/${existingBillingAccount.id}`, resource: accountCopy });
-        order.push('account');
-        return accountCopy;
-      } finally {
-        seenBillingAccountIds.add(existingBillingAccount.id!);
-      }
+          .map((rp) => rp.resource)
+      );
+      requests.push(...covRequests);
+      order.push(...covOrder);
+      accountCopy = copyAccount(a, mainPatient.id!, mainPatientCoverages);
+      requests.push({ method: 'PUT', url: `/Account/${existingBillingAccount.id}`, resource: accountCopy });
+      order.push('account');
+      return accountCopy;
     }
   });
-  billingResources.accounts
-    .filter((bac) => !seenBillingAccountIds.has(bac.id!))
-    .forEach((bac) => {
-      requests.push({ method: 'DELETE', url: `/Account/${bac.id}` });
-      order.push('account');
-    });
 
   // Create coverage copies for working copy patient
   const claimCoverages = mainPatientCoverages
@@ -308,12 +377,8 @@ export async function performEffect(
       operations: [
         {
           op: 'replace',
-          path: 'link',
-          value: [
-            ...(billingResources.person.link ?? []),
-            { target: uuidOrUrnReference('Patient', mainPatient.id!) },
-            { target: uuidOrUrnReference('Patient', claimPatient.id) },
-          ],
+          path: '/link',
+          value: [...(billingResources.person.link ?? []), { target: uuidOrUrnReference('Patient', claimPatient.id) }],
         },
       ],
       ifMatch: `W/"${billingResources.person.meta?.versionId}"`,
@@ -325,29 +390,121 @@ export async function performEffect(
       resource: {
         resourceType: 'Person',
         link: [
-          { target: { reference: `Patient/${clinicalResources.patient.id!}` } },
           { target: uuidOrUrnReference('Patient', mainPatient.id!) },
           { target: uuidOrUrnReference('Patient', claimPatient.id) },
+        ],
+        extension: [
+          {
+            url: SOURCE_IDENTIFIER_SYSTEM,
+            valueReference: {
+              reference: `Patient/${clinicalResources.patient.id!}`,
+            },
+          },
         ],
       },
     });
   }
   order.push('person');
 
-  const encounterType = determineEncounterType(clinicalResources.appointment);
+  // Create working copy from rendering provider
+  let claimRenderingProvider: Practitioner | undefined;
+  if (billingResources.renderingProvider) {
+    claimRenderingProvider = prepareWorkingCopy<Practitioner>(
+      billingResources.renderingProvider,
+      billingResources.renderingProvider.id!
+    );
+    claimRenderingProvider.id = 'urn:uuid:claim-rendering-provider';
+    requests.push({
+      method: 'POST',
+      url: '/Practitioner',
+      resource: claimRenderingProvider,
+      fullUrl: claimRenderingProvider.id,
+    });
+    order.push('rendering-provider');
+  }
+
+  // Create working copy from billing provider
+  let claimBillingProvider: Organization | undefined;
+  if (billingResources.billingProvider) {
+    claimBillingProvider = prepareWorkingCopy<Organization>(
+      billingResources.billingProvider,
+      billingResources.billingProvider.id!
+    );
+    claimBillingProvider.id = 'urn:uuid:claim-billing-provider';
+    requests.push({
+      method: 'POST',
+      url: '/Organization',
+      resource: claimBillingProvider,
+      fullUrl: claimBillingProvider.id,
+    });
+    order.push('billing-provider');
+  }
+
+  // Create working copy from service facility
+  let claimServiceFacility: Location | undefined;
+  if (billingResources.serviceFacility) {
+    claimServiceFacility = prepareWorkingCopy<Location>(
+      billingResources.serviceFacility,
+      billingResources.serviceFacility.id!
+    );
+    claimServiceFacility.id = 'urn:uuid:claim-service-facility';
+    requests.push({
+      method: 'POST',
+      url: '/Location',
+      resource: claimServiceFacility,
+      fullUrl: claimServiceFacility.id,
+    });
+    order.push('service-facility');
+  }
+
+  const appointmentService = getService(clinicalResources.appointment);
+  if (appointmentService && !billingResources.billingService) {
+    requests.push({
+      method: 'POST',
+      url: '/Basic',
+      resource: {
+        resourceType: 'Basic',
+        code: {
+          text: appointmentService,
+          coding: [{ system: CODE_SYSTEM_SERVICE_CATEGORY_TAG_SYSTEM, code: appointmentService }],
+        },
+      },
+    });
+    order.push('billing-service');
+  }
 
   const claim = buildClaim({
     patientId: claimPatient.id,
     encounter: clinicalResources.encounter,
+    appointment: clinicalResources.appointment,
     diagnoses: clinicalResources.diagnoses,
     procedures: clinicalResources.procedures,
-    coverageRefs: getClaimCoveragesForEncounter(encounterType, mainPatientAccounts, claimCoverages),
-    renderingProvider: billingResources.renderingProvider,
-    serviceFacility: billingResources.serviceFacility,
-    billingProvider: billingResources.billingProvider,
+    medicationAdministrations: clinicalResources.medicationAdministrations,
+    coverageRefs: getClaimCoveragesForEncounter(appointmentService, mainPatientAccounts, claimCoverages),
+    nonInsurancePayer: await resolveNonInsurancePayer(billingOystehr, clinicalResources),
+    renderingProvider: claimRenderingProvider,
+    serviceFacility: claimServiceFacility,
+    billingProvider: claimBillingProvider,
+    accident: clinicalResources.accident,
   });
-  requests.push({ method: 'POST', url: '/Claim', resource: claim });
+  const claimUrn = 'urn:uuid:claim';
+  requests.push({ method: 'POST', url: '/Claim', resource: claim, fullUrl: claimUrn });
   order.push('claim');
+
+  // Creation Provenance for the working claim, written in the same transaction. It targets the
+  // claim's urn:uuid, which the transaction resolves to the real Claim reference.
+  const creationProvenance = claimProvenanceRequest({
+    targetReference: claimUrn,
+    claimReference: claimUrn,
+    after: claim,
+    agent,
+    activity: 'create',
+    recorded: recordedNow(),
+  });
+  if (creationProvenance) {
+    requests.push(creationProvenance);
+    order.push('provenance');
+  }
 
   // Remove urns from id before submitting transaction
   requests.forEach((r) => {
@@ -356,8 +513,9 @@ export async function performEffect(
     }
   });
 
-  const txResult = await billingOystehr.fhir.transaction<BillingFhirResource>({ requests });
-  const entries = (txResult.entry ?? []).map((e) => e.resource).filter(Boolean) as Resource[];
+  console.log('all claim requests', JSON.stringify(requests, undefined, 2));
+  const txResult = await billingOystehr.fhir.transaction<BillingFhirResource | Provenance>({ requests });
+  const entries = (txResult.entry ?? []).map((e) => e.resource);
 
   if (entries.length !== order.length) {
     console.log(
@@ -371,38 +529,30 @@ export async function performEffect(
     throw InternalError;
   }
 
-  const copies: Partial<ClinicalResources> = {};
-  for (let i = 0; i < order.length; i++) {
-    // const expected = requests[i].url.replace('/', '');
-    // Remove leading slash and anything after second slash
-    const secondSlash = requests[i].url.indexOf('/', 1);
-    const expected = requests[i].url.slice(1, secondSlash > 0 ? secondSlash : undefined);
-    if (entries[i].resourceType !== expected) {
-      console.log(requests[i].url, secondSlash, expected);
-      console.log(
-        'Tx results out of order',
-        entries.length,
-        txResult.entry?.length,
-        order.length,
-        requests.length,
-        JSON.stringify(order),
-        expected
-      );
-      throw InternalError;
-    }
-    copies[order[i] as keyof ClinicalResources] = entries[i] as any;
-  }
-  const createdClaim = entries.find((e): e is Claim => e.resourceType === 'Claim');
+  const createdClaim = entries.find((e): e is Claim => e?.resourceType === 'Claim');
   if (!createdClaim || !createdClaim.id) {
     console.log('Claim not created');
     throw InternalError;
   }
 
-  return { claimId: createdClaim.id };
+  // Adopt any payments the stripe webhook recorded before this claim existed
+  try {
+    await reconcilePaymentNoticesForClaim(billingOystehr, createdClaim);
+  } catch (err) {
+    console.error('Failed to reconcile PaymentNotices for new claim', err);
+  }
+
+  return { claimId: createdClaim.id, claim: createdClaim };
 }
 
 function uuidOrUrnReference(resourceType: BillingFhirResource['resourceType'], uuidOrUrn: string): Reference {
   return { reference: uuidOrUrnReferenceString(resourceType, uuidOrUrn) };
+}
+
+// Claim.insurance reference to a coverage copy, carrying the payer's name as the display so history
+// records read as e.g. "Aetna (60054)" instead of a urn/id reference.
+function coverageDisplayReference(coverage: Coverage): Reference {
+  return { ...uuidOrUrnReference('Coverage', coverage.id!), display: coverage.payor?.[0]?.display };
 }
 
 function uuidOrUrnReferenceString(resourceType: BillingFhirResource['resourceType'], uuidOrUrn: string): string {
@@ -412,107 +562,55 @@ function uuidOrUrnReferenceString(resourceType: BillingFhirResource['resourceTyp
   return `${resourceType}/${uuidOrUrn}`;
 }
 
-function determineEncounterType(appointment: Appointment): EncounterType {
-  if (isAppointmentUrgentCare(appointment)) {
-    // Auto is a subset of UC
-    if (isAppointmentAutoAccident(appointment)) {
-      return 'auto';
-    }
-    return 'uc';
-  }
-  if (isAppointmentWorkersComp(appointment)) {
-    return 'wc';
-  }
-  if (isAppointmentOccupationalMedicine(appointment)) {
-    return 'occmed';
-  }
-  throw new Error(`Unknown appointment type: ${getCoding(appointment.serviceCategory, SERVICE_CATEGORY_SYSTEM)?.code}`);
+function getService(appointment: Appointment): string | undefined {
+  return getCoding(appointment?.serviceCategory, SERVICE_CATEGORY_SYSTEM)?.code;
 }
 
 export function getClaimCoveragesForEncounter(
-  encounterType: EncounterType,
+  service: string | undefined,
   mainPatientAccounts: Account[],
   claimCoverages: Coverage[]
 ): CoverageRefs {
-  switch (encounterType) {
-    case 'uc': {
-      const ucAccount = mainPatientAccounts.find(
-        (mpacc) => mpacc.type?.coding?.some((c) => c.system === ACCOUNT_TYPE_CODE_SYSTEM && c.code === 'PBILLACCT')
-      );
-      let primaryCoverage: Coverage | undefined;
-      let secondaryCoverage: Coverage | undefined;
-      console.log('colin', JSON.stringify(ucAccount?.coverage));
-      console.log('colin', JSON.stringify(claimCoverages));
-      ucAccount?.coverage?.forEach((uccov) => {
-        const foundClaimCoverage = claimCoverages.find(
-          (ccov) =>
-            ccov.extension?.find((ccovid) => ccovid.url === SOURCE_IDENTIFIER_SYSTEM)?.valueReference?.reference ===
-            uccov.coverage.reference
-        );
-        if (uccov.priority === 1) {
-          primaryCoverage = foundClaimCoverage;
-        }
-        if (uccov.priority === 2) {
-          secondaryCoverage = foundClaimCoverage;
-        }
-      });
-      return [
-        ...(primaryCoverage
-          ? [{ coverageRef: uuidOrUrnReference('Coverage', primaryCoverage.id!), payorRef: primaryCoverage.payor[0] }]
-          : []),
-        ...(secondaryCoverage
-          ? [
-              {
-                coverageRef: uuidOrUrnReference('Coverage', secondaryCoverage.id!),
-                payorRef: secondaryCoverage.payor[0],
-              },
-            ]
-          : []),
-      ];
+  return selectClaimCoverages(service, mainPatientAccounts, claimCoverages, copySourceRef).map((coverage) => ({
+    coverageRef: coverageDisplayReference(coverage),
+    payorRef: coverage.payor[0],
+  }));
+}
+
+// The visit's NIO employer: a visit-level selection on the Encounter (pre-op) wins, else the
+// patient's occ-med Account owner (occupational medicine). Only billing-app NIO reference tokens
+// become the claim's non-insurance payer — the token's uuid IS the billing-side NIO Organization id,
+// so the claim references it natively. Legacy clinical employer Organizations have no billing copy
+// and leave the claim unstamped, as before.
+export async function resolveNonInsurancePayer(
+  billingOystehr: Oystehr,
+  clinicalResources: Pick<ClinicalResources, 'encounter' | 'occupationalMedicineAccount'>
+): Promise<Reference | undefined> {
+  const payer = getNonInsurancePayerReference(
+    clinicalResources.encounter,
+    clinicalResources.occupationalMedicineAccount
+  );
+  if (!payer) return undefined;
+  const nioId = payer.reference!.split('/')[1];
+  let display = payer.display;
+  if (!display) {
+    // Claim history snapshots displays at write time, so backfill a missing one from the NIO itself.
+    try {
+      display = (await billingOystehr.fhir.get<Organization>({ resourceType: 'Organization', id: nioId })).name;
+    } catch (error) {
+      console.error(`Failed to resolve name for non-insurance payer Organization/${nioId}`, error);
     }
-    case 'wc': {
-      const wcAccount = mainPatientAccounts.find(
-        (mpacc) => mpacc.type?.coding?.some((c) => c.system === ACCOUNT_TYPE_CODE_SYSTEM && c.code === 'WCMOPACCT')
-      );
-      let wcCoverage: Coverage | undefined;
-      wcAccount?.coverage?.forEach((wccov) => {
-        const foundClaimCoverage = claimCoverages.find(
-          (ccov) =>
-            ccov.extension?.find((ccovid) => ccovid.url === SOURCE_IDENTIFIER_SYSTEM)?.valueReference?.reference ===
-            wccov.coverage.reference
-        );
-        if (wccov.priority === 1) {
-          wcCoverage = foundClaimCoverage;
-        }
-      });
-      return [
-        ...(wcCoverage
-          ? [{ coverageRef: uuidOrUrnReference('Coverage', wcCoverage.id!), payorRef: wcCoverage.payor[0] }]
-          : []),
-      ];
-    }
-    case 'occmed': {
-      // No insurance
-      // TODO: Support non-insurance payers
-      return [];
-    }
-    case 'auto':
-      // Really depends on the case, resolve manually
-      return [];
   }
+  return { reference: `Organization/${nioId}`, ...(display ? { display } : {}) };
 }
 
 export function copyAccount(account: Account, patientId: string, billingCoverages?: Coverage[]): Account {
-  const copy = prepareCopy(account, account.id!);
+  const copy = prepareCopy<Account>(account, account.id!);
   copy.subject = [uuidOrUrnReference('Patient', patientId)];
   if (billingCoverages?.length) {
     copy.coverage = account.coverage
       ?.map((acov): AccountCoverage | undefined => {
-        const billingCoverage = billingCoverages?.find(
-          (bcov) =>
-            bcov.extension?.find((ccovid) => ccovid.url === SOURCE_IDENTIFIER_SYSTEM)?.valueReference?.reference ===
-            acov.coverage.reference
-        );
+        const billingCoverage = billingCoverages?.find((bcov) => copySourceRef(bcov) === acov.coverage.reference);
         if (billingCoverage) {
           return {
             coverage: uuidOrUrnReference('Coverage', billingCoverage.id!),
@@ -526,6 +624,18 @@ export function copyAccount(account: Account, patientId: string, billingCoverage
   return copy;
 }
 
+export function coveragesForAccount(account: Account, coverages: Coverage[]): Coverage[] {
+  return coverages.filter((cov) =>
+    (account.coverage ?? []).some((acov) => acov.coverage.reference?.replace('Coverage/', '') === cov.id)
+  );
+}
+
+export function subscribersForCoverages(coverages: Coverage[], subscribers: RelatedPerson[]): RelatedPerson[] {
+  return subscribers.filter((sub) =>
+    coverages.some((cov) => cov.subscriber?.reference?.replace('RelatedPerson/', '') === sub.id)
+  );
+}
+
 export function copyCoverageAndSubscriberForAccount(
   billingOystehr: Oystehr,
   coverages: Coverage[],
@@ -536,15 +646,11 @@ export function copyCoverageAndSubscriberForAccount(
   const requests: CreateClaimFromEncounterRequests = [];
   const order: string[] = [];
   // Find full Coverage resources related to this Account
-  coverages
-    .filter((ccov) =>
-      (account.coverage ?? []).some((acov) => acov.coverage.reference?.replace('Coverage/', '') === ccov.id)
-    )
-    .forEach((ccov) => {
-      const [covRequests, covOrder] = copyCoverageAndSubscriber(billingOystehr, ccov, patientUuidOrUrn, payors);
-      requests.push(...covRequests);
-      order.push(...covOrder);
-    });
+  coveragesForAccount(account, coverages).forEach((ccov) => {
+    const [covRequests, covOrder] = copyCoverageAndSubscriber(billingOystehr, ccov, patientUuidOrUrn, payors);
+    requests.push(...covRequests);
+    order.push(...covOrder);
+  });
   return [requests, order];
 }
 
@@ -559,18 +665,22 @@ export function copyCoverageAndSubscriber(
   const requests: CreateClaimFromEncounterRequests = [];
   const order: string[] = [];
   const cleanedCoverageId = coverage.id?.replace('urn:uuid:', '');
-  const copy = workingCopy ? prepareWorkingCopy(coverage, coverage.id!) : prepareCopy(coverage, coverage.id!);
+  let copy = workingCopy
+    ? prepareWorkingCopy<Coverage>(coverage, coverage.id!)
+    : prepareCopy<Coverage>(coverage, coverage.id!);
   copy.beneficiary = uuidOrUrnReference('Patient', patientUuidOrUrn);
   // Subscriber is patient by default, check for contained RelatedPerson
   let subscriberId = patientUuidOrUrn;
-  if (copy.subscriber?.reference?.startsWith('#') && copy.contained && copy.contained.length > 0) {
+  if (coverage.subscriber?.reference?.startsWith('#') && coverage.contained && coverage.contained.length > 0) {
     // Subscriber is contained on the coverage
-    const containedSubscriber = copy.contained.find(
+    const containedSubscriber = coverage.contained.find(
       (contained): contained is RelatedPerson =>
-        contained.id === copy.subscriber?.reference?.replace('#', '') && contained.resourceType === 'RelatedPerson'
+        contained.id === coverage.subscriber?.reference?.replace('#', '') && contained.resourceType === 'RelatedPerson'
     );
     if (containedSubscriber) {
-      const subscriber = workingCopy ? prepareWorkingCopy(containedSubscriber) : prepareCopy(containedSubscriber);
+      const subscriber = workingCopy
+        ? prepareWorkingCopy<RelatedPerson>(containedSubscriber)
+        : prepareCopy<RelatedPerson>(containedSubscriber);
       subscriber.id = `urn:uuid:${workingCopy ? 'claim' : 'billing'}-coverage-rp-${cleanedCoverageId}`;
       subscriber.patient = uuidOrUrnReference('Patient', patientUuidOrUrn);
       requests.push({
@@ -581,13 +691,12 @@ export function copyCoverageAndSubscriber(
       });
       order.push('relatedperson');
       subscriberId = subscriber.id;
-      copy.contained = copy.contained.filter((contained) => contained.id !== containedSubscriber.id);
     }
   } else if (coverageSubscriber) {
     // Subscriber was found and passed in to the function
     const subscriber = workingCopy
-      ? prepareWorkingCopy(coverageSubscriber, coverageSubscriber.id!)
-      : prepareCopy(coverageSubscriber, coverageSubscriber.id!);
+      ? prepareWorkingCopy<RelatedPerson>(coverageSubscriber, coverageSubscriber.id!)
+      : prepareCopy<RelatedPerson>(coverageSubscriber, coverageSubscriber.id!);
     subscriber.id = `urn:uuid:${workingCopy ? 'claim' : 'billing'}-coverage-rp-${cleanedCoverageId}`;
     requests.push({
       method: 'POST',
@@ -599,16 +708,34 @@ export function copyCoverageAndSubscriber(
     subscriberId = subscriber.id;
   }
   copy.subscriber = uuidOrUrnReference('RelatedPerson', subscriberId);
-  // Move all coverages to payer URLs
-  const internalRefId = copy.payor[0].reference?.replace('Organization/', '');
-  if (internalRefId && isValidUUID(internalRefId)) {
+  // Move all coverages to payer URLs, carrying the payer's display name so downstream references
+  // (claim.insurer, history records) stay human-readable.
+  const payorRef = copy.payor[0].reference;
+  const internalRefId = payorRef?.replace('Organization/', '');
+  const customInsuranceOrgId = extractCustomInsuranceOrgIdFromReferenceUrl(payorRef);
+  if (customInsuranceOrgId) {
+    // A custom insurance organization is billing-owned: the clinical token's id IS the billing
+    // Organization id, so the copy references it natively, the same way billing's own Coverage
+    // builder does (see buildPayorReference in ../shared).
+    const org = payors.find((p) => p.id === customInsuranceOrgId);
+    copy.payor = [{ reference: `Organization/${customInsuranceOrgId}`, display: payerDisplay(org) }];
+  } else if (internalRefId && isValidUUID(internalRefId)) {
     // TODO: this does not support billing copies of non-insurance payers
     const org = payors.find((p) => p.id === internalRefId);
     const payerId = getPayerId(org);
     if (payerId) {
-      copy.payor = [{ reference: billingOystehr.rcm.constructPayerUrl({ id: payerId }) }];
+      copy.payor = [{ reference: billingOystehr.rcm.constructPayerUrl({ id: payerId }), display: payerDisplay(org) }];
     }
+  } else if (payorRef && !copy.payor[0].display) {
+    // Payor is already a payer URL: resolve its display from the payer organizations fetched upstream.
+    const org = payors.find((p) => {
+      const payerId = getPayerId(p);
+      return payerId && billingOystehr.rcm.constructPayerUrl({ id: payerId }) === payorRef;
+    });
+    if (org) copy.payor = [{ reference: payorRef, display: payerDisplay(org) }];
   }
+  const planTypeCode = getCandidPlanTypeCodeFromCoverage(coverage);
+  if (planTypeCode) copy = setCoveragePlanType(copy, planTypeCode);
   copy.id = `urn:uuid:${workingCopy ? 'claim' : 'billing'}-coverage-${cleanedCoverageId}`;
   requests.push({
     method: 'POST',
@@ -620,14 +747,39 @@ export function copyCoverageAndSubscriber(
   return [requests, order];
 }
 
+// Manually look up payors because they may be internal Organization resources, Oystehr RCM payer URLs,
+// or custom insurance organization tokens (billing-owned, so read from the billing project).
+export async function resolveCoveragePayors(
+  clinicalOystehr: Oystehr,
+  billingOystehr: Oystehr,
+  coverages: Coverage[]
+): Promise<Organization[]> {
+  return Promise.all(
+    coverages.map<Promise<Organization>>(async (c) => {
+      // Assume single payor per coverage
+      const payorRef = c.payor?.[0]?.reference;
+      if (!payorRef) throw FHIR_RESOURCE_NOT_FOUND('Organization');
+      const customInsuranceOrgId = extractCustomInsuranceOrgIdFromReferenceUrl(payorRef);
+      if (customInsuranceOrgId) {
+        return billingOystehr.fhir.get<Organization>({ resourceType: 'Organization', id: customInsuranceOrgId });
+      }
+      return isValidUUID(payorRef.replace('Organization/', ''))
+        ? clinicalOystehr.fhir.get<Organization>({
+            resourceType: 'Organization',
+            id: payorRef.replace('Organization/', ''),
+          })
+        : clinicalOystehr.rcm.getPayerByUrl({ url: payorRef });
+    })
+  );
+}
+
 async function getClinicalResources(
   oystehr: Oystehr,
+  billingOystehr: Oystehr,
   params: CreateClaimFromEncounterParams
 ): Promise<ClinicalResources> {
   const resources = (
-    await oystehr.fhir.search<
-      Encounter | Patient | Location | Practitioner | Account | Coverage | Condition | Procedure
-    >({
+    await oystehr.fhir.search<Encounter | Patient | Location | Practitioner | Account | Condition | Procedure>({
       resourceType: 'Encounter',
       params: [
         {
@@ -661,15 +813,11 @@ async function getClinicalResources(
           value: 'Encounter:account',
         },
         {
-          // Include account coverages
-          name: '_include',
-          value: 'Account:coverage:Coverage',
-        },
-        {
           // Include diagnosis
           name: '_include',
           value: 'Encounter:diagnosis',
         },
+        { name: '_revinclude', value: 'Condition:encounter' },
         {
           // Reverse include procedures
           name: '_revinclude',
@@ -684,6 +832,12 @@ async function getClinicalResources(
 
   const patient = findRef<Patient>(resources, encounter.subject?.reference);
   if (!patient) throw FHIR_RESOURCE_NOT_FOUND('Patient');
+  const patientAddress = patient.address?.[0];
+  if (!patientAddress?.line?.[0] || !patientAddress.city || !patientAddress.state || !patientAddress.postalCode) {
+    throw INVALID_INPUT_ERROR(
+      'Patient address is required. Add street, city, state, and ZIP code in the clinical app, then retry.'
+    );
+  }
 
   const appointment = findRef<Appointment>(resources, encounter.appointment?.[0].reference);
   if (!appointment) throw FHIR_RESOURCE_NOT_FOUND('Appointment');
@@ -693,35 +847,107 @@ async function getClinicalResources(
   if (!location) throw FHIR_RESOURCE_NOT_FOUND('Location');
 
   const practitioners = resources.filter((r): r is Practitioner => r.resourceType === 'Practitioner');
-  if (!practitioners.length) throw FHIR_RESOURCE_NOT_FOUND('Practitioner');
+  const attendingProviderId = getAttendingPractitionerId(encounter);
+  const attendingProvider = practitioners.find((p) => p.id === attendingProviderId);
+  if (!attendingProviderId || !attendingProvider) {
+    throw INVALID_INPUT_ERROR(
+      'The encounter has no attending provider. Set the attending provider in the clinical app, then retry.'
+    );
+  }
+  if (!getNPIIdentifier(attendingProvider)?.value) {
+    throw INVALID_INPUT_ERROR(
+      'The clinical attending provider has no NPI. Add its NPI in the clinical app, then retry.'
+    );
+  }
 
   const accounts = resources.filter((r): r is Account => r.resourceType === 'Account');
   if (!accounts.length) throw FHIR_RESOURCE_NOT_FOUND('Account');
 
-  const coverages = resources.filter((r): r is Coverage => r.resourceType === 'Coverage');
-  if (!coverages.length) throw FHIR_RESOURCE_NOT_FOUND('Coverage');
-
-  const diagnoses = resources.filter((r): r is Condition => r.resourceType === 'Condition');
+  let diagnoses = (encounter.diagnosis ?? []).flatMap((diagnosis) => {
+    const condition = resources.find(
+      (r): r is Condition => r.resourceType === 'Condition' && diagnosis.condition.reference === `Condition/${r.id}`
+    );
+    return condition ? [condition] : [];
+  });
   if (!diagnoses.length) throw FHIR_RESOURCE_NOT_FOUND('Condition');
+  const primaryDiagnosisId = encounter.diagnosis
+    ?.find((d) => d.rank === 1)
+    ?.condition.reference?.replace('Condition/', '');
+  if (primaryDiagnosisId) {
+    const primaryDiagnosis = diagnoses.find((d) => d.id === primaryDiagnosisId);
+    diagnoses = [
+      ...(primaryDiagnosis ? [primaryDiagnosis] : []),
+      ...diagnoses.filter((d) => d.id !== primaryDiagnosisId),
+    ];
+  }
 
-  const procedures = resources.filter((r): r is Procedure => r.resourceType === 'Procedure');
+  // Filter out extra procedure data attached to the Encounter
+  const procedures = resources.filter(
+    (r): r is Procedure =>
+      r.resourceType === 'Procedure' &&
+      (chartDataResourceHasMetaTagByCode(r, 'cpt-code') || chartDataResourceHasMetaTagByCode(r, 'em-code'))
+  );
   if (!procedures.length) throw FHIR_RESOURCE_NOT_FOUND('Procedure');
 
-  const payors = await Promise.all(
-    coverages.map<Promise<Organization>>(async (c) => {
-      // Assume single payor per coverage
-      const payorRef = c.payor?.[0]?.reference;
-      if (!payorRef) throw FHIR_RESOURCE_NOT_FOUND('Organization');
-      return isValidUUID(payorRef.replace('Organization/', ''))
-        ? oystehr.fhir.get<Organization>({
-            resourceType: 'Organization',
-            id: payorRef.replace('Organization/', ''),
-          })
-        : oystehr.rcm.getPayerByUrl({ url: payorRef });
-    })
+  // In-house medication procedures point at their MedicationAdministration, which carries the
+  // NDC and dose for the claim line.
+  const medicationAdministrationIds = [
+    ...new Set(
+      procedures
+        .flatMap((procedure) => procedure.partOf ?? [])
+        .map((ref) => ref.reference)
+        .filter((ref): ref is string => !!ref?.startsWith('MedicationAdministration/'))
+        .map((ref) => ref.replace('MedicationAdministration/', ''))
+    ),
+  ];
+  const medicationAdministrations = medicationAdministrationIds.length
+    ? (
+        await oystehr.fhir.search<MedicationAdministration>({
+          resourceType: 'MedicationAdministration',
+          params: [{ name: '_id', value: medicationAdministrationIds.join(',') }],
+        })
+      ).unbundle()
+    : [];
+
+  // Manually look up coverages because FHIR doesn't support Account:coverage include
+  const coverageIds = accounts.flatMap<string>((account) =>
+    (account.coverage ?? [])
+      .map<string | undefined>((coverage) => coverage.coverage.reference?.replace('Coverage/', ''))
+      .filter<string>((coverageId): coverageId is string => !!coverageId)
+  );
+  let coverages: Coverage[] = [];
+  if (coverageIds.length > 0) {
+    coverages = (
+      await oystehr.fhir.search<Coverage>({
+        resourceType: 'Coverage',
+        params: [{ name: '_id', value: coverageIds.join(',') }],
+      })
+    ).unbundle();
+  }
+  coverages = coverages.filter(
+    (c) => c.payor?.[0]?.reference && c.payor[0].reference !== oystehr.rcm.constructPayerUrl({ id: '00000' })
   );
 
-  const defaultBillingProviderRef = params.secrets.DEFAULT_BILLING_PROVIDER;
+  const payors = await resolveCoveragePayors(oystehr, billingOystehr, coverages);
+
+  // The occ-med Account (owner = the visit's employer) is patient-level and not consistently
+  // referenced from the Encounter, so for employer-billed visits fall back to a patient search
+  // when the encounter-linked accounts don't include it.
+  let occupationalMedicineAccount = findOccupationalMedicineAccount(accounts);
+  if (!occupationalMedicineAccount && isEmployerBilledVisit(getService(appointment), encounter)) {
+    const patientAccounts = (
+      await oystehr.fhir.search<Account>({
+        resourceType: 'Account',
+        params: [
+          { name: 'patient', value: patient.id! },
+          { name: 'status', value: 'active' },
+        ],
+      })
+    ).unbundle();
+    occupationalMedicineAccount = findOccupationalMedicineAccount(patientAccounts);
+  }
+
+  const defaultBillingProviderRef = params.secrets.DEFAULT_BILLING_RESOURCE;
   if (!defaultBillingProviderRef) throw FHIR_RESOURCE_NOT_FOUND('Organization');
   const billingProviders = (
     await oystehr.fhir.search<Organization>({
@@ -736,6 +962,8 @@ async function getClinicalResources(
   ).unbundle();
   if (!billingProviders.length) throw FHIR_RESOURCE_NOT_FOUND('Organization');
 
+  const accident = makeAccidentDTOFromFhirResources(resources);
+
   return {
     encounter,
     patient,
@@ -748,89 +976,157 @@ async function getClinicalResources(
     payors,
     diagnoses,
     procedures,
+    ...(medicationAdministrations.length ? { medicationAdministrations } : {}),
+    ...(accident ? { accident } : {}),
+    ...(occupationalMedicineAccount ? { occupationalMedicineAccount } : {}),
+  };
+}
+
+export async function findMainBillingPatient(
+  billingOystehr: Oystehr,
+  clinicalPatientId: string
+): Promise<{ total: number; patient?: Patient }> {
+  const { total, results } = await searchPatientsByClinicalIds({
+    oystehr: billingOystehr,
+    baseSearchParams: [
+      {
+        name: '_sort',
+        value: '-_lastUpdated',
+      },
+      {
+        name: '_total',
+        value: 'accurate',
+      },
+      ...EXCLUDE_WORKING_COPIES_PARAMS,
+    ],
+    offset: 0,
+    pageSize: 1,
+    uuid: clinicalPatientId,
+  });
+  return {
+    total,
+    patient: results[0],
   };
 }
 
 async function findExistingBillingResources(
   billingOystehr: Oystehr,
-  originals: ClinicalResources,
+  clinicalResources: ClinicalResources,
   secrets: Secrets
 ): Promise<BillingResources> {
-  const personSearch = (
-    await billingOystehr.fhir.search<Person | Patient | Account | Coverage | RelatedPerson>({
-      resourceType: 'Person',
-      params: [
-        { name: 'link', value: `Patient/${originals.patient.id}` },
-        { name: 'include', value: 'patient' },
-        {
-          // Include account coverages
-          name: '_revinclude',
-          value: 'Account:patient:Patient',
-        },
-        {
-          // Include account coverages
-          name: '_include',
-          value: 'Account:coverage:Coverage',
-        },
-        {
-          // Include coverage subscribers
-          name: '_include',
-          value: 'Coverage:subscriber:RelatedPerson',
-        },
-      ],
-    })
-  ).unbundle();
-  const existingPersons = personSearch.filter((r): r is Person => r.resourceType === 'Person');
-  if (existingPersons.length > 1) {
-    await sendErrors(
-      new Error(`More than one billing person for Patient/${originals.patient.id}`),
-      getSecret(SecretsKeys.ENVIRONMENT, secrets)
-    );
-  }
-  const existingPerson = existingPersons.length ? existingPersons[0] : undefined;
   // Main patient is the patient of record on billing app side that we stamp out per-claim copies from
-  const existingMainPatients = personSearch.filter(
-    (r): r is Patient =>
-      r.resourceType === 'Patient' &&
-      !r.meta?.tag?.some(
-        (t) => t.system === BILLING_WORKING_COPY_TAG.system && t.code === BILLING_WORKING_COPY_TAG.code
-      )
-  );
-  if (existingMainPatients.length > 1) {
+  const mainPatientSearch = await findMainBillingPatient(billingOystehr, clinicalResources.patient.id!);
+  if (mainPatientSearch.total > 1) {
     await sendErrors(
-      new Error(`More than one main billing patient for Patient/${originals.patient.id}`),
+      new Error(`More than one main billing patient for Patient/${clinicalResources.patient.id}`),
       getSecret(SecretsKeys.ENVIRONMENT, secrets)
     );
   }
-  const existingMainPatient = existingMainPatients.length ? existingMainPatients[0] : undefined;
-  const existingAccounts = personSearch.filter((r): r is Account => r.resourceType === 'Account');
-  const existingCoverages = personSearch.filter((r): r is Coverage => r.resourceType === 'Coverage');
-  const existingSubscribers = personSearch.filter((r): r is RelatedPerson => r.resourceType === 'RelatedPerson');
+  const existingMainPatient = mainPatientSearch.patient;
 
+  let existingPerson: Person | undefined;
+  let existingAccounts: Account[] = [];
+  if (existingMainPatient) {
+    // Find billing cross-Patient Person resource
+    const personSearch = (
+      await billingOystehr.fhir.search<Person | Patient | Account>({
+        resourceType: 'Person',
+        params: [
+          { name: 'link', value: `Patient/${existingMainPatient.id}` },
+          { name: '_include', value: 'Person:patient' },
+          {
+            // Include account coverages
+            name: '_revinclude',
+            value: 'Account:patient:Patient',
+          },
+        ],
+      })
+    ).unbundle();
+    const existingPersons = personSearch.filter((r): r is Person => r.resourceType === 'Person');
+    if (existingPersons.length > 1) {
+      await sendErrors(
+        new Error(`More than one billing person for Patient/${clinicalResources.patient.id}`),
+        getSecret(SecretsKeys.ENVIRONMENT, secrets)
+      );
+    }
+    existingPerson = existingPersons.length ? existingPersons[0] : undefined;
+
+    // Account resources that link billing-side Coverages with the main billing Patient
+    existingAccounts = personSearch.filter((r): r is Account => r.resourceType === 'Account');
+  }
+
+  // Separately look up coverages and subscribers because FHIR doesn't support Account:coverage include
+  const coverageIds = existingAccounts.flatMap<string>((account) =>
+    (account.coverage ?? [])
+      .map<string | undefined>((coverage) => coverage.coverage.reference?.replace('Coverage/', ''))
+      .filter<string>((coverageId): coverageId is string => !!coverageId)
+  );
+  let existingCoverages: Coverage[] = [];
+  let existingSubscribers: RelatedPerson[] = [];
+  if (coverageIds.length > 0) {
+    const coverageSearch = (
+      await billingOystehr.fhir.search<Coverage | RelatedPerson>({
+        resourceType: 'Coverage',
+        params: [
+          { name: '_id', value: coverageIds.join(',') },
+          {
+            // Include coverage subscribers
+            name: '_include',
+            value: 'Coverage:subscriber',
+          },
+        ],
+      })
+    ).unbundle();
+    existingCoverages = coverageSearch.filter((r): r is Coverage => r.resourceType === 'Coverage');
+    existingSubscribers = coverageSearch.filter((r): r is RelatedPerson => r.resourceType === 'RelatedPerson');
+  }
+
+  // Match the service facility by exact name.
   const serviceFacilitySearch = (
     await billingOystehr.fhir.search<Location>({
       resourceType: 'Location',
       params: [
         {
-          name: 'identifier',
-          value: `${FHIR_IDENTIFIER_NPI}|${getNPIIdentifier(originals.location)}`,
+          name: 'name:exact',
+          value: clinicalResources.location.name!,
         },
+        {
+          name: 'status',
+          value: 'active',
+        },
+        { name: '_count', value: '2' },
+        ...EXCLUDE_WORKING_COPIES_PARAMS,
       ],
     })
   ).unbundle();
-  const matchingServiceFacility = serviceFacilitySearch.length > 0 ? serviceFacilitySearch[0] : undefined;
+  const matchingServiceFacilities = serviceFacilitySearch.filter(
+    (facility) => facility.name === clinicalResources.location.name
+  );
+  if (matchingServiceFacilities.length > 1) {
+    throw INVALID_INPUT_ERROR(
+      `Multiple active billing service facilities are named "${clinicalResources.location.name}". Keep one active facility with that name in billing, then retry.`
+    );
+  }
 
+  // Look for rendering providers that match NPIs for Practitioners involved in the Encounter
   const matchingPractitioners = (
     await Promise.all(
-      originals.practitioners.map<Promise<Practitioner | undefined>>(async (p) => {
+      clinicalResources.practitioners.map<Promise<Practitioner | undefined>>(async (p) => {
+        const npi = getNPIIdentifier(p)?.value;
+        if (!npi) return undefined;
         const practitionerSearch = (
           await billingOystehr.fhir.search<Practitioner>({
             resourceType: 'Practitioner',
             params: [
               {
                 name: 'identifier',
-                value: `${FHIR_IDENTIFIER_NPI}|${getNPIIdentifier(p)}`,
+                value: `${FHIR_IDENTIFIER_NPI}|${npi}`,
               },
+              {
+                name: '_tag',
+                value: `${PROVIDER_ROLE_TAG}|${PROVIDER_ROLE_RENDERING}`,
+              },
+              ...EXCLUDE_WORKING_COPIES_PARAMS,
             ],
           })
         ).unbundle();
@@ -838,11 +1134,9 @@ async function findExistingBillingResources(
       })
     )
   ).filter((p): p is Practitioner => !!p);
-  const clinicalAttendingProviderRef = originals.encounter.participant?.find(
-    (part) => part.type?.some((t) => t.coding?.find((c) => c.system === PARTICIPATION_CODE_SYSTEM)?.code === 'ATND')
-  )?.individual?.reference;
-  const clinicalAttendingProvider = originals.practitioners.find(
-    (prac) => clinicalAttendingProviderRef && prac.id === clinicalAttendingProviderRef.replace('Practitioner/', '')
+  const clinicalAttendingProviderId = getAttendingPractitionerId(clinicalResources.encounter);
+  const clinicalAttendingProvider = clinicalResources.practitioners.find(
+    (prac) => prac.id === clinicalAttendingProviderId
   );
   const renderingProvider = matchingPractitioners.find(
     (prac) =>
@@ -852,18 +1146,36 @@ async function findExistingBillingResources(
       getNPIIdentifier(prac)?.value === getNPIIdentifier(clinicalAttendingProvider)?.value
   );
 
+  // Look for the billing provider with an NPI matching the clinical "default billing resource"
   const billingProviderSearch = (
     await billingOystehr.fhir.search<Organization>({
       resourceType: 'Organization',
       params: [
         {
           name: 'identifier',
-          value: `${FHIR_IDENTIFIER_NPI}|${getNPIIdentifier(originals.billingProvider)}`,
+          value: `${FHIR_IDENTIFIER_NPI}|${getNPIIdentifier(clinicalResources.billingProvider)?.value}`,
         },
+        { name: '_tag', value: `${PROVIDER_ROLE_TAG}|${PROVIDER_ROLE_BILLING}` },
+        ...EXCLUDE_WORKING_COPIES_PARAMS,
       ],
     })
   ).unbundle();
   const matchingBillingProvider = billingProviderSearch.length > 0 ? billingProviderSearch[0] : undefined;
+
+  // Look for the "billing service" (urgent-care, workers-comp, etc) matching the appointment's serviceCategory
+  let billingService: Basic | undefined;
+  const appointmentService = getService(clinicalResources.appointment);
+  if (appointmentService) {
+    const serviceSearch = (
+      await billingOystehr.fhir.search<Basic>({
+        resourceType: 'Basic',
+        params: [{ name: 'code', value: `${CODE_SYSTEM_SERVICE_CATEGORY_TAG_SYSTEM}|${appointmentService}` }],
+      })
+    ).unbundle();
+    if (serviceSearch.length) {
+      billingService = serviceSearch[0];
+    }
+  }
 
   return {
     person: existingPerson,
@@ -873,103 +1185,292 @@ async function findExistingBillingResources(
     subscribers: existingSubscribers,
     practitioners: matchingPractitioners,
     renderingProvider: renderingProvider,
-    serviceFacility: matchingServiceFacility,
+    serviceFacility: matchingServiceFacilities[0],
     billingProvider: matchingBillingProvider,
+    billingService,
   };
+}
+
+// Initial AR Stage for a claim built from an encounter. Precedence (first match wins): the visit's
+// payment selection (employer / insurance / self), then an occupational-medicine visit, then whether
+// any coverage is present. Workers'-comp carries a WC coverage, so it falls out as Insurance Payer AR.
+export function determineArStage(resources: ClaimResources): string {
+  const paymentVariant = getPaymentVariantFromEncounter(resources.encounter);
+  if (paymentVariant === PaymentVariant.employer) return AR_STAGE.nonInsurancePayer;
+  if (paymentVariant === PaymentVariant.insurance) return AR_STAGE.insurancePayer;
+  if (paymentVariant === PaymentVariant.selfPay) return AR_STAGE.patient;
+  if (isAppointmentOccupationalMedicine(resources.appointment)) return AR_STAGE.nonInsurancePayer;
+  return resources.coverageRefs.length > 0 ? AR_STAGE.insurancePayer : AR_STAGE.patient;
 }
 
 function buildClaim(resources: ClaimResources): Claim {
   const now = new Date().toISOString().slice(0, 10);
+  const serviceCoding = getServiceCoding(resources.appointment);
+
+  // AR Stage tag + the stage's auto-initialized progress status (e.g. Insurance AR Status -> "Created").
+  const claimStatusTags = claimStatusValuesToTags(withArStageInitialization({ arStage: determineArStage(resources) }));
+  const nonInsurancePayerId = resources.nonInsurancePayer?.reference?.split('/')[1];
 
   const claim: Claim = {
     resourceType: 'Claim',
+    identifier: [
+      // Backlink to the source clinical encounter; also the key complexValidation() dedups on.
+      { system: ottehrIdentifierSystem('claim-encounter-id'), value: resources.encounter.id! },
+      // Backlink to the source clinical appointment — the EHR /visit/<id> route key for jumping to clinical.
+      { system: ottehrIdentifierSystem('claim-appointment-id'), value: resources.appointment.id! },
+    ],
     status: 'draft',
-    meta: { tag: [{ system: CURRENT_STATUS_TAG_SYSTEM, code: 'open' }] },
-    type: { coding: [{ system: CODE_SYSTEM_CLAIM_TYPE, code: 'professional' }] },
+    meta: {
+      tag: [
+        { system: CURRENT_STATUS_TAG_SYSTEM, code: 'open' },
+        getClaimTypeCoding(),
+        ...(serviceCoding ? [serviceCoding] : []),
+        ...claimStatusTags,
+        ...(nonInsurancePayerId ? [claimNonInsurancePayerTag(nonInsurancePayerId)] : []),
+      ],
+    },
+    type: { coding: [getClaimTypeCoding()] },
     use: 'claim',
     created: now,
+    extension: [
+      ...getDefaultClaimSubmissionExtensions(),
+      ...(resources.nonInsurancePayer ? [claimNonInsurancePayerExtension(resources.nonInsurancePayer)] : []),
+      ...getAccidentExtensions(resources.accident),
+    ],
     patient: uuidOrUrnReference('Patient', resources.patientId),
     provider: resources.billingProvider?.id
-      ? { reference: `Organization/${resources.billingProvider.id}` }
+      ? {
+          ...uuidOrUrnReference('Organization', resources.billingProvider.id),
+          display: resourceDisplayName(resources.billingProvider),
+        }
       : { display: 'Unknown' },
-    facility: resources.serviceFacility ? { reference: `Location/${resources.serviceFacility.id}` } : undefined,
-    insurer: resources.coverageRefs[0].payorRef ? resources.coverageRefs[0].payorRef : undefined,
-    insurance: resources.coverageRefs.map((cov, i) => ({
-      sequence: i + 1,
-      focal: i === 0,
-      coverage: cov.coverageRef,
-    })),
-    careTeam: resources.renderingProvider
+    facility: resources.serviceFacility?.id
+      ? {
+          ...uuidOrUrnReference('Location', resources.serviceFacility.id),
+          display: resourceDisplayName(resources.serviceFacility),
+        }
+      : undefined,
+    insurer: resources.coverageRefs.length
+      ? resources.coverageRefs[0].payorRef
+        ? resources.coverageRefs[0].payorRef
+        : undefined
+      : undefined,
+    insurance: ensureClaimInsurance(
+      resources.coverageRefs.map((cov, i) => ({
+        sequence: i + 1,
+        focal: i === 0,
+        coverage: cov.coverageRef,
+      }))
+    ),
+    careTeam: resources.renderingProvider?.id
       ? [
           {
             sequence: 1,
-            provider: { reference: `Practitioner/${resources.renderingProvider.id}` },
-            role: { coding: [{ system: CODE_SYSTEM_OYSTEHR_RCM_CMS1500_REFERRING_PROVIDER_TYPE, code: '82' }] },
+            provider: {
+              ...uuidOrUrnReference('Practitioner', resources.renderingProvider.id),
+              display: resourceDisplayName(resources.renderingProvider),
+            },
+            role: { coding: [{ system: CODE_SYSTEM_OYSTEHR_CLAIM_REFERRING_PROVIDER_TYPE, code: '82' }] },
+          },
+          {
+            sequence: 2,
+            provider: {
+              ...uuidOrUrnReference('Practitioner', resources.renderingProvider.id),
+              display: resourceDisplayName(resources.renderingProvider),
+            },
+            role: { coding: [{ system: CODE_SYSTEM_OYSTEHR_CLAIM_REFERRING_PROVIDER_TYPE, code: '71' }] },
           },
         ]
       : undefined,
     diagnosis: resources.diagnoses
       ? resources.diagnoses.map<ClaimDiagnosis>((dx, i) => ({
           sequence: i + 1,
-          diagnosisCodeableConcept: dx.code,
+          diagnosisCodeableConcept: {
+            ...dx.code,
+            coding: (dx.code?.coding ?? []).map((coding) => ({ ...coding, system: CODE_SYSTEM_ICD_10 })),
+          },
         }))
       : [],
     priority: { coding: [{ system: CODE_SYSTEM_PROCESS_PRIORITY, code: 'normal' }] },
-    total: undefined,
-    item: resources.procedures
-      ? resources.procedures.map<ClaimItem>((p, i) => ({
-          sequence: i + 1,
-          careTeamSequence: resources.renderingProvider ? [1] : undefined,
-          diagnosisSequence: resources.diagnoses ? [1] : undefined,
-          productOrService: assertDefined(p.code, 'Procedure code'),
-          modifier: p.extension
-            ?.flatMap<CodeableConcept | undefined>((ext) =>
-              ext.url === EXTENSION_URL_CPT_MODIFIER
-                ? ext.valueCodeableConcept?.coding
-                    ?.map<CodeableConcept | undefined>((cc) =>
-                      cc.system === CODE_SYSTEM_CPT_MODIFIER
-                        ? { coding: [{ system: CODE_SYSTEM_OYSTEHR_CLAIM_PROCEDURE_MODIFIER, code: cc.code }] }
-                        : undefined
-                    )
-                    .filter((cc): cc is CodeableConcept => !!cc)
-                : undefined
-            )
-            .filter((cca): cca is CodeableConcept => !!cca),
-          servicedPeriod: {
-            start: getLocalDateOfService(
-              assertDefined(resources.encounter.period?.start, 'Encounter start'),
-              resources.serviceFacility
-            ),
-            end: resources.encounter.period?.end
-              ? getLocalDateOfService(resources.encounter.period.end, resources.serviceFacility)
-              : undefined,
+    supportingInfo: resources.accident?.date
+      ? [
+          {
+            sequence: 1,
+            category: codeableConcept('info', CODE_SYSTEM_CLAIM_INFORMATION_CATEGORY),
+            code: codeableConcept('439', CODE_SYSTEM_OYSTEHR_CLAIM_DATE_TYPE),
+            timingDate: resources.accident.date,
           },
-          locationCodeableConcept:
-            resources.serviceFacility &&
-            resources.serviceFacility.extension?.some((ext) => ext.url === CODE_SYSTEM_CMS_PLACE_OF_SERVICE)
-              ? {
-                  coding: [
-                    {
-                      system: CODE_SYSTEM_CMS_PLACE_OF_SERVICE,
-                      code: resources.serviceFacility.extension.find(
-                        (ext) => ext.url === CODE_SYSTEM_CMS_PLACE_OF_SERVICE
-                      )?.valueString,
-                    },
-                  ],
-                }
-              : undefined,
-          net: undefined,
-          quantity: { value: 1, unit: 'UN' },
-        }))
+        ]
+      : undefined,
+    billablePeriod: deriveClaimBillablePeriodFromEncounter(resources.encounter),
+    item: resources.procedures
+      ? resources.procedures.map<ClaimItem>((p, i) => {
+          const procedureCode = assertDefined(p.code, 'Procedure code');
+          // Swap Ottehr's legacy HCPCS code system for HL7's
+          procedureCode.coding = [
+            ...(procedureCode.coding ?? [])
+              .filter((coding) => coding.system === CODE_SYSTEM_HCPCS)
+              .map((coding) => ({
+                ...coding,
+                system: CODE_SYSTEM_HL7_HCPCS,
+              })),
+            ...(procedureCode.coding ?? []).filter((coding) => coding.system !== CODE_SYSTEM_HCPCS),
+          ];
+          return {
+            sequence: i + 1,
+            careTeamSequence: resources.renderingProvider ? [1] : undefined,
+            diagnosisSequence: resources.diagnoses ? [1] : undefined,
+            productOrService: procedureCode,
+            modifier: p.code?.coding?.[0].extension
+              ?.flatMap<CodeableConcept | undefined>((ext) =>
+                ext.url === EXTENSION_URL_CPT_MODIFIER
+                  ? ext.valueCodeableConcept?.coding
+                      ?.map<CodeableConcept | undefined>((cc) =>
+                        cc.system === CODE_SYSTEM_CPT_MODIFIER
+                          ? { coding: [{ system: CODE_SYSTEM_OYSTEHR_CLAIM_PROCEDURE_MODIFIER, code: cc.code }] }
+                          : undefined
+                      )
+                      .filter((cc): cc is CodeableConcept => !!cc)
+                  : undefined
+              )
+              .filter((cca): cca is CodeableConcept => !!cca),
+            servicedPeriod: getProcedureServicedPeriod(p, resources),
+            locationCodeableConcept:
+              resources.serviceFacility &&
+              resources.serviceFacility.extension?.some((ext) => ext.url === CODE_SYSTEM_CMS_PLACE_OF_SERVICE)
+                ? {
+                    coding: [
+                      {
+                        system: CODE_SYSTEM_CMS_PLACE_OF_SERVICE,
+                        code: resources.serviceFacility.extension.find(
+                          (ext) => ext.url === CODE_SYSTEM_CMS_PLACE_OF_SERVICE
+                        )?.valueString,
+                      },
+                    ],
+                  }
+                : undefined,
+            // Lines are created unpriced: charge master prices are applied by the rules engine's
+            // applyChargeMasterPrices action (rule sets run automatically on creation), or entered
+            // by the biller in the claim editor.
+            net: {
+              value: 0,
+              currency: 'USD',
+            },
+            quantity: { value: getCptBillableUnitsFromCoding(procedureCode.coding?.[0]) ?? 1, unit: 'UN' },
+            detail: buildClaimItemDrugDetail(getProcedureDrug(p, resources.medicationAdministrations ?? [])),
+          };
+        })
       : [],
+    total: {
+      value: 0,
+      currency: 'USD',
+    },
   };
 
   return claim;
 }
 
+// In-house medication dose units mapped to X12 drug quantity unit codes; the rest are counted as units.
+const DRUG_UNIT_CODE_BY_MEDICATION_UNIT: Partial<Record<MedicationUnitOptions, DrugUnitCode>> = {
+  mg: 'ME',
+  ml: 'ML',
+  cc: 'ML',
+  g: 'GR',
+};
+
+function getProcedureMedicationAdministration(
+  procedure: Procedure,
+  medicationAdministrations: MedicationAdministration[]
+): MedicationAdministration | undefined {
+  const maRef = procedure.partOf?.find((ref) => ref.reference?.startsWith('MedicationAdministration/'))?.reference;
+  if (!maRef) return undefined;
+  return medicationAdministrations.find((ma) => `MedicationAdministration/${ma.id}` === maRef);
+}
+
+// The NDC, dose and units of the in-house medication a procedure was billed for. Only the code
+// designated as the drug itself carries it; administration codes on the same order get none.
+export function getProcedureDrug(
+  procedure: Procedure,
+  medicationAdministrations: MedicationAdministration[]
+): ClaimLineDrug | undefined {
+  const ma = getProcedureMedicationAdministration(procedure, medicationAdministrations);
+  if (!ma || !isInHouseMedicationOrder(ma)) return undefined;
+
+  const medicationEntry = getMedicationCptEntryFromMA(ma);
+  if (medicationEntry && !procedure.code?.coding?.some((coding) => coding.code === medicationEntry.code)) {
+    return undefined;
+  }
+
+  const medication = getMedicationFromMA(ma);
+  const storedNdc = medication ? getNdcCodeFromMedication(medication)?.trim() : undefined;
+  if (!storedNdc) return undefined;
+  // Dashed 10-digit NDCs (4-4-2, 5-3-2, 5-4-1) are padded to 5-4-2; then the claim editor's rule applies:
+  // only 11-digit NDCs (5-4-2, dashes optional)
+  const ndc = normalizeNdcTo11Digits(storedNdc);
+  if (!NDC_REGEX.test(ndc)) {
+    console.warn(`NDC "${storedNdc}" on MedicationAdministration/${ma.id} is not an 11-digit NDC; skipping it`);
+    return undefined;
+  }
+
+  const storedDosage = getDosageFromMA(ma);
+  const dosage = storedDosage && Number.isFinite(storedDosage.dose) && storedDosage.dose > 0 ? storedDosage : undefined;
+  return {
+    ndc: ndcToDigits(ndc),
+    quantity: dosage?.dose ?? 1,
+    units: (dosage && DRUG_UNIT_CODE_BY_MEDICATION_UNIT[dosage.units]) ?? 'UN',
+  };
+}
+
+function getAccidentExtensions(accident?: AccidentDTO): Extension[] {
+  const extensions: Extension[] = [];
+  if (accident) {
+    accident.type.forEach((type) => {
+      if (type === 'AA') {
+        extensions.push({ url: EXTENSION_CLAIM_AUTO_ACCIDENT, valueBoolean: true });
+      } else if (type === 'EM') {
+        extensions.push({ url: EXTENSION_CLAIM_EMPLOYMENT_ACCIDENT, valueBoolean: true });
+      } else if (type === 'OA') {
+        extensions.push({ url: EXTENSION_CLAIM_OTHER_ACCIDENT, valueBoolean: true });
+      }
+    });
+    if (accident.state) {
+      extensions.push({ url: EXTENSION_CLAIM_AUTO_ACCIDENT_STATE, valueString: accident.state });
+    }
+  }
+  return extensions;
+}
+
 function getLocalDateOfService(appointmentStart: string, location: Location | undefined): string {
   const timezone = location ? getTimezone(location) : TIMEZONES[0];
   return DateTime.fromISO(appointmentStart).setZone(timezone).toISODate()!;
+}
+
+function getProcedureServicedPeriod(procedure: Procedure, resources: ClaimResources): Period {
+  const location = resources.serviceFacility;
+  if (procedure.performedPeriod?.start) {
+    return {
+      start: getLocalDateOfService(procedure.performedPeriod.start, location),
+      end: procedure.performedPeriod.end ? getLocalDateOfService(procedure.performedPeriod.end, location) : undefined,
+    };
+  }
+  if (procedure.performedDateTime) {
+    return { start: getLocalDateOfService(procedure.performedDateTime, location) };
+  }
+  return {
+    start: getLocalDateOfService(assertDefined(resources.appointment.start, 'Encounter start'), location),
+    end: resources.appointment.end ? getLocalDateOfService(resources.appointment.end, location) : undefined,
+  };
+}
+
+function getServiceCoding(appointment: Appointment): Coding | undefined {
+  const service = getService(appointment);
+  if (!service) {
+    return undefined;
+  }
+  return {
+    system: CODE_SYSTEM_SERVICE_CATEGORY_TAG_SYSTEM,
+    code: service,
+  };
 }
 
 export async function complexValidation(
@@ -986,24 +1487,45 @@ export async function complexValidation(
   if (existingClaims.length > 0) {
     throw INVALID_INPUT_ERROR('Claim has already been created for this encounter');
   }
-  const clinicalResources = await getClinicalResources(clinicalOystehr, params);
+  const clinicalResources = await getClinicalResources(clinicalOystehr, billingOystehr, params);
+  if (!clinicalResources.location.name) {
+    throw INVALID_INPUT_ERROR('The encounter location has no name. Add its name in the clinical app, then retry.');
+  }
+  const billingProviderNpi = getNPIIdentifier(clinicalResources.billingProvider)?.value;
+  if (!billingProviderNpi) {
+    throw INVALID_INPUT_ERROR('The clinical default billing provider has no NPI. Add its NPI, then retry.');
+  }
+  const clinicalAttendingProviderId = getAttendingPractitionerId(clinicalResources.encounter);
+  const clinicalAttendingProvider = clinicalResources.practitioners.find(
+    (prac) => prac.id === clinicalAttendingProviderId
+  );
+  const attendingProviderNpi = clinicalAttendingProvider
+    ? getNPIIdentifier(clinicalAttendingProvider)?.value
+    : undefined;
+  if (!attendingProviderNpi) {
+    throw INVALID_INPUT_ERROR('The clinical attending provider has no NPI. Add its NPI, then retry.');
+  }
   const billingResources = await findExistingBillingResources(billingOystehr, clinicalResources, params.secrets);
+  if (!billingResources.serviceFacility) {
+    throw INVALID_INPUT_ERROR(
+      `No active billing service facility named "${clinicalResources.location.name}". Add it in billing or fix the visit location, then retry.`
+    );
+  }
+  if (!billingResources.renderingProvider) {
+    throw INVALID_INPUT_ERROR(
+      `No billing rendering provider matches the attending provider NPI "${attendingProviderNpi}". Add a rendering provider with that NPI in the billing app, then retry.`
+    );
+  }
+  if (!billingResources.billingProvider) {
+    throw INVALID_INPUT_ERROR(
+      `No billing provider matches the clinical default provider NPI "${billingProviderNpi}". Add a billing provider with that NPI in the billing app, then retry.`
+    );
+  }
   return { clinicalResources, billingResources };
 }
 
-export function validateRequestParameters(input: ZambdaInput): CreateClaimFromEncounterParams {
-  if (!input.body) throw MISSING_REQUEST_BODY;
-  if (!input.secrets) throw MISSING_REQUEST_SECRETS;
-
-  let raw: unknown;
-  try {
-    raw = JSON.parse(input.body);
-  } catch {
-    throw INVALID_INPUT_ERROR('Request body is not valid JSON');
-  }
-
-  const result = CreateBillingClaimFromEncounterInputSchema.safeParse(raw);
-  if (!result.success) throw INVALID_INPUT_ERROR(formatZodError(result.error));
-
-  return { ...result.data, secrets: input.secrets };
+function withoutIdentifier<T extends { identifier?: Identifier[] }>(resource: T): Omit<T, 'meta'> {
+  const fields = { ...resource };
+  delete fields.identifier;
+  return fields;
 }

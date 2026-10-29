@@ -1,27 +1,76 @@
-import Oystehr, { BatchInputPostRequest } from '@oystehr/sdk';
+import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { randomUUID } from 'crypto';
-import { DocumentReference } from 'fhir/r4b';
-import { DateTime } from 'luxon';
+import { List } from 'fhir/r4b';
+import { BUCKET_NAMES } from 'utils/lib/fhir/constants';
+import { FileDocDataForDocReference } from 'utils/lib/fhir/helpers';
+import { uploadObjectToZ3 } from 'utils/lib/helpers/presigned-file-url/helpers';
+import { getSecret, SecretsKeys } from 'utils/lib/secrets';
 import {
-  BUCKET_NAMES,
-  getSecret,
-  PATIENT_EDUCATION_DOC_TYPE_CODE,
+  normalizePatientEducationLanguage,
+  PATIENT_EDUCATION_LANGUAGES,
   SavePatientEducationPdfInput,
   SavePatientEducationPdfOutput,
-  SecretsKeys,
-} from 'utils';
+} from 'utils/lib/types/data/patient-education.types';
+import { z } from 'zod';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { topLevelCatch } from '../../shared/lambda';
 import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  topLevelCatch,
-  wrapHandler,
-  ZambdaInput,
-} from '../../shared';
-import { createPatientEducationPdf } from '../../shared/pdf/patient-education-pdf';
-import { makeZ3Url } from '../../shared/presigned-file-urls';
-import { createPresignedUrl, uploadObjectToZ3 } from '../../shared/z3Utils';
-import { validateRequestParameters } from './validateRequestParameters';
+  createPatientEducationPdf,
+  makePatientEducationPdfDocumentReference,
+} from '../../shared/pdf/patient-education-pdf';
+import { makeZ3Url } from '../../shared/presigned-file-urls/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { validateWithSchema } from '../../shared/validation';
+import { createPresignedUrl } from '../../shared/z3Utils';
+
+const PATIENT_TITLE_MAX_LENGTH = 150;
+
+const patientEducationSectionSchema = z.object({
+  content: z.string(),
+  patientTitle: z
+    .string()
+    .min(1, 'patientTitle is required')
+    .max(PATIENT_TITLE_MAX_LENGTH, `patientTitle must be ${PATIENT_TITLE_MAX_LENGTH} characters or less`),
+  icdCode: z.string(),
+  icdDescription: z.string(),
+});
+
+function isValidPdfBase64(value: string): boolean {
+  if (!/^[A-Za-z0-9+/=\r\n]+$/.test(value)) return false;
+
+  try {
+    const headerBytes = Buffer.from(value.slice(0, 8), 'base64');
+    return headerBytes.length >= 5 && headerBytes.subarray(0, 5).toString('ascii') === '%PDF-';
+  } catch {
+    return false;
+  }
+}
+
+const baseFields = {
+  encounterId: z.string().min(1, 'encounterId is required'),
+  patientId: z.string().min(1, 'patientId is required'),
+  title: z.string().min(1, 'title is required'),
+  language: z.enum(PATIENT_EDUCATION_LANGUAGES).optional(),
+};
+
+export const savePatientEducationPdfInputSchema: z.ZodType<SavePatientEducationPdfInput> = z.union([
+  z.object({
+    ...baseFields,
+    sections: z.array(patientEducationSectionSchema).min(1, 'sections must be a non-empty array'),
+    pdfBase64: z.undefined(),
+  }),
+  z.object({
+    ...baseFields,
+    pdfBase64: z
+      .string()
+      .min(1, 'pdfBase64 must be a non-empty string')
+      .max(8_000_000, 'pdfBase64 is too large')
+      .refine(isValidPdfBase64, 'pdfBase64 must decode to a valid PDF payload'),
+    sections: z.undefined(),
+  }),
+]);
 
 let m2mToken: string;
 
@@ -29,9 +78,9 @@ export const index = wrapHandler(
   'save-patient-education-pdf',
   async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
     try {
-      const validatedInput = validateRequestParameters(input);
+      const validatedInput = validateWithSchema(savePatientEducationPdfInputSchema, input);
       m2mToken = await checkOrCreateM2MClientToken(m2mToken, validatedInput.secrets);
-      const oystehr = createOystehrClient(m2mToken, validatedInput.secrets);
+      const oystehr = createClinicalOystehrClient(m2mToken, validatedInput.secrets);
 
       const result = await performEffect(validatedInput, oystehr, m2mToken);
       return {
@@ -51,6 +100,9 @@ const performEffect = async (
   token: string
 ): Promise<SavePatientEducationPdfOutput> => {
   const { encounterId, patientId, title, secrets } = validatedInput;
+  // Tag the attachment's language so EN/ES versions can be told apart; default to English (matches
+  // the approved-PDF endpoint and how legacy untagged docs are read back).
+  const language = normalizePatientEducationLanguage(validatedInput.language);
   console.log('Saving patient education PDF', {
     encounterId,
     patientId,
@@ -60,7 +112,7 @@ const performEffect = async (
   });
 
   const pdfBytes = validatedInput.sections
-    ? await createPatientEducationPdf(validatedInput.sections)
+    ? await createPatientEducationPdf(validatedInput.sections, language)
     : Uint8Array.from(Buffer.from(validatedInput.pdfBase64, 'base64'));
 
   const z3Url = makeZ3Url({
@@ -76,44 +128,30 @@ const performEffect = async (
   // approved PDF without a second round-trip (DocumentReference fetch + presign).
   const presignedDownloadUrl = await createPresignedUrl(token, z3Url, 'download');
 
-  const docRefRequest: BatchInputPostRequest<DocumentReference> = {
-    method: 'POST',
-    fullUrl: randomUUID(),
-    url: '/DocumentReference',
-    resource: {
-      resourceType: 'DocumentReference',
-      status: 'current',
-      type: {
-        coding: [
-          {
-            system: 'https://fhir.ottehr.com/CodeSystem/document-type',
-            code: PATIENT_EDUCATION_DOC_TYPE_CODE,
-            display: 'Patient Education',
-          },
-        ],
-      },
-      date: DateTime.now().setZone('UTC').toISO() ?? '',
-      subject: { reference: `Patient/${patientId}` },
-      context: {
-        encounter: [{ reference: `Encounter/${encounterId}` }],
-      },
-      content: [
-        {
-          attachment: {
-            url: z3Url,
-            contentType: 'application/pdf',
-            title,
-          },
-        },
+  const educationListRes = (
+    await oystehr.fhir.search<List>({
+      resourceType: 'List',
+      params: [
+        { name: 'subject', value: `Patient/${patientId}` },
+        { name: 'title', value: BUCKET_NAMES.PATIENT_EDUCATION },
       ],
-    },
+    })
+  ).unbundle();
+
+  const fileDoc: FileDocDataForDocReference = {
+    url: z3Url,
+    title,
+    language,
   };
 
-  const result = await oystehr.fhir.transaction<DocumentReference>({
-    requests: [docRefRequest],
-  });
+  const docRef = await makePatientEducationPdfDocumentReference(
+    oystehr,
+    fileDoc,
+    patientId,
+    encounterId,
+    educationListRes
+  );
 
-  const docRef = result.entry?.[0]?.resource;
   if (!docRef?.id) {
     throw new Error('Failed to create DocumentReference for patient education PDF');
   }

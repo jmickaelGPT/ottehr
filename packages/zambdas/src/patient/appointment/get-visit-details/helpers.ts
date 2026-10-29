@@ -1,24 +1,24 @@
 import Oystehr from '@oystehr/sdk';
 import { DocumentReference, MedicationRequest } from 'fhir/r4b';
-import {
-  FEATURE_FLAGS_CONFIG,
-  FileURLInfo,
-  FileURLs,
-  getPresignedURL,
-  LAB_DOC_REF_DETAIL_TAGS,
-  LAB_RESULT_DOC_REF_CODING_CODE,
-  MEDICATION_DISPENSABLE_DRUG_ID,
-  PrescribedMedication,
-} from 'utils';
+import { getPresignedURL } from 'utils/lib/helpers/presigned-file-url/helpers';
+import { FEATURE_FLAGS_CONFIG } from 'utils/lib/ottehr-config/feature-flags';
+import { Secrets } from 'utils/lib/secrets';
+import { MEDICATION_DISPENSABLE_DRUG_ID } from 'utils/lib/types/api/medication-administration.constants';
+import { FileURLInfo, FileURLs } from 'utils/lib/types/common';
+import { LAB_DOC_REF_DETAIL_TAGS, LAB_RESULT_DOC_REF_CODING_CODE } from 'utils/lib/types/data/labs/labs.constants';
+import { PrescribedMedication } from 'utils/lib/types/data/telemed/appointments/appointments.types';
 import { getLabDocRefDescriptionFromMetaTags } from '../../../shared/pdf/lab-pdf-utils';
+import { assertZ3UrlInProject } from '../../../shared/presigned-file-urls/helpers';
 
 async function makePresignedURLFromDocumentReference(
   resource: DocumentReference,
-  oystehrToken: string
+  oystehrToken: string,
+  secrets: Secrets | null
 ): Promise<string | undefined> {
   const documentBaseUrl = resource.content?.[0].attachment.url;
   if (!documentBaseUrl) throw new Error("Attached DocumentReference don't have attached base file URL");
 
+  assertZ3UrlInProject(documentBaseUrl, secrets);
   const presignedUrl = await getPresignedURL(documentBaseUrl, oystehrToken);
 
   return presignedUrl;
@@ -110,6 +110,7 @@ function makePrescribedMedicationDTO(medRequest: MedicationRequest): PrescribedM
 export async function getPresignedURLs(
   oystehr: Oystehr,
   oystehrToken: string,
+  secrets: Secrets | null,
   encounterId?: string
 ): Promise<{ presignedUrls: FileURLs; reviewedLabResultsUrls: FileURLInfo[] }> {
   if (encounterId === undefined) {
@@ -177,12 +178,12 @@ export async function getPresignedURLs(
   await Promise.all([
     ...Object.entries(latestDocumentsByType).map(async ([type, resource]) => {
       presignedUrlObj[type] = {
-        presignedUrl: await makePresignedURLFromDocumentReference(resource, oystehrToken),
+        presignedUrl: await makePresignedURLFromDocumentReference(resource, oystehrToken, secrets),
       };
     }),
     ...reviewedLabResults.map(async (docRef) => {
       reviewedLabResultsUrls.push({
-        presignedUrl: await makePresignedURLFromDocumentReference(docRef, oystehrToken),
+        presignedUrl: await makePresignedURLFromDocumentReference(docRef, oystehrToken, secrets),
         description: getLabDocRefDescriptionFromMetaTags(docRef),
       });
     }),
@@ -198,7 +199,7 @@ export async function getPresignedURLs(
       const noteType = resource.meta?.tag?.find((tag) => tag.system === 'school-work-note/type')?.code;
       if (!noteType) return undefined;
       presignedUrlObj[noteType] = {
-        presignedUrl: await makePresignedURLFromDocumentReference(resource, oystehrToken),
+        presignedUrl: await makePresignedURLFromDocumentReference(resource, oystehrToken, secrets),
       };
       return null;
     })
@@ -210,9 +211,10 @@ export async function getPresignedURLs(
 export async function getPatientPortalPresignedURLs(
   oystehr: Oystehr,
   oystehrToken: string,
+  secrets: Secrets | null,
   encounterId: string | undefined
 ): Promise<{ presignedUrls: FileURLs; reviewedLabResultsUrls: FileURLInfo[] }> {
-  const result = await getPresignedURLs(oystehr, oystehrToken, encounterId);
+  const result = await getPresignedURLs(oystehr, oystehrToken, secrets, encounterId);
   if (FEATURE_FLAGS_CONFIG.skipSendingVisitNoteToPatientPortalEnabled) {
     delete result.presignedUrls['visit-note'];
   }

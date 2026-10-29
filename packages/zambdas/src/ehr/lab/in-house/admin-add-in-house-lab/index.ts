@@ -2,23 +2,16 @@ import Oystehr, { BatchInputPostRequest, BatchInputRequest } from '@oystehr/sdk'
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { randomUUID } from 'crypto';
 import { ActivityDefinition, Provenance } from 'fhir/r4b';
-import {
-  ADMIN_IN_HOUSE_LAB_TEST_EXISTS_ERROR,
-  AdminAddInHouseLabInput,
-  AdminAddInHouseLabOutput,
-  getSecret,
-  IN_HOUSE_LAB_LATEST_TAG_DEFINITION,
-  Secrets,
-  SecretsKeys,
-} from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  parseCreatedResourcesBundle,
-  topLevelCatch,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../../shared';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { IN_HOUSE_LAB_LATEST_TAG_DEFINITION } from 'utils/lib/types/data/in-house/in-house.constants';
+import { AdminAddInHouseLabInput, AdminAddInHouseLabOutput } from 'utils/lib/types/data/in-house/in-house.types';
+import { ADMIN_IN_HOUSE_LAB_TEST_EXISTS_ERROR } from 'utils/lib/types/errors';
+import { checkOrCreateM2MClientToken } from '../../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../../shared/helpers';
+import { topLevelCatch } from '../../../../shared/lambda';
+import { parseCreatedResourcesBundle } from '../../../../shared/resources.helpers';
+import { wrapHandler } from '../../../../shared/sentry';
+import { ZambdaInput } from '../../../../shared/types/common';
 import {
   convertAdminInHouseLabItemDefinitionToActivityDefinition,
   getInHouseLabTestUrlAndVersion,
@@ -30,7 +23,6 @@ let m2mToken: string;
 const ZAMBDA_NAME = 'admin-add-in-house-lab';
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`admin-add-in-house-lab started, input: ${JSON.stringify(input)}`);
   try {
     const validatedParameters: AdminAddInHouseLabInput & { secrets: Secrets | null; userToken: string } =
       validateRequestParameters(input);
@@ -41,7 +33,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     console.log('This is your data in the zambda', JSON.stringify(data));
 
     m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-    const oystehr = createOystehrClient(m2mToken, secrets);
+    const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
     // determine if the canonical url exists already, error if so
     const { url: canonicalUrl, version } = getInHouseLabTestUrlAndVersion(data, {});

@@ -1,8 +1,8 @@
 import { Box, Typography } from '@mui/material';
 import { FC } from 'react';
 import { AccordionCard } from 'src/components/AccordionCard';
-import { IN_PERSON_NOTE_ID, NOTE_TYPE, PRIVATE_EXTENSION_BASE_URL } from 'utils';
-import { useChartFields } from '../../hooks/useChartFields';
+import { NOTE_TYPE } from 'utils/lib/types/api/chart-data/chart-data.types';
+import { useVisitNote } from '../../hooks/useVisitNote';
 import { BoxStyled } from '../generic-notes-list/components/ui/BoxStyled';
 import { defaultNoteLocales } from '../generic-notes-list/default-note-locales.helper';
 import { GenericNoteList } from '../generic-notes-list/GenericNoteList';
@@ -10,14 +10,7 @@ import { GenericNotesConfig } from '../generic-notes-list/types';
 
 const addendumNotesConfig: GenericNotesConfig = {
   apiConfig: {
-    fieldName: 'notes',
     type: NOTE_TYPE.ADDENDUM,
-    searchParams: {
-      _search_by: 'encounter',
-      _sort: '-_lastUpdated',
-      _count: 1000,
-      _tag: `${PRIVATE_EXTENSION_BASE_URL}/${NOTE_TYPE.ADDENDUM}|${IN_PERSON_NOTE_ID}`,
-    },
   },
   locales: {
     ...defaultNoteLocales,
@@ -31,10 +24,8 @@ const addendumNotesConfig: GenericNotesConfig = {
 export const AddendumCard: FC = () => {
   // Surface the legacy single-string addendumNote (Encounter extension) so any pre-existing
   // content still appears after the migration to per-author NoteDTO entries.
-  const { data: legacyFields } = useChartFields({
-    requestedFields: { addendumNote: {} },
-  });
-  const legacyAddendumText = legacyFields?.addendumNote?.text;
+  const { data: note } = useVisitNote();
+  const legacyAddendumText = note?.encounterNotes.addendumNote?.text;
 
   return (
     <AccordionCard label="Addendum">

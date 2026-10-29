@@ -1,9 +1,16 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { FhirResource } from 'fhir/r4b';
-import { FHIR_RESOURCE_NOT_FOUND } from 'utils';
-import { checkOrCreateM2MClientToken, wrapHandler, ZambdaInput } from '../../shared';
-import { createBillingClient, prepareWorkingCopy } from '../shared';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import {
+  CopyableBillingResource,
+  copyBillingPatientWithClinicalIds,
+  createBillingClient,
+  fetchById,
+  prepareWorkingCopy,
+} from '../shared';
 import { CreateWorkingCopyParams, validateRequestParameters } from './validateRequestParameters';
 
 let m2mToken: string;
@@ -22,15 +29,17 @@ async function performEffect(
   oystehr: Oystehr,
   params: CreateWorkingCopyParams
 ): Promise<{ id: string | undefined; resourceType: string }> {
-  const searchResult = await oystehr.fhir.search<FhirResource>({
-    resourceType: params.resourceType,
-    params: [{ name: '_id', value: params.resourceId }],
-  });
-  const original = searchResult.unbundle()[0];
-  if (!original) throw FHIR_RESOURCE_NOT_FOUND(params.resourceType);
+  const original = await fetchById<CopyableBillingResource>(oystehr, params.resourceType, params.resourceId);
 
   // Clone the original and apply field overrides
-  const copy = prepareWorkingCopy(original, params.resourceId);
+  const copy =
+    original.resourceType === 'Patient'
+      ? await copyBillingPatientWithClinicalIds({
+          oystehr,
+          patient: original,
+          workingCopy: true,
+        })
+      : prepareWorkingCopy(original, params.resourceId);
   if (params.overrides) {
     for (const [key, value] of Object.entries(params.overrides)) {
       (copy as any)[key] = value;

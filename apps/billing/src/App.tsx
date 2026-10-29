@@ -1,21 +1,44 @@
+import { useAuth0 } from '@auth0/auth0-react';
 import { CssBaseline, ThemeProvider } from '@mui/material';
 import { LicenseInfo } from '@mui/x-data-grid-pro';
 import { SnackbarProvider } from 'notistack';
 import { ReactElement } from 'react';
 import { BrowserRouter, Navigate, Outlet, Route, Routes } from 'react-router-dom';
+import { RoleType } from 'utils/lib/types/api/user.types';
+import { DEFAULT_RULES_ENGINE } from 'utils/lib/types/data/billing/rules-engine.constants';
 import { Layout } from './components/Layout';
+import { LoadingScreen } from './components/LoadingScreen';
 import { ProtectedRoute } from './components/ProtectedRoute';
+import { UnauthorizedPage } from './components/UnauthorizedPage';
+import { ChargeItemDefinitionLabels } from './constants/chargeItemDefinition';
 import { useApiClients } from './hooks/useAppClients';
+import { useEvolveUser } from './hooks/useEvolveUser';
 import { BillingProviderDetail, BillingProvidersList } from './pages/BillingProviders';
+import CardsOnFileReport from './pages/CardsOnFileReport';
+import { ChargeItemDefinitionDetail, ChargeItemDefinitionList } from './pages/ChargeItemDefinitionsList';
+import ClaimCreationQueue from './pages/ClaimCreationQueue';
 import ClaimDetail from './pages/ClaimDetail';
 import ClaimsList from './pages/ClaimsList';
 import CreateClaim from './pages/CreateClaim';
-import Dashboard from './pages/Dashboard';
+import EraClaimDetail from './pages/EraClaimDetail';
 import ERADetail from './pages/ERADetail';
 import ERAList from './pages/ERAList';
+import { CustomInsuranceOrganizationDetail, InsuranceOrganizationsList } from './pages/InsuranceOrganizations';
+import InvoiceReport from './pages/InvoiceReport';
+import ManualRemit from './pages/ManualRemit';
+import NetCollectionsReport from './pages/NetCollectionsReport';
+import { NonInsuranceOrganizationDetail, NonInsuranceOrganizationsList } from './pages/NonInsuranceOrganizations';
 import PatientDetail from './pages/PatientDetail';
 import PatientsList from './pages/PatientsList';
+import { PayerDetail } from './pages/PayerDetail';
+import PaymentsReport from './pages/PaymentsReport';
+import PipelineReport from './pages/PipelineReport';
+import ProductivityReport from './pages/ProductivityReport';
 import { RenderingProviderDetail, RenderingProvidersList } from './pages/RenderingProviders';
+import Reports from './pages/Reports';
+import RuleDetail from './pages/RuleDetail';
+import Rules from './pages/Rules';
+import { ServiceFacilitiesList, ServiceFacilityDetail } from './pages/ServiceFacilities';
 import Tags from './pages/Tags';
 import { theme } from './themes/ottehr';
 
@@ -24,38 +47,86 @@ if (MUI_X_LICENSE_KEY) LicenseInfo.setLicenseKey(MUI_X_LICENSE_KEY);
 
 export default function App(): ReactElement {
   useApiClients();
+  const { logout } = useAuth0();
+  const { currentUser, isLoadingUser } = useEvolveUser();
+
+  const handleLogout = (): void => {
+    void logout({ logoutParams: { returnTo: window.location.origin } });
+  };
+
+  const roleUnknown = !currentUser || !currentUser.hasRole([RoleType.Administrator, RoleType.BillingAdmin]);
 
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
+      {isLoadingUser && <LoadingScreen />}
       <BrowserRouter>
         <Routes>
-          <Route
-            element={
-              <ProtectedRoute
-                showWhenAuthenticated={
-                  <Layout>
-                    <Outlet />
-                  </Layout>
-                }
+          {!isLoadingUser && roleUnknown && (
+            <Route
+              path="*"
+              element={<ProtectedRoute showWhenAuthenticated={<UnauthorizedPage onLogout={handleLogout} />} />}
+            />
+          )}
+          {!isLoadingUser && !roleUnknown && (
+            <Route
+              element={
+                <ProtectedRoute
+                  showWhenAuthenticated={
+                    <Layout>
+                      <Outlet />
+                    </Layout>
+                  }
+                />
+              }
+            >
+              {/* <Route path="/" element={<Dashboard />} /> */}
+              <Route path="/" element={<Navigate to="/claims" replace />} />
+              <Route path="/claims" element={<ClaimsList />} />
+              <Route path="/claim-creation-queue" element={<ClaimCreationQueue />} />
+              <Route path="/claims/new" element={<CreateClaim />} />
+              <Route path="/claims/:id" element={<ClaimDetail />} />
+              <Route path="/patients" element={<PatientsList />} />
+              <Route path="/patients/:id" element={<PatientDetail />} />
+              <Route path="/insurance-organizations" element={<InsuranceOrganizationsList />} />
+              <Route path="/insurance-organizations/rcm/:payerId" element={<PayerDetail />} />
+              <Route path="/insurance-organizations/:id" element={<CustomInsuranceOrganizationDetail />} />
+              <Route path="/billing-providers" element={<BillingProvidersList />} />
+              <Route path="/billing-providers/:id" element={<BillingProviderDetail />} />
+              <Route path="/rendering-providers" element={<RenderingProvidersList />} />
+              <Route path="/rendering-providers/:id" element={<RenderingProviderDetail />} />
+              <Route path="/service-facilities" element={<ServiceFacilitiesList />} />
+              <Route path="/service-facilities/:id" element={<ServiceFacilityDetail />} />
+              <Route path="/non-insurance-organizations" element={<NonInsuranceOrganizationsList />} />
+              <Route path="/non-insurance-organizations/:id" element={<NonInsuranceOrganizationDetail />} />
+              <Route
+                path={`/${ChargeItemDefinitionLabels['charge-master'].pathComponent}`}
+                element={<ChargeItemDefinitionList type="charge-master" />}
               />
-            }
-          >
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/claims" element={<ClaimsList />} />
-            <Route path="/claims/new" element={<CreateClaim />} />
-            <Route path="/claims/:id" element={<ClaimDetail />} />
-            <Route path="/patients" element={<PatientsList />} />
-            <Route path="/patients/:id" element={<PatientDetail />} />
-            <Route path="/billing-providers" element={<BillingProvidersList />} />
-            <Route path="/billing-providers/:id" element={<BillingProviderDetail />} />
-            <Route path="/rendering-providers" element={<RenderingProvidersList />} />
-            <Route path="/rendering-providers/:id" element={<RenderingProviderDetail />} />
-            <Route path="/eras" element={<ERAList />} />
-            <Route path="/eras/:id" element={<ERADetail />} />
-            <Route path="/tags" element={<Tags />} />
-            <Route path="*" element={<Navigate to="/" />} />
-          </Route>
+              <Route
+                path={`/${ChargeItemDefinitionLabels['charge-master'].pathComponent}/:id`}
+                element={<ChargeItemDefinitionDetail type="charge-master" />}
+              />
+              <Route path="/eras" element={<ERAList />} />
+              <Route path="/eras/new" element={<ManualRemit />} />
+              <Route path="/eras/:id" element={<ERADetail />} />
+              <Route path="/eras/:id/edit" element={<ManualRemit />} />
+              <Route path="/eras/:eraId/claims/:claimId" element={<EraClaimDetail />} />
+              <Route path="/tags" element={<Tags />} />
+              <Route path="/reports" element={<Reports />} />
+              <Route path="/reports/payments" element={<PaymentsReport />} />
+              <Route path="/reports/cards-on-file" element={<CardsOnFileReport />} />
+              <Route path="/reports/invoices" element={<InvoiceReport />} />
+              <Route path="/reports/pipeline" element={<PipelineReport />} />
+              <Route path="/reports/productivity" element={<ProductivityReport />} />
+              <Route path="/reports/net-collections" element={<NetCollectionsReport />} />
+              {/* Rules routes are per engine; bare /rules lands on the Claim Submission engine. */}
+              <Route path="/rules" element={<Navigate to={`/rules/${DEFAULT_RULES_ENGINE}`} replace />} />
+              <Route path="/rules/:engine" element={<Rules />} />
+              <Route path="/rules/:engine/:id" element={<RuleDetail />} />
+              <Route path="*" element={<Navigate to="/" />} />
+            </Route>
+          )}
         </Routes>
         <SnackbarProvider maxSnack={5} autoHideDuration={6000} />
       </BrowserRouter>

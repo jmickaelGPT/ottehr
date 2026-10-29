@@ -1,14 +1,16 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
+import { ExternalLabsLabelConfig, ExternalLabsLabelContent } from 'utils/lib/types/data/labs/labs.types';
 import {
-  ExternalLabsLabelConfig,
-  ExternalLabsLabelContent,
-  isValidUUID,
   LabelPrintingConfig,
   MANUFACTURER_TO_LABEL_MAPPING,
   SupportedPrinterManufacturer,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../shared';
+} from 'utils/lib/types/data/printing';
+import { isValidUUID } from 'utils/lib/validation/helper';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient } from '../../shared/helpers';
 import { VisitLabelConfig, VisitLabelContent } from '../../shared/pdf/visit-label-pdf';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import { getPrintingConfigAndDevice } from '../label-printing-config/get-label-printing-config';
 import { getExternalLabLabelConfig, getVisitLabelConfig } from '../shared/label-printing';
 import { validateRequestParameters } from './validateRequestParameters';
@@ -27,7 +29,6 @@ let m2mToken: string;
 const ZAMBDA_NAME = 'generate-label-xml';
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`Input: ${JSON.stringify(input)}`);
   console.log('Validating input');
   const validatedRequestParams = validateRequestParameters(input);
   const { type, secrets } = validatedRequestParams;
@@ -36,7 +37,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
   console.log('token', m2mToken);
 
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   const getLabelConfig = async (): Promise<VisitLabelConfig | ExternalLabsLabelConfig> => {
     if (type === 'visit') {

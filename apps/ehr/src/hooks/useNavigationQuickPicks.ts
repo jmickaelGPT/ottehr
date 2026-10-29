@@ -1,4 +1,5 @@
 import AssignmentIcon from '@mui/icons-material/Assignment';
+import BadgeIcon from '@mui/icons-material/Badge';
 import CalendarMonthIcon from '@mui/icons-material/CalendarMonth';
 import GroupIcon from '@mui/icons-material/Group';
 import LocalHospitalIcon from '@mui/icons-material/LocalHospital';
@@ -7,7 +8,7 @@ import PersonSearchIcon from '@mui/icons-material/PersonSearch';
 import SettingsIcon from '@mui/icons-material/Settings';
 import { useMemo } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { RoleType } from 'utils';
+import { RoleType } from 'utils/lib/types/api/user.types';
 import { CommandPaletteItem } from '../state/command-palette.store';
 import { useCommandPaletteSource } from './useCommandPaletteSource';
 import useEvolveUser from './useEvolveUser';
@@ -33,12 +34,14 @@ interface NavigationDestination {
 }
 
 const ADMIN_ROLES = [RoleType.Administrator, RoleType.Manager, RoleType.CustomerSupport];
-const VISIT_CREATION_ROLES = [
+// Mirrors the /tasks and visit-creation route gating in App.tsx (union of both staff role blocks).
+export const PRIMARY_EHR_STAFF_ROLES = [
   RoleType.Administrator,
   RoleType.Manager,
   RoleType.CustomerSupport,
   RoleType.Staff,
   RoleType.Provider,
+  RoleType.Clinician,
 ];
 
 const NAVIGATION_DESTINATIONS: NavigationDestination[] = [
@@ -96,7 +99,7 @@ const NAVIGATION_DESTINATIONS: NavigationDestination[] = [
     label: 'Add New Visit',
     to: '/visits/add',
     icon: LocalHospitalIcon,
-    roles: VISIT_CREATION_ROLES,
+    roles: PRIMARY_EHR_STAFF_ROLES,
     keywords: ['create appointment', 'new patient visit', 'walk-in'],
   },
   {
@@ -174,7 +177,27 @@ const NAVIGATION_DESTINATIONS: NavigationDestination[] = [
     label: 'My Profile',
     to: '/profile',
     icon: PersonIcon,
-    keywords: ['account', 'settings', 'my account'],
+    keywords: [
+      'account',
+      'settings',
+      'my account',
+      'my settings',
+      'my details',
+      'my address',
+      'my npi',
+      'my license',
+      'credentials',
+    ],
+  },
+  {
+    // Its own entry rather than a keyword on My Profile: it's a distinct destination now that the
+    // page is tabbed, and "notifications" should land on the tab that holds them.
+    id: 'nav-notification-settings',
+    label: 'Notification Settings',
+    to: '/profile',
+    query: { tab: 'notifications' },
+    icon: BadgeIcon,
+    keywords: ['notifications', 'alerts', 'my notifications'],
   },
 ];
 

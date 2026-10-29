@@ -3,38 +3,40 @@ import { APIGatewayProxyResult } from 'aws-lambda';
 import { Identifier, Money, PaymentNotice, PaymentReconciliation, Reference } from 'fhir/r4b';
 import { DateTime } from 'luxon';
 import Stripe from 'stripe';
+import { PAYMENT_METHOD_EXTENSION_URL } from 'utils/lib/fhir/constants';
+import { getStripeCustomerIdFromAccount, getTaskResource } from 'utils/lib/fhir/helpers';
+import { getStripeAccountForAppointmentOrEncounter } from 'utils/lib/fhir/payments';
+import { getSecret, SecretsKeys } from 'utils/lib/secrets';
 import {
-  FHIR_RESOURCE_NOT_FOUND,
   FinalizePatientPaymentTerminalInput,
   FinalizePatientPaymentTerminalResponse,
+} from 'utils/lib/types/api/patient-payment-types';
+import { TaskIndicator } from 'utils/lib/types/common';
+import { TIMEZONES } from 'utils/lib/types/constants';
+import {
+  FHIR_RESOURCE_NOT_FOUND,
   GENERIC_STRIPE_PAYMENT_ERROR,
-  getSecret,
-  getStripeAccountForAppointmentOrEncounter,
-  getStripeCustomerIdFromAccount,
-  getTaskResource,
   INVALID_INPUT_ERROR,
-  isValidUUID,
   MISSING_REQUEST_BODY,
   MISSING_REQUIRED_PARAMETERS,
   NOT_AUTHORIZED,
   parseStripeError,
-  PAYMENT_METHOD_EXTENSION_URL,
-  SecretsKeys,
   STRIPE_CUSTOMER_ID_NOT_FOUND_ERROR,
-  TaskIndicator,
-  TIMEZONES,
-} from 'utils';
+} from 'utils/lib/types/errors';
+import { isValidUUID } from 'utils/lib/validation/helper';
+import { getUser } from '../../../../shared/auth';
+import { getAuth0Token } from '../../../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../../../shared/helpers';
+import { lambdaResponse } from '../../../../shared/lambda';
+import { practitionerRefForUser } from '../../../../shared/practitioners';
+import { wrapHandler } from '../../../../shared/sentry';
 import {
-  createOystehrClient,
-  getAuth0Token,
   getStripeClient,
-  getUser,
-  lambdaResponse,
   makeBusinessIdentifierForStripePayment,
   STRIPE_PAYMENT_ID_SYSTEM,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../../shared';
+} from '../../../../shared/stripeIntegration';
+import { ZambdaInput } from '../../../../shared/types/common';
+import { safeJsonParse } from '../../../../shared/validation';
 import { getAccountAndCoverageResourcesForPatient } from '../../../shared/harvest';
 
 const ZAMBDA_NAME = 'patient-payments-terminal-finalize-payment';
@@ -58,7 +60,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     oystehrM2MClientToken = await getAuth0Token(input.secrets);
   }
 
-  const oystehrClient = createOystehrClient(oystehrM2MClientToken, input.secrets);
+  const oystehrClient = createClinicalOystehrClient(oystehrM2MClientToken, input.secrets);
   const stripeContext = await getStripePaymentContext(validatedParameters, oystehrClient);
 
   const stripeClient = getStripeClient(input.secrets);
@@ -97,7 +99,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
       encounterId: validatedParameters.encounterId,
       amountInCents,
       stripePaymentIntentId: paymentIntent.id,
-      submitterRef: { reference: user.profile },
+      submitterRef: await practitionerRefForUser(user, oystehrClient),
     },
     oystehrClient,
     input
@@ -119,7 +121,7 @@ const validateRequestParameters = (input: ZambdaInput): FinalizePatientPaymentTe
     throw MISSING_REQUEST_BODY;
   }
 
-  const { patientId, encounterId, paymentIntentId } = JSON.parse(input.body);
+  const { patientId, encounterId, paymentIntentId } = safeJsonParse(input.body);
 
   const missingParams: string[] = [];
   if (!patientId) {

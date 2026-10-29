@@ -41,8 +41,8 @@ import StarterKit from '@tiptap/starter-kit';
 import { enqueueSnackbar } from 'notistack';
 import React, { ReactElement, useEffect, useRef } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { BILLING_URL } from 'src/App';
 import CustomBreadcrumbs from 'src/components/CustomBreadcrumbs';
+import { BILLING_URL } from 'src/features/admin/adminRoutes';
 import PageContainer from 'src/layout/PageContainer';
 import {
   useDesignateChargeMasterEntryMutation,
@@ -53,7 +53,7 @@ import {
   useListFeeSchedulesQuery,
   useUpdateFeeScheduleMutation,
 } from 'src/rcm/state/fee-schedules/fee-schedule.queries';
-import { CASE_RATE_CODE, ChargeMasterDesignation, RCM_TAG_SYSTEM } from 'utils';
+import { CASE_RATE_CODE, ChargeMasterDesignation, RCM_TAG_SYSTEM } from 'utils/lib/fhir/constants';
 import LocationAssociations from './charge-items/LocationAssociations';
 import PayerAssociations from './charge-items/PayerAssociations';
 import ProcedureCodes from './charge-items/ProcedureCodes';
@@ -330,7 +330,6 @@ export default function EditChargeItem({ mode = 'fee-schedule' }: EditChargeItem
             <CustomBreadcrumbs
               chain={[
                 { link: '/admin', children: 'Admin' },
-                { link: BILLING_URL, children: 'Billing Configuration' },
                 { link: `${BILLING_URL}/${billingSubTab}`, children: entityLabelPlural },
                 {
                   link: '#',

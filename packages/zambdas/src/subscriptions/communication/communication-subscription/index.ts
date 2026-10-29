@@ -1,12 +1,17 @@
 import { BatchInputGetRequest } from '@oystehr/sdk';
-import { captureException } from '@sentry/aws-serverless';
+import { captureException } from '@sentry/node-core/light';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Bundle, Communication, Group, Location, Practitioner } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import { COMMUNICATION_ISSUE_REPORT_CODE, getFullestAvailableName, getSecret, Secrets, SecretsKeys } from 'utils';
-import { getAuth0Token, getEmailClient, sendSlackNotification, wrapHandler } from '../../../shared';
-import { createOystehrClient } from '../../../shared/helpers';
-import { ZambdaInput } from '../../../shared/types';
+import { getFullestAvailableName } from 'utils/lib/fhir/patient';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { COMMUNICATION_ISSUE_REPORT_CODE } from 'utils/lib/types/common';
+import { getEmailClient } from '../../../shared/communication';
+import { sendSlackNotification } from '../../../shared/errors';
+import { getAuth0Token } from '../../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { bundleResourcesConfig, codingContainedInList, getEmailsFromGroup } from './helpers';
 import { validateRequestParameters } from './validateRequestParameters';
 
@@ -20,7 +25,6 @@ export interface CommunicationSubscriptionInput {
 let oystehrToken: string;
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`Input: ${JSON.stringify(input)}`);
   console.group('validateRequestParameters');
   const validatedParameters = validateRequestParameters(input);
   const { communication, secrets } = validatedParameters;
@@ -43,7 +47,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     console.log('already have token');
   }
 
-  const oystehr = createOystehrClient(oystehrToken, secrets);
+  const oystehr = createClinicalOystehrClient(oystehrToken, secrets);
 
   const ENVIRONMENT = getSecret(SecretsKeys.ENVIRONMENT, secrets);
   const communicationCodes = communication.category;

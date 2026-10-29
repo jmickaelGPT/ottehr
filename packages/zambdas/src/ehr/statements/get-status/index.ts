@@ -1,21 +1,15 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Communication, DocumentReference, Task } from 'fhir/r4b';
-import {
-  MISSING_REQUEST_BODY,
-  MISSING_REQUEST_SECRETS,
-  MISSING_REQUIRED_PARAMETERS,
-  Secrets,
-  STATEMENT_CODE,
-} from 'utils';
-import {
-  createOystehrClient,
-  getAuth0Token,
-  getPostGridLetter,
-  MAIL_VENDOR_EXTENSION_URL,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+import { Secrets } from 'utils/lib/secrets';
+import { STATEMENT_CODE } from 'utils/lib/types/data/paperwork/paperwork.constants';
+import { MISSING_REQUEST_BODY, MISSING_REQUEST_SECRETS, MISSING_REQUIRED_PARAMETERS } from 'utils/lib/types/errors';
+import { getAuth0Token } from '../../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { getPostGridLetter, MAIL_VENDOR_EXTENSION_URL } from '../../../shared/postgrid';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
+import { safeJsonParse } from '../../../shared/validation';
 
 const ZAMBDA_NAME = 'get-statement-status';
 const SEND_STATEMENT_BY_EMAIL_TASK_CODE = 'send-statement-by-email';
@@ -60,7 +54,7 @@ function validateRequestParameters(input: ZambdaInput): GetStatementStatusInput 
   if (!input.body) throw MISSING_REQUEST_BODY;
   if (!input.secrets) throw MISSING_REQUEST_SECRETS;
 
-  const body = JSON.parse(input.body) as Record<string, unknown>;
+  const body = safeJsonParse(input.body) as Record<string, unknown>;
   const encounterId = body.encounterId;
   if (typeof encounterId !== 'string' || encounterId.trim().length === 0) {
     throw MISSING_REQUIRED_PARAMETERS(['encounterId']);
@@ -76,7 +70,7 @@ async function createOystehr(secrets: Secrets): Promise<Oystehr> {
   if (oystehrToken == null) {
     oystehrToken = await getAuth0Token(secrets);
   }
-  return createOystehrClient(oystehrToken, secrets);
+  return createClinicalOystehrClient(oystehrToken, secrets);
 }
 
 function isStatementCommunication(resource: Communication): boolean {

@@ -1,6 +1,12 @@
 import { Box, Typography, useTheme } from '@mui/material';
 import { ReactElement } from 'react';
-import { LabOrderDetailedPageDTO, LabOrderResultDetails, PSC_LOCALE, ReflexLabDTO, UnsolicitedLabDTO } from 'utils';
+import { PSC_LOCALE } from 'utils/lib/types/data/labs/labs.constants';
+import {
+  LabOrderDetailedPageDTO,
+  LabOrderResultDetails,
+  ReflexLabDTO,
+  UnsolicitedLabDTO,
+} from 'utils/lib/types/data/labs/labs.types';
 import { LabsOrderStatusChip } from '../ExternalLabsStatusChip';
 import { FinalCardView } from './FinalCardView';
 import { PrelimCardView } from './PrelimCardView';
@@ -72,6 +78,7 @@ export const ResultItem = ({ onMarkAsReviewed, labOrder, resultDetails, loading 
       {resultDetails.resultType === 'preliminary' && (
         <PrelimCardView
           resultPdfUrl={resultDetails.resultPdfUrl}
+          labGeneratedResultUrls={resultDetails.labGeneratedResultUrls}
           receivedDate={resultDetails.receivedDate}
           reviewedDate={resultDetails.reviewedDate}
           onPrelimView={() => onMarkAsReviewed()} // todo: add open PDF when task will be ready

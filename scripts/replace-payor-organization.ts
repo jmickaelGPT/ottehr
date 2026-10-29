@@ -1,7 +1,7 @@
-import Oystehr from '@oystehr/sdk';
 import { Coverage } from 'fhir/r4b';
-import { replaceOperation } from 'utils';
-import { fetchAllPages, getPatchBinary } from '../packages/zambdas/src/shared';
+import { replaceOperation } from 'utils/lib/helpers/operations';
+import { fetchAllPages } from '../packages/zambdas/src/shared/fhir';
+import { createClinicalOystehrClient, getPatchBinary } from '../packages/zambdas/src/shared/helpers';
 
 /**
  * How to use (won't update coverages): npm run replace-payor-organization -- --project-id=some_project_id  --token=some_token --old-id=id_to_replace --new-id=id_to_insert
@@ -26,13 +26,16 @@ async function main(): Promise<void> {
   const newPayorId = getArg('new-id');
   const dryRun = getOptionalArg('dry-run') !== 'false';
 
-  const oystehr = new Oystehr({
-    accessToken: getArg('token'),
-    projectId: getArg('project-id'),
-    services: {
-      fhirApiUrl: 'https://fhir-api.zapehr.com',
-    },
-  });
+  const oystehr = createClinicalOystehrClient(
+    getArg('token'),
+    {},
+    {
+      projectId: getArg('project-id'),
+      services: {
+        fhirApiUrl: 'https://fhir-api.zapehr.com',
+      },
+    }
+  );
 
   let coverages: Coverage[] = [];
   await fetchAllPages(async (offset, count) => {

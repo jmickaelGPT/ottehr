@@ -1,4 +1,10 @@
-import { ArrowBack as ArrowBackIcon, Search as SearchIcon } from '@mui/icons-material';
+import {
+  ArrowBack as ArrowBackIcon,
+  EditOutlined as EditOutlinedIcon,
+  FileDownloadOutlined as FileDownloadIcon,
+  MoreVert as MoreVertIcon,
+  Search as SearchIcon,
+} from '@mui/icons-material';
 import { TabContext, TabList, TabPanel } from '@mui/lab';
 import {
   Alert,
@@ -6,25 +12,44 @@ import {
   Button,
   Chip,
   CircularProgress,
-  FormControl,
   IconButton,
   InputAdornment,
-  InputLabel,
-  MenuItem,
-  Select,
+  List,
+  ListItem,
+  ListItemButton,
+  ListItemText,
+  Popover,
+  Stack,
   Tab,
   TextField,
   Typography,
 } from '@mui/material';
 import { DataGridPro, GridColDef } from '@mui/x-data-grid-pro';
 import { ReactElement, useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
-import { chooseJson, EraDetailResponse } from 'utils';
+import { useNavigate, useParams } from 'react-router-dom';
+import { getApiError } from 'utils/lib/helpers/oystehrApi';
+import { otherColors } from 'utils/lib/theme/billing-palette';
+import { ERA_SOURCE } from 'utils/lib/types/data/billing/billing.constants';
+import { EraClaimListItem, EraDetailResponse, EraPayee } from 'utils/lib/types/data/billing/billing.types';
+import { formatCurrency, formatTaxId } from 'utils/lib/utils/convert';
+import { downloadEraAttachment, getBillingEraDetail, unmatchClaimResponse } from '../api/api';
+import { AttachmentsSection } from '../components/attachments/AttachmentsSection';
 import { dataGridSlots, dataGridSx } from '../components/BillingDataGrid';
-import { DetailRow } from '../components/DetailRow';
+import { ConfirmDialog } from '../components/ConfirmDialog';
+import { ExportX12Dialog } from '../components/ExportX12Dialog';
+import { MatchClaimDialog } from '../components/MatchClaimDialog';
+import { ReadOnlySection } from '../components/ReadOnlySection';
+import { Row } from '../components/Row';
+import { ERA_SOURCE_LABELS, paymentMethodLabel } from '../constants/era';
 import { useApiClients } from '../hooks/useAppClients';
-import { otherColors } from '../themes/ottehr/colors';
-import { formatCurrency } from '../utils/format';
+import { formatDate } from '../utils/format';
+
+const payeeRows = (payee: EraPayee): { label: string; value: string }[] =>
+  [
+    { label: 'Name', value: payee.name },
+    { label: 'NPI', value: payee.npi },
+    { label: 'Tax ID', value: payee.taxId ? formatTaxId(payee.taxId) : '' },
+  ].filter((row) => row.value);
 
 const currencyCol = (field: string, headerName: string, width: number): GridColDef => ({
   field,
@@ -34,45 +59,6 @@ const currencyCol = (field: string, headerName: string, width: number): GridColD
   headerAlign: 'right',
   valueFormatter: (params: { value: number }) => formatCurrency(params.value),
 });
-
-const claimColumns: GridColDef[] = [
-  { field: 'claimId', headerName: 'Claim', width: 160 },
-  { field: 'patientName', headerName: 'Patient', flex: 1, minWidth: 160 },
-  { field: 'dos', headerName: 'Date of Service', width: 130 },
-  currencyCol('billed', 'Billed', 100),
-  currencyCol('allowed', 'Allowed', 100),
-  currencyCol('paid', 'Ins Paid', 110),
-  currencyCol('posted', 'Posted', 100),
-  {
-    field: 'status',
-    headerName: 'Status',
-    width: 140,
-    renderCell: ({ value }) =>
-      value ? (
-        <Chip
-          label={String(value)}
-          color={value === 'complete' ? 'success' : 'warning'}
-          variant="outlined"
-          size="small"
-          sx={{ borderRadius: '4px', fontSize: 12 }}
-        />
-      ) : (
-        '—'
-      ),
-  },
-  {
-    field: 'actions',
-    headerName: 'Actions',
-    width: 120,
-    sortable: false,
-    renderCell: ({ row }) =>
-      row.claimId ? (
-        <Link to={`/claims/${row.claimId}`} style={{ color: '#2196F3', fontSize: 13 }}>
-          View claim
-        </Link>
-      ) : null,
-  },
-];
 
 export default function ERADetail(): ReactElement {
   const { id } = useParams();
@@ -84,17 +70,86 @@ export default function ERADetail(): ReactElement {
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState('1');
   const [claimSearch, setClaimSearch] = useState('');
-  const [claimStatusFilter, setClaimStatusFilter] = useState('');
+  const [claimToMatch, setClaimToMatch] = useState<{ claimResponseId: string; eraClaim: EraClaimListItem } | null>(
+    null
+  );
+  const [claimResponsesToUnmatch, setClaimResponsesToUnmatch] = useState<string[] | null>(null);
+  const [unmatching, setUnmatching] = useState(false);
+  const [moreActionsPopoverData, setMoreActionsPopoverData] = useState<{
+    element: HTMLButtonElement;
+    claimResponseIds: string[];
+  } | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
+
+  const claimColumns: GridColDef[] = [
+    {
+      field: 'claimId',
+      headerName: 'Claim ID',
+      width: 320,
+      renderCell: ({ value, row }) => {
+        if (!row.matched) {
+          return (
+            <Button
+              onClick={(e) => {
+                e.stopPropagation();
+                setClaimToMatch({ claimResponseId: row.claimResponseIds[0], eraClaim: row });
+              }}
+            >
+              Match
+            </Button>
+          );
+        } else {
+          return <>{value}</>;
+        }
+      },
+    },
+    { field: 'patientName', headerName: 'Patient', flex: 1, minWidth: 150 },
+    { field: 'dos', headerName: 'Date of Service', width: 130 },
+    currencyCol('billed', 'Billed', 100),
+    currencyCol('allowed', 'Allowed', 100),
+    currencyCol('paid', 'Ins Paid', 110),
+    currencyCol('posted', 'Posted', 100),
+    currencyCol('patientResp', 'Patient Resp', 110),
+    {
+      // whether the remit claim is matched to a claim in the system; the FHIR outcome every ERA
+      // carries ("complete") means nothing to billers
+      field: 'matched',
+      headerName: 'Status',
+      width: 140,
+      valueGetter: (params: { row: EraClaimListItem }) => (params.row.matched ? 'Matched' : 'Unmatched'),
+      renderCell: ({ row }) => (
+        <Stack direction="row" justifyContent="space-between" alignItems="center">
+          <Chip
+            label={row.matched ? 'Matched' : 'Unmatched'}
+            color={row.matched ? 'success' : 'warning'}
+            variant="outlined"
+            size="small"
+            sx={{ borderRadius: '4px', fontSize: 12 }}
+          />
+          {row.matched && (
+            <IconButton
+              onClick={(e) => {
+                e.stopPropagation();
+                setMoreActionsPopoverData({ element: e.currentTarget, claimResponseIds: row.claimResponseIds });
+              }}
+            >
+              <MoreVertIcon fontSize="medium" />
+            </IconButton>
+          )}
+        </Stack>
+      ),
+    },
+  ];
 
   const fetchDetail = useCallback(async () => {
     if (!oystehrZambda || !id) return;
     setLoading(true);
     setError(null);
     try {
-      const response = await oystehrZambda.zambda.execute({ id: 'get-billing-era-detail', eraId: id });
-      setEra(chooseJson(response));
+      const data = await getBillingEraDetail(oystehrZambda, { eraId: id });
+      setEra(data);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(getApiError({ error: err, defaultError: 'Failed to load ERA' }));
     } finally {
       setLoading(false);
     }
@@ -111,11 +166,8 @@ export default function ERADetail(): ReactElement {
       const q = claimSearch.toLowerCase();
       claims = claims.filter((c) => c.patientName.toLowerCase().includes(q) || c.claimId.toLowerCase().includes(q));
     }
-    if (claimStatusFilter) {
-      claims = claims.filter((c) => c.status === claimStatusFilter);
-    }
     return claims;
-  }, [era, claimSearch, claimStatusFilter]);
+  }, [era, claimSearch]);
 
   if (loading) {
     return (
@@ -136,6 +188,10 @@ export default function ERADetail(): ReactElement {
     );
   }
 
+  const manual = era.source === ERA_SOURCE.manual;
+  // a manual remit's details as keyed in, and who keyed it
+  const entry = era.manualEntry;
+
   return (
     <Box sx={{ p: 0 }}>
       <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1, mb: 2 }}>
@@ -145,17 +201,40 @@ export default function ERADetail(): ReactElement {
         <Box sx={{ flexGrow: 1 }}>
           <Box sx={{ display: 'flex', gap: 4, alignItems: 'baseline' }}>
             <HeaderField label="Check number" value={era.checkNumber} />
-            <HeaderField label="Check date" value={era.checkDate} />
+            <HeaderField label="Check date" value={formatDate(era.checkDate)} />
             <HeaderField label="Check amount" value={formatCurrency(era.checkAmount)} bold />
+            <HeaderField label="Created" value={formatDate(era.createdDate)} />
             <HeaderField label="Payer" value={era.payerName} />
           </Box>
         </Box>
         <Chip
-          label={era.status}
-          color={era.status === 'complete' ? 'success' : 'warning'}
+          label={ERA_SOURCE_LABELS[era.source] ?? era.source}
+          color={era.source === ERA_SOURCE.clearingHouse ? 'default' : 'primary'}
           variant="outlined"
-          sx={{ borderRadius: '4px' }}
+          sx={{ borderRadius: '4px', mt: 0.5 }}
         />
+        {manual && (
+          <Button
+            size="small"
+            variant="contained"
+            startIcon={<EditOutlinedIcon />}
+            sx={{ mt: 0.5 }}
+            onClick={() => navigate(`/eras/${era.id}/edit`)}
+          >
+            Edit
+          </Button>
+        )}
+        {era.x12 && (
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<FileDownloadIcon />}
+            sx={{ mt: 0.5 }}
+            onClick={() => setExportOpen(true)}
+          >
+            Export X12
+          </Button>
+        )}
       </Box>
 
       <Box sx={{ ml: 5 }}>
@@ -172,8 +251,43 @@ export default function ERADetail(): ReactElement {
 
           <TabPanel value="1" sx={{ px: 0, pt: 2 }}>
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, mb: 3 }}>
-              {era.paymentMethod && <DetailRow label="Payment method" value={era.paymentMethod} labelWidth={160} />}
+              {era.paymentMethod && (
+                <Row label="Payment method" value={paymentMethodLabel(era.paymentMethod)} hideBorder />
+              )}
+              {entry && (
+                <>
+                  <Row label="Remit date" value={formatDate(entry.header.remitDate)} hideBorder />
+                  {entry.header.depositDate && (
+                    <Row label="Deposit date" value={formatDate(entry.header.depositDate)} hideBorder />
+                  )}
+                  <Row
+                    label="Entered by"
+                    value={`${entry.enteredBy} on ${formatDate(entry.enteredAt.slice(0, 10))}`}
+                    hideBorder
+                  />
+                  {entry.header.notes && <Row label="Notes" value={entry.header.notes} hideBorder />}
+                </>
+              )}
             </Box>
+
+            {era.attachments.length > 0 && oystehrZambda && (
+              <AttachmentsSection
+                readOnly
+                attachments={era.attachments}
+                getDownloadUrl={async (documentReferenceId) =>
+                  (await downloadEraAttachment(oystehrZambda, { eraId: era.id, documentReferenceId })).downloadUrl
+                }
+              />
+            )}
+
+            {era.payee && (
+              <ReadOnlySection title="Payee">
+                {/* payers commonly identify the payee by NPI alone, so skip what this ERA omits */}
+                {payeeRows(era.payee).map(({ label, value }, idx, rows) => (
+                  <Row key={label} label={label} value={value} hideBorder={idx === rows.length - 1} />
+                ))}
+              </ReadOnlySection>
+            )}
 
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
               <Typography variant="h6" color="primary.dark" fontWeight={600}>
@@ -194,28 +308,14 @@ export default function ERADetail(): ReactElement {
                     </InputAdornment>
                   ),
                 }}
-                sx={{ minWidth: 280 }}
+                sx={{ flex: 1, minWidth: 280, maxWidth: 480 }}
               />
-              <FormControl size="small" sx={{ minWidth: 160 }}>
-                <InputLabel>Claim Status</InputLabel>
-                <Select
-                  value={claimStatusFilter}
-                  label="Claim Status"
-                  onChange={(e) => setClaimStatusFilter(e.target.value)}
-                >
-                  <MenuItem value="">All</MenuItem>
-                  <MenuItem value="complete">Complete</MenuItem>
-                  <MenuItem value="queued">Queued</MenuItem>
-                  <MenuItem value="error">Error</MenuItem>
-                </Select>
-              </FormControl>
-              {(claimSearch || claimStatusFilter) && (
+              {claimSearch && (
                 <Button
                   variant="text"
                   size="small"
                   onClick={() => {
                     setClaimSearch('');
-                    setClaimStatusFilter('');
                   }}
                 >
                   Clear filters
@@ -227,17 +327,85 @@ export default function ERADetail(): ReactElement {
               rows={filteredClaims}
               columns={claimColumns}
               getRowId={(row) => row.claimId}
+              onRowClick={(params) => navigate(`/eras/${id}/claims/${params.id}`)}
               disableRowSelectionOnClick
               disableColumnMenu
               autoHeight
               pageSizeOptions={[25, 50]}
               initialState={{ pagination: { paginationModel: { pageSize: 25 } } }}
-              slots={dataGridSlots}
+              slots={dataGridSlots()}
               sx={{ ...dataGridSx }}
             />
           </TabPanel>
         </TabContext>
       </Box>
+      {claimToMatch && (
+        <MatchClaimDialog
+          claimResponseId={claimToMatch.claimResponseId}
+          eraClaim={claimToMatch.eraClaim}
+          onMatched={() => fetchDetail()}
+          onClose={() => setClaimToMatch(null)}
+        />
+      )}
+      {claimResponsesToUnmatch && (
+        <ConfirmDialog
+          open={true}
+          title="Unmatch"
+          confirmLabel="Unmatch"
+          loading={unmatching}
+          onConfirm={async () => {
+            if (!oystehrZambda) return;
+            setUnmatching(true);
+            try {
+              for (const claimResponseId of claimResponsesToUnmatch) {
+                await unmatchClaimResponse(oystehrZambda, {
+                  claimResponseId,
+                });
+              }
+            } finally {
+              setUnmatching(false);
+              setClaimResponsesToUnmatch(null);
+              await fetchDetail();
+            }
+          }}
+          onCancel={() => setClaimResponsesToUnmatch(null)}
+        >
+          Do you really want to unmatch?
+        </ConfirmDialog>
+      )}
+      {moreActionsPopoverData ? (
+        <Popover
+          open={true}
+          anchorEl={moreActionsPopoverData.element}
+          onClose={() => setMoreActionsPopoverData(null)}
+          anchorOrigin={{
+            vertical: 'bottom',
+            horizontal: 'left',
+          }}
+        >
+          <List>
+            <ListItem disablePadding>
+              <ListItemButton
+                onClick={async () => {
+                  setMoreActionsPopoverData(null);
+                  setClaimResponsesToUnmatch(moreActionsPopoverData.claimResponseIds);
+                }}
+              >
+                <ListItemText primary="Unmatch" />
+              </ListItemButton>
+            </ListItem>
+          </List>
+        </Popover>
+      ) : null}
+
+      {oystehrZambda && (
+        <ExportX12Dialog
+          open={exportOpen}
+          onClose={() => setExportOpen(false)}
+          fileName={`era-${era.id}.txt`}
+          x12Provider={() => Promise.resolve(era.x12)}
+        />
+      )}
     </Box>
   );
 }

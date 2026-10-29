@@ -1,27 +1,32 @@
 import Oystehr, { BatchInputJSONPatchRequest, BatchInputPatchRequest, User } from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Operation } from 'fast-json-patch';
-import { Account, Appointment, Encounter, Extension, Organization, Patient } from 'fhir/r4b';
+import { Account, Appointment, Encounter, Extension, Organization, Patient, Reference } from 'fhir/r4b';
 import { DateTime } from 'luxon';
+import { userMe } from 'utils/lib/auth/user-me.helper';
+import { getReasonForVisitOptionsForServiceCategory } from 'utils/lib/config-helpers/booking';
+import { getReasonForVisitAndAdditionalDetailsFromAppointment } from 'utils/lib/fhir/appointments';
+import {
+  FHIR_EXTENSION,
+  OCCUPATIONAL_MEDICINE_ACCOUNT_TYPE,
+  SERVICE_CATEGORY_SYSTEM,
+  WORKERS_COMP_ACCOUNT_TYPE,
+} from 'utils/lib/fhir/constants';
 import {
   applyVisitOccupationalMedicineEmployerToEncounterExtensions,
-  cleanUpStaffHistoryTag,
-  FHIR_EXTENSION,
-  FHIR_RESOURCE_NOT_FOUND,
-  getCoding,
-  getCriticalUpdateTagOp,
-  getReasonForVisitAndAdditionalDetailsFromAppointment,
-  getReasonForVisitOptionsForServiceCategory,
-  INVALID_INPUT_ERROR,
   isScheduledFollowupEncounter,
-  OCCUPATIONAL_MEDICINE_ACCOUNT_TYPE,
-  resolveServiceCategory,
-  SERVICE_CATEGORY_SYSTEM,
-  userMe,
-  WORKERS_COMP_ACCOUNT_TYPE,
-} from 'utils';
+} from 'utils/lib/fhir/encounter';
+import { cleanUpStaffHistoryTag, getCoding, getCriticalUpdateTagOp } from 'utils/lib/fhir/helpers';
+import { resolveServiceCategory } from 'utils/lib/fhir/serviceCategoryResolution';
+import { extractNioIdFromReferenceUrl } from 'utils/lib/helpers/helpers';
+import { FEATURE_FLAGS_CONFIG } from 'utils/lib/ottehr-config/feature-flags';
+import { FHIR_RESOURCE_NOT_FOUND, INVALID_INPUT_ERROR } from 'utils/lib/types/errors';
 import { isEmployerOrganization } from '../../../rcm/employers/helpers';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../shared';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { getNonInsuranceOrganizationById } from '../../../shared/nio-directory';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { accountMatchesType } from '../../shared/harvest';
 import { UpdateVisitDetailsValidatedInput, validateRequestParameters } from './validateRequestParameters';
 
@@ -33,12 +38,10 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   console.group('validateRequestParameters');
   const validatedParameters = validateRequestParameters(input);
   console.groupEnd();
-  console.debug('validateRequestParameters success', JSON.stringify(validatedParameters));
   const { secrets } = validatedParameters;
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
   const effectInput = await complexValidation(validatedParameters, oystehr);
-  console.log('effectInput', JSON.stringify(effectInput, null, 2));
 
   await performEffect(effectInput, oystehr);
 
@@ -57,7 +60,7 @@ interface EffectInput extends UpdateVisitDetailsValidatedInput {
   occupationalMedicineAccount?: Account;
 }
 
-const performEffect = async (input: EffectInput, oystehr: Oystehr): Promise<void> => {
+export const performEffect = async (input: EffectInput, oystehr: Oystehr): Promise<void> => {
   const { patient, appointment, bookingDetails, user, encounter, workersCompAccount, occupationalMedicineAccount } =
     input;
 
@@ -87,22 +90,20 @@ const performEffect = async (input: EffectInput, oystehr: Oystehr): Promise<void
     patchRequests.push(patientPatch);
   }
   if (bookingDetails.patientName) {
-    const {
-      first: patientFirstName,
-      middle: patientMiddleName,
-      last: patientLastName,
-      suffix: patientSuffix,
-    } = bookingDetails.patientName;
+    const patientFirstName = bookingDetails.patientName.first?.trim();
+    const patientMiddleName = bookingDetails.patientName.middle?.trim();
+    const patientLastName = bookingDetails.patientName.last?.trim();
+    const patientSuffix = bookingDetails.patientName.suffix?.trim();
     const patientPatchOps: Operation[] = [
       {
         op: 'replace',
         path: '/name/0/given/0',
-        value: patientFirstName?.trim(),
+        value: patientFirstName,
       },
       {
         op: 'replace',
         path: '/name/0/family',
-        value: patientLastName?.trim(),
+        value: patientLastName,
       },
     ];
 
@@ -111,7 +112,7 @@ const performEffect = async (input: EffectInput, oystehr: Oystehr): Promise<void
       patientPatchOps.push({
         op: 'add',
         path: '/name/0/given/1',
-        value: patientMiddleName?.trim(),
+        value: patientMiddleName,
       });
     } else if (!patientMiddleName && storedMiddleName) {
       patientPatchOps.push({
@@ -122,7 +123,7 @@ const performEffect = async (input: EffectInput, oystehr: Oystehr): Promise<void
       patientPatchOps.push({
         op: 'replace',
         path: '/name/0/given/1',
-        value: patientMiddleName?.trim(),
+        value: patientMiddleName,
       });
     }
 
@@ -296,8 +297,8 @@ const performEffect = async (input: EffectInput, oystehr: Oystehr): Promise<void
 
   if (bookingDetails.serviceCategory) {
     const newEncounterAccounts = (encounter.account ?? [])
-      .filter((reference) => reference.reference === 'Account/' + occupationalMedicineAccount?.id)
-      .filter((reference) => reference.reference === 'Account/' + workersCompAccount?.id);
+      .filter((reference) => reference.reference !== 'Account/' + occupationalMedicineAccount?.id)
+      .filter((reference) => reference.reference !== 'Account/' + workersCompAccount?.id);
 
     if (bookingDetails.serviceCategory.code === 'workers-comp' && workersCompAccount) {
       newEncounterAccounts.push({
@@ -434,24 +435,7 @@ const complexValidation = async (input: UpdateVisitDetailsValidatedInput, oysteh
 
   const visitEmployer = input.bookingDetails.visitOccupationalMedicineEmployer;
   if (visitEmployer) {
-    const organizationId = visitEmployer.reference?.split('/')[1];
-
-    if (!organizationId) {
-      throw INVALID_INPUT_ERROR('visitOccupationalMedicineEmployer.reference must be Organization/{id}');
-    }
-
-    const organization = await oystehr.fhir.get<Organization>({
-      resourceType: 'Organization',
-      id: organizationId,
-    });
-
-    if (!isEmployerOrganization(organization)) {
-      throw INVALID_INPUT_ERROR('visitOccupationalMedicineEmployer must reference an occupational medicine employer');
-    }
-
-    if (organization.active === false) {
-      throw INVALID_INPUT_ERROR('visitOccupationalMedicineEmployer must reference an active organization');
-    }
+    await validateVisitEmployerSelection(oystehr, visitEmployer);
   }
 
   const accounts = (
@@ -488,3 +472,59 @@ const consolidatePatchRequests = (ops: BatchInputJSONPatchRequest[]): BatchInput
   });
   return Object.values(consolidated);
 };
+
+// Pre-op visit employer validation. In custom-organizations mode every selection is a billing-app
+// NIO reference token, validated over the wire through the billing zambda interface — legacy
+// clinical employer orgs remain visible on historical visits but can never be selected again.
+// With the flag off, the legacy FHIR validation stands and tokens are rejected (nothing mints
+// them).
+export async function validateVisitEmployerSelection(oystehr: Oystehr, visitEmployer: Reference): Promise<void> {
+  const nioId = extractNioIdFromReferenceUrl(visitEmployer.reference);
+  if (nioId) {
+    if (!FEATURE_FLAGS_CONFIG.customOrganizationsEnabled) {
+      throw INVALID_INPUT_ERROR(
+        'visitOccupationalMedicineEmployer may not reference a non-insurance organization on this deployment'
+      );
+    }
+    const option = await getNonInsuranceOrganizationById(oystehr, nioId);
+    if (!option) {
+      throw INVALID_INPUT_ERROR(
+        'visitOccupationalMedicineEmployer must reference an existing non-insurance organization'
+      );
+    }
+    if (!option.active) {
+      throw INVALID_INPUT_ERROR(
+        'visitOccupationalMedicineEmployer must reference an active non-insurance organization'
+      );
+    }
+    if (!option.employer) {
+      throw INVALID_INPUT_ERROR(
+        'visitOccupationalMedicineEmployer must reference an employer non-insurance organization'
+      );
+    }
+    return;
+  }
+
+  if (FEATURE_FLAGS_CONFIG.customOrganizationsEnabled) {
+    throw INVALID_INPUT_ERROR('visitOccupationalMedicineEmployer must reference a non-insurance organization');
+  }
+
+  const organizationId = visitEmployer.reference?.split('/')[1];
+
+  if (!organizationId) {
+    throw INVALID_INPUT_ERROR('visitOccupationalMedicineEmployer.reference must be Organization/{id}');
+  }
+
+  const organization = await oystehr.fhir.get<Organization>({
+    resourceType: 'Organization',
+    id: organizationId,
+  });
+
+  if (!isEmployerOrganization(organization)) {
+    throw INVALID_INPUT_ERROR('visitOccupationalMedicineEmployer must reference an occupational medicine employer');
+  }
+
+  if (organization.active === false) {
+    throw INVALID_INPUT_ERROR('visitOccupationalMedicineEmployer must reference an active organization');
+  }
+}

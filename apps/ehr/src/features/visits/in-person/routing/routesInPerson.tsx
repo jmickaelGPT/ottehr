@@ -10,7 +10,12 @@ import { CreateExternalLabOrder } from '../../../external-labs/pages/CreateExter
 import { ExternalLabOrdersListPage } from '../../../external-labs/pages/ExternalLabOrdersListPage';
 import { OrderDetailsPage } from '../../../external-labs/pages/OrderDetails';
 import { ImmunizationOrderCreateEdit } from '../../../immunization/pages/ImmunizationOrderCreateEdit';
+import {
+  CreateExternalRadiologyOrder,
+  EditExternalRadiologyOrder,
+} from '../../../radiology/pages/CreateExternalRadiologyOrder';
 import { CreateRadiologyOrder } from '../../../radiology/pages/CreateRadiologyOrder';
+import { RadiologyExternalOrderDetailsPage } from '../../../radiology/pages/RadiologyExternalOrderDetails';
 import { RadiologyOrderDetailsPage } from '../../../radiology/pages/RadiologyOrderDetails';
 import { RadiologyOrdersListPage } from '../../../radiology/pages/RadiologyOrdersListPage';
 import { AssessmentCard } from '../../shared/components/assessment-tab/AssessmentCard';
@@ -36,6 +41,7 @@ import ProceduresNew from '../pages/ProceduresNew';
 import { ProgressNote } from '../pages/ProgressNote';
 import { Screening } from '../pages/Screening';
 import { SurgicalHistory } from '../pages/SurgicalHistory';
+import { VisitDocuments } from '../pages/VisitDocuments';
 
 export enum ROUTER_PATH {
   CC_AND_INTAKE_NOTES = 'cc-and-intake-notes',
@@ -57,6 +63,7 @@ export enum ROUTER_PATH {
   EXAMINATION = 'examination',
   PLAN = 'plan',
   ERX = 'erx',
+  DOCUMENTS = 'documents',
   OTTEHR_AI = 'ottehr-ai',
 
   EXTERNAL_LAB_ORDER = 'external-lab-orders',
@@ -66,7 +73,10 @@ export enum ROUTER_PATH {
 
   RADIOLOGY_ORDER = 'radiology',
   RADIOLOGY_ORDER_CREATE = `radiology/create`,
+  RADIOLOGY_ORDER_CREATE_EXTERNAL = `radiology/create-external`,
   RADIOLOGY_ORDER_DETAILS = `radiology/:serviceRequestID/order-details`,
+  RADIOLOGY_ORDER_EXTERNAL_DETAILS = `radiology/:serviceRequestID/external-order-details`,
+  RADIOLOGY_ORDER_EDIT_EXTERNAL = `radiology/:serviceRequestID/edit-external`,
 
   PROCEDURES = 'procedures',
   PROCEDURES_NEW = 'procedures/new',
@@ -230,11 +240,38 @@ export const routesInPerson: Record<ROUTER_PATH, RouteInPerson> = {
     iconKey: 'Radiology',
     groupLabel: 'Actions',
   },
+  [ROUTER_PATH.RADIOLOGY_ORDER_CREATE_EXTERNAL]: {
+    path: ROUTER_PATH.RADIOLOGY_ORDER_CREATE_EXTERNAL,
+    modes: FEATURE_FLAGS.RADIOLOGY_ENABLED ? ['main', 'readonly', 'follow-up'] : [],
+    isSkippedInNavigation: true,
+    element: FEATURE_FLAGS.RADIOLOGY_ENABLED ? <CreateExternalRadiologyOrder /> : null,
+    text: 'Radiology',
+    iconKey: 'Radiology',
+    groupLabel: 'Actions',
+  },
   [ROUTER_PATH.RADIOLOGY_ORDER_DETAILS]: {
     path: ROUTER_PATH.RADIOLOGY_ORDER_DETAILS,
     modes: FEATURE_FLAGS.RADIOLOGY_ENABLED ? ['main', 'readonly', 'follow-up'] : [],
     isSkippedInNavigation: true,
     element: FEATURE_FLAGS.RADIOLOGY_ENABLED ? <RadiologyOrderDetailsPage /> : null,
+    text: 'Radiology',
+    iconKey: 'Radiology',
+    groupLabel: 'Actions',
+  },
+  [ROUTER_PATH.RADIOLOGY_ORDER_EXTERNAL_DETAILS]: {
+    path: ROUTER_PATH.RADIOLOGY_ORDER_EXTERNAL_DETAILS,
+    modes: FEATURE_FLAGS.RADIOLOGY_ENABLED ? ['main', 'readonly', 'follow-up'] : [],
+    isSkippedInNavigation: true,
+    element: FEATURE_FLAGS.RADIOLOGY_ENABLED ? <RadiologyExternalOrderDetailsPage /> : null,
+    text: 'Radiology',
+    iconKey: 'Radiology',
+    groupLabel: 'Actions',
+  },
+  [ROUTER_PATH.RADIOLOGY_ORDER_EDIT_EXTERNAL]: {
+    path: ROUTER_PATH.RADIOLOGY_ORDER_EDIT_EXTERNAL,
+    modes: FEATURE_FLAGS.RADIOLOGY_ENABLED ? ['main', 'readonly', 'follow-up'] : [],
+    isSkippedInNavigation: true,
+    element: FEATURE_FLAGS.RADIOLOGY_ENABLED ? <EditExternalRadiologyOrder /> : null,
     text: 'Radiology',
     iconKey: 'Radiology',
     groupLabel: 'Actions',
@@ -400,6 +437,14 @@ export const routesInPerson: Record<ROUTER_PATH, RouteInPerson> = {
     element: <ERXPage />,
     text: 'eRX',
     iconKey: 'eRX',
+    groupLabel: 'Provider',
+  },
+  [ROUTER_PATH.DOCUMENTS]: {
+    path: ROUTER_PATH.DOCUMENTS,
+    modes: ['main', 'readonly', 'follow-up'],
+    element: <VisitDocuments />,
+    text: 'Documents',
+    iconKey: 'Documents',
     groupLabel: 'Provider',
   },
   [ROUTER_PATH.REVIEW_AND_SIGN]: {

@@ -1,3 +1,4 @@
+import type { StructuredFacts } from '../../procedure-coding/structured-fields';
 // ── Generic CRUD types for all quick pick categories ──
 
 export interface QuickPickCreateInput<T> {
@@ -39,8 +40,10 @@ export interface QuickPickRemoveResponse {
 // ── Procedure Quick Picks ──
 
 export interface ProcedureQuickPickCptCode {
+  modifier?: { code: string; display: string }[];
   code: string;
   display: string;
+  billableUnits?: number;
 }
 
 export interface ProcedureQuickPickData {
@@ -59,6 +62,11 @@ export interface ProcedureQuickPickData {
   suppliesUsed?: (string | undefined)[];
   otherSuppliesUsed?: string;
   procedureDetails?: string;
+  structuredFacts?: StructuredFacts;
+  lengthCm?: number;
+  repairDepth?: string;
+  infusionStartTime?: string;
+  infusionStopTime?: string;
   specimenSent?: boolean;
   complications?: string;
   otherComplications?: string;
@@ -182,7 +190,13 @@ export interface InHouseMedicationQuickPickData {
   lotNumber?: string;
   ndc?: string;
   expDate?: string;
-  cptCodes?: { code: string; display: string }[];
+  cptCodes?: {
+    code: string;
+    display: string;
+    isMedication?: boolean;
+    billableUnitSize?: number;
+    billableUnits?: number;
+  }[];
 }
 
 export type CreateInHouseMedicationQuickPickInput = QuickPickCreateInput<InHouseMedicationQuickPickData>;
@@ -207,11 +221,28 @@ export type GetPatientInstructionQuickPicksResponse = QuickPickListResponse<Pati
 
 // ── Insurance Quick Picks ──
 
+/** Optional free-form key/value pair stored on an insurance quick pick (store-only for now). */
+export interface InsuranceQuickPickMetadataEntry {
+  key: string;
+  value: string;
+}
+
 export interface InsuranceQuickPickData {
   id?: string;
+  /** Arbitrary display name for the quick pick, e.g. "Nomastin PPO" (stored as ActivityDefinition.title). */
   name: string;
+  /** Selected payer identifier. */
   payerId: string;
+  /** Selected payer Organization/<id> reference. */
   organizationReference: string;
+  /** Selected payer display ("<payerId> - <name>"); used as the carrier display when the pick is applied. */
+  organizationDisplay?: string;
+  /** candidCode from VALUE_SETS.insuranceTypeOptions; when unset the insurance type field is left unchanged. */
+  insuranceType?: string;
+  /** Value from VALUE_SETS.relationshipToInsuredOptions; when unset the relationship field is left unchanged. */
+  relationship?: string;
+  /** Optional free-form metadata (store-only). */
+  metadata?: InsuranceQuickPickMetadataEntry[];
 }
 
 export type CreateInsuranceQuickPickInput = QuickPickCreateInput<InsuranceQuickPickData>;

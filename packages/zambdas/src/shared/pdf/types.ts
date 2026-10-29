@@ -1,3 +1,4 @@
+import { ErxGetPharmacyResponse } from '@oystehr/sdk';
 import {
   Appointment,
   Coding,
@@ -14,22 +15,21 @@ import {
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
 import { Color, PDFFont, PDFImage, StandardFonts } from 'pdf-lib';
+import { AppointmentContext } from 'utils/lib/config-helpers/patient-record';
+import { FollowupReason } from 'utils/lib/fhir/encounter';
+import { Gender } from 'utils/lib/fhir/helpers';
+import { VitalsVisitNoteData } from 'utils/lib/helpers/vitals/vitals-visit-note-data.types';
 import {
-  AppointmentContext,
-  ExternalLabOrderResult,
-  FollowupReason,
-  Gender,
-  InHouseLabResult as InHouseLabResultPdfData,
-  LabType,
   NOTHING_TO_EAT_OR_DRINK_FIELD,
-  OrderedCoveragesWithSubscribers,
-  PatientPaymentDTO,
-  ProviderDetails,
-  QuantityDataEntryComponent,
   REFUSAL_OF_EMS_TRANSPORT_FIELD,
-  SupportedObsImgAttachmentTypes,
-  VitalsVisitNoteData,
-} from 'utils';
+} from 'utils/lib/types/api/chart-data/chart-data.types';
+import { ProviderDetails } from 'utils/lib/types/api/encounter.types';
+import { ExternalLabOrderResult, InHouseLabResult as InHouseLabResultPdfData } from 'utils/lib/types/api/lab';
+import { PatientPaymentDTO } from 'utils/lib/types/api/patient-payment-types';
+import { OrderedCoveragesWithSubscribers } from 'utils/lib/types/data/account';
+import { QuantityDataEntryComponent } from 'utils/lib/types/data/in-house/in-house.types';
+import { SupportedObsImgAttachmentTypes } from 'utils/lib/types/data/labs/labs.constants';
+import { LabType } from 'utils/lib/types/data/labs/labs.types';
 import { testDataForOrderForm } from '../../ehr/lab/external/submit-lab-order/helpers';
 import { UpcomingFollowUp } from './get-upcoming-follow-ups';
 import { Column, PdfInfo } from './pdf-utils';
@@ -121,6 +121,15 @@ export interface PdfClient {
   embedPdfFromBase64: (base64String: string) => Promise<void>;
   embedImageFromBase64: (base64String: string, imgType: SupportedObsImgAttachmentTypes) => Promise<void>;
   drawSeparatedLine: (lineStyle: LineStyle) => void;
+  drawFilledRectangle: (rectangle: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    color?: Color;
+    borderColor?: Color;
+    borderWidth?: number;
+  }) => void;
   getLeftBound: () => number;
   getRightBound: () => number;
   setLeftBound: (newBound: number) => void;
@@ -224,6 +233,7 @@ export type ResultSpecimenInfo = {
   unit?: string;
   bodySite?: string;
   collectedDateTime?: string;
+  specimenReceivedDateTime?: string;
 };
 
 export interface LabResultsData
@@ -259,11 +269,12 @@ export interface ExternalLabResultsData extends LabResultsData {
   alternatePlacerId: string | undefined;
   accessionNumber: string;
   orderSubmitDate: string;
-  collectionDate: string;
-  resultsReceivedDate: string;
+  collectionDateInTz: string;
+  specimenReceivedDateTimeInTz: string;
+  resultsReceivedDateInTz: string;
   reviewed?: boolean; // todo why is this possibly undefined ??
   reviewingProvider: Practitioner | undefined;
-  reviewDate: string | undefined;
+  reviewDateInTz: string | undefined;
   resultInterpretations: string[];
   attachments: ExternalLabResultAttachments;
   externalLabResults: ExternalLabResult[];
@@ -280,7 +291,7 @@ export interface InHouseLabResultsData
     'accountNumber' | 'patientVisitNote' | 'clinicalInfo' | 'fastingStatus' | 'resultSpecimenInfo'
   > {
   inHouseLabResults: InHouseLabResultConfig[];
-  timezone: string | undefined;
+  timezone: string;
   serviceRequestID: string;
   orderCreateDate: string;
 }
@@ -535,12 +546,13 @@ export interface RosObservations extends PdfData {
         label: string;
         abnormal: boolean;
       }>;
+      comment?: string;
     };
   };
 }
 
 export interface Prescriptions extends PdfData {
-  prescriptions: string[];
+  pharmacyGroups: { pharmacy?: pharmacyInfo; prescriptions: string[] }[];
 }
 
 export interface EmCode extends PdfData {
@@ -597,6 +609,10 @@ export interface Procedures extends PdfData {
     medicationUsed?: string;
     bodySite?: string;
     bodySide?: string;
+    structuredFacts?: string;
+    lengthCm?: string;
+    repairDepth?: string;
+    infusionTime?: string;
     technique?: string[];
     suppliesUsed?: string;
     procedureDetails?: string;
@@ -645,6 +661,7 @@ export interface PrimaryCarePhysician extends PdfData {
   pcpPracticeName: string;
   pcpAddress: string;
   pcpPhone: string;
+  pcpFax: string;
 }
 
 export interface Documents extends PdfData {
@@ -757,6 +774,7 @@ export interface consentFormsInfo extends PdfData {
 export interface pharmacyInfo extends PdfData {
   name: string;
   address: string;
+  phone: string;
 }
 
 export interface VisitDetailsInput {
@@ -774,21 +792,35 @@ export interface VisitDetailsInput {
   emergencyContactResource?: RelatedPerson;
   attorneyRelatedPerson?: RelatedPerson;
   employerOrganization?: Organization;
-  occupationalMedicineEmployerOrganization?: Organization;
+  occupationalMedicineEmployerName?: string;
   consents: Consent[];
   questionnaireResponse?: QuestionnaireResponse;
   payments: PatientPaymentDTO[];
+  serviceCategories?: ServiceCategoryCatalogEntry[];
+}
+
+/**
+ * Minimal service-category shape consumed by resolveServiceCategoryAbbreviation
+ * (utils) — matched against the appointment's category code/name to produce the
+ * abbreviation shown in PDF visit headers.
+ */
+export interface ServiceCategoryCatalogEntry {
+  code: string;
+  name: string;
+  abbreviation?: string;
 }
 
 export interface VisitDataInput {
   appointment: Appointment;
   location?: Location;
   timezone: string;
+  serviceCategories?: ServiceCategoryCatalogEntry[];
 }
 
 export interface ProgressNoteVisitDataInput {
   allChartData: AllChartData;
   appointmentPackage: FullAppointmentResourcePackage;
+  serviceCategories?: ServiceCategoryCatalogEntry[];
 }
 
 export interface PatientDataInput {
@@ -840,8 +872,10 @@ export interface EmployerDataInput {
   insuranceOrgs?: Organization[];
 }
 
+// Name only: in NIO mode the employer is a billing-app resource the clinical side never reads as
+// FHIR, so the PDF renders from the resolved display name regardless of source.
 export interface OccupationalMedicineEmployerDataInput {
-  employer?: Organization;
+  employerName?: string;
 }
 
 export interface AttorneyDataInput {
@@ -856,6 +890,8 @@ export interface UploadMetadata {
   patientId: string;
   fileName: string;
   bucketName: string;
+  /** Reuse one object per patient instead of writing a new timestamped one. */
+  stableKey?: boolean;
 }
 
 export type PdfResult = {
@@ -872,18 +908,27 @@ export interface PatientInfoForDischargeSummary extends PdfData {
 }
 
 export interface RadiologyData extends PdfData {
+  /** Study names for orders that have no final report yet — rendered under "Pending Results" in the PDF. */
+  pendingRadiologyOrders?: string[];
   radiology?: {
     name: string;
+    performedBy?: string;
     result?: string;
   }[];
 }
 
 export interface ErxMedicationsData extends PdfData {
-  medications: PrescribedMedication[];
+  pharmacyGroups: { pharmacy?: pharmacyInfo; medications: PrescribedMedication[] }[];
 }
 
 export interface PatientInstructionsData extends PdfData {
   instructions: string[];
+}
+
+export interface PatientInstructionsPdfData extends PdfData {
+  patient: PatientInfoForDischargeSummary;
+  visit: VisitInfo;
+  patientInstructions?: PatientInstructionsData;
 }
 
 export interface EducationDocumentsData extends PdfData {
@@ -931,7 +976,9 @@ export interface VitalsDataInDischargeSummary extends PdfData {
     oxygenSat?: string;
     weight?: string;
     height?: string;
+    bmi?: string;
     vision?: string;
+    dotVisionScreening?: string[];
     lastMenstrualPeriod?: string;
   };
 }
@@ -952,6 +999,7 @@ export interface DischargeSummaryData extends PdfData {
   inHouseMedications: InHouseMedicationsDataForDischargeSummary;
   erxMedications?: ErxMedicationsData;
   diagnoses?: DiagnosesData;
+  procedures?: Procedures;
   patientInstructions?: PatientInstructionsData;
   educationDocuments?: EducationDocumentsData;
   disposition: DispositionData;
@@ -991,6 +1039,31 @@ export interface GetPaymentDataResponse {
   };
 }
 
+/** Resolved from an Encounter `author`/`verifier` Provenance: who signed/approved and when. */
+export interface SignatureProvenanceInfo {
+  /** Provider display name (via `getProviderNameWithProfession`). */
+  name: string;
+  /** `Provenance.recorded` ISO timestamp. */
+  dateTimeISO?: string;
+}
+
+export interface ProgressNoteSignatures {
+  /** `author` Provenance — the provider who signed the note. */
+  signedBy?: SignatureProvenanceInfo;
+  /** `verifier` Provenance — the supervisor who approved the note (supervisor-approval flow only). */
+  approvedBy?: SignatureProvenanceInfo;
+}
+
+/** Pre-formatted signature lines rendered at the bottom of the visit note. */
+export interface SignatureData extends PdfData {
+  /** "Signed electronically by {provider} on {date} {time}". */
+  signedBy?: string;
+  /** "Approved by {provider} on {date} {time}" — present only when supervisor-approved. */
+  approvedBy?: string;
+  /** Placeholder shown instead of the signed line when the note isn't signed yet (e.g. a faxed draft). */
+  pendingSignature?: string;
+}
+
 export interface ProgressNoteInput {
   patient: Patient;
   encounter: Encounter;
@@ -998,6 +1071,10 @@ export interface ProgressNoteInput {
   appointmentPackage: FullAppointmentResourcePackage;
   questionnaireResponse?: QuestionnaireResponse;
   upcomingFollowUps: UpcomingFollowUp[];
+  serviceCategories?: ServiceCategoryCatalogEntry[];
+  erxPharmacies?: Record<string, ErxGetPharmacyResponse>;
+  signatures?: ProgressNoteSignatures;
+  signed?: boolean;
 }
 
 export interface ProgressNoteData extends PdfData {
@@ -1017,6 +1094,7 @@ export interface ProgressNoteData extends PdfData {
   immunizationOrders: ImmunizationOrders;
   inHouseLabs?: InHouseLabs;
   externalLabs?: ExternalLabs;
+  radiology?: RadiologyData;
   screening: AdditionalQuestions;
   intakeNotes: IntakeNotes;
   vitals: Vitals;
@@ -1031,12 +1109,21 @@ export interface ProgressNoteData extends PdfData {
   plan: PlanData;
   followupCompleted: FollowupCompleted;
   upcomingVisits: UpcomingVisitsData;
+  signature: SignatureData;
+}
+
+export interface PatientInstructionsPdfInput {
+  allChartData: AllChartData;
+  appointmentPackage: FullAppointmentResourcePackage;
+  serviceCategories?: ServiceCategoryCatalogEntry[];
 }
 
 export interface DischargeSummaryInput {
   allChartData: AllChartData;
   appointmentPackage: FullAppointmentResourcePackage;
   upcomingFollowUps: UpcomingFollowUp[];
+  serviceCategories?: ServiceCategoryCatalogEntry[];
+  erxPharmacies?: Record<string, ErxGetPharmacyResponse>;
 }
 
 export interface DischargeSummaryData extends PdfData {
@@ -1051,6 +1138,7 @@ export interface DischargeSummaryData extends PdfData {
   inHouseMedications: InHouseMedicationsDataForDischargeSummary;
   erxMedications?: ErxMedicationsData;
   diagnoses?: DiagnosesData;
+  procedures?: Procedures;
   patientInstructions?: PatientInstructionsData;
   educationDocuments?: EducationDocumentsData;
   disposition: DispositionData;
@@ -1059,6 +1147,43 @@ export interface DischargeSummaryData extends PdfData {
   upcomingVisits: UpcomingVisitsData;
   documentsAttached?: boolean;
 }
+/**
+ * Data for the generated first page of an outbound fax packet.
+ */
+/**
+ * Who and what the cover sheet is about. The visit fields are absent for packets that do not belong
+ * to a single visit (a whole medical record, or one document from the patient's Docs table).
+ */
+export interface FaxCoverSheetSubject {
+  /** "Black, Oliver" */
+  patientName: string;
+  /** MRN or patient uuid — printed as PID. */
+  patientId: string;
+  /** Appointment id — printed as VID. */
+  visitId?: string;
+  /** Already formatted MM/DD/YYYY. */
+  dateOfService?: string;
+  /** e.g. "Urgent Care Visit" / "Medical Record". Omitted when the patient's name stands alone. */
+  visitTypeLabel?: string;
+}
+
+export interface FaxCoverSheetData extends PdfData {
+  recipient: { name?: string; organization?: string; faxNumber: string; phoneNumber?: string };
+  sender: {
+    practitionerName: string;
+    npi?: string;
+    organizationName: string;
+    addressText: string;
+    phoneNumber?: string;
+    faxNumber?: string;
+  };
+  subject: FaxCoverSheetSubject;
+  /** Total pages of the merged packet, cover sheet included. */
+  totalPages: number;
+  /** Already formatted "MM/DD/YYYY  hh:mm A". */
+  generatedAt: string;
+}
+
 export interface MedicationHistoryInput extends PdfData {
   patient: PatientInfoForDischargeSummary; // all this is pretty generic actually
   visit: VisitInfo;

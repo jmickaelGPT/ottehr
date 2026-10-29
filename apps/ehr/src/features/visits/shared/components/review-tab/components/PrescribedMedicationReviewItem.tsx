@@ -1,15 +1,16 @@
-import { Typography } from '@mui/material';
+import { Chip, Stack, Typography } from '@mui/material';
 import { FC } from 'react';
-import { PrescribedMedicationDTO } from 'utils';
+import { PrescribedMedicationDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
 
 export const PrescribedMedicationReviewItem: FC<{ medication: PrescribedMedicationDTO }> = (props) => {
   const { medication } = props;
 
   return (
     <>
-      <Typography fontWeight={500} mb={0.5}>
-        {medication.name}
-      </Typography>
+      <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap" mb={0.5}>
+        <Typography fontWeight={500}>{medication.name}</Typography>
+        {medication.isRenewal && <Chip label="Refill" size="small" color="primary" variant="outlined" />}
+      </Stack>
       <Typography>{medication.instructions}</Typography>
     </>
   );

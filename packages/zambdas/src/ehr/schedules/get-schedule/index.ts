@@ -1,36 +1,43 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { HealthcareService, Location, PractitionerRole, Schedule } from 'fhir/r4b';
+import { userMe } from 'utils/lib/auth/user-me.helper';
 import {
-  BLANK_SCHEDULE_JSON_TEMPLATE,
-  getPractitionerRoleAllCategories,
-  getScheduleExtension,
-  getSlugForBookableResource,
-  getTimezone,
+  LOCATION_REVIEW_LINK_EXTENSION_URL,
+  ROOM_EXTENSION_URL,
+  SCHEDULE_DISPLAY_NAME_EXTENSION_URL,
+  SCHEDULE_OWNER_ADVAPACS_LOCATION_EXTENSION_URL,
+  SCHEDULE_OWNER_STRIPE_ACCOUNT_EXTENSION_URL,
+} from 'utils/lib/fhir/constants';
+import { getPractitionerRoleAllCategories } from 'utils/lib/fhir/healthcareService';
+import { getSlugForBookableResource } from 'utils/lib/fhir/helpers';
+import { isLocationInPerson, isLocationManuallyCreated, isLocationVirtual } from 'utils/lib/fhir/location';
+import { Secrets } from 'utils/lib/secrets';
+import { ScheduleOwnerFhirResource } from 'utils/lib/types/api/schedules';
+import { RoleType } from 'utils/lib/types/api/user.types';
+import { TIMEZONES } from 'utils/lib/types/constants';
+import {
   INVALID_INPUT_ERROR,
   INVALID_RESOURCE_ID_ERROR,
-  isLocationVirtual,
-  isValidUUID,
-  LOCATION_REVIEW_LINK_EXTENSION_URL,
   MISSING_REQUEST_BODY,
   MISSING_REQUIRED_PARAMETERS,
   MISSING_SCHEDULE_EXTENSION_ERROR,
-  RoleType,
-  ROOM_EXTENSION_URL,
-  SCHEDULE_DISPLAY_NAME_EXTENSION_URL,
   SCHEDULE_NOT_FOUND_ERROR,
-  SCHEDULE_OWNER_ADVAPACS_LOCATION_EXTENSION_URL,
   SCHEDULE_OWNER_NOT_FOUND_ERROR,
-  SCHEDULE_OWNER_STRIPE_ACCOUNT_EXTENSION_URL,
+} from 'utils/lib/types/errors';
+import {
+  BLANK_SCHEDULE_JSON_TEMPLATE,
+  getScheduleExtension,
+  getTimezone,
   ScheduleDTO,
   ScheduleDTOOwner,
   ScheduleExtension,
-  ScheduleOwnerFhirResource,
-  Secrets,
-  TIMEZONES,
-  userMe,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../shared';
+} from 'utils/lib/utils/scheduleUtils';
+import { isValidUUID } from 'utils/lib/validation/helper';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { addressStringFromAddress, getNameForOwner, getNameForPractitionerRole } from '../shared';
 
 let m2mToken: string;
@@ -60,10 +67,9 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   console.group('validateRequestParameters');
   const validatedParameters = validateRequestParameters(input);
   console.groupEnd();
-  console.debug('validateRequestParameters success', JSON.stringify(validatedParameters));
   const { secrets } = validatedParameters;
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
   const [effectInput, includePaymentFields] = await Promise.all([
     complexValidation(validatedParameters, oystehr),
     callerCanViewPaymentFields(input.headers?.Authorization, secrets),
@@ -107,6 +113,8 @@ const performEffect = (
 
   let detailText: string | undefined = undefined;
   let isVirtual: boolean | undefined = undefined;
+  let isInPerson: boolean | undefined = undefined;
+  let isManuallyCreated: boolean | undefined = undefined;
   let stripeAccountId: string | undefined = undefined;
   let advapacsLocationId: string | undefined = undefined;
   let rooms: string[] | undefined = undefined;
@@ -124,6 +132,8 @@ const performEffect = (
     description = loc.description;
     telecom = loc.telecom;
     isVirtual = isLocationVirtual(loc);
+    isInPerson = isLocationInPerson(loc);
+    isManuallyCreated = isLocationManuallyCreated(loc);
     reviewLink = loc.extension?.find((ext) => ext.url === LOCATION_REVIEW_LINK_EXTENSION_URL)?.valueUrl;
     if (options.includePaymentFields) {
       stripeAccountId = loc.extension?.find((ext) => ext.url === SCHEDULE_OWNER_STRIPE_ACCOUNT_EXTENSION_URL)
@@ -168,6 +178,8 @@ const performEffect = (
     detailText,
     hoursOfOperation: (ownerResource as Location)?.hoursOfOperation,
     isVirtual,
+    isInPerson,
+    isManuallyCreated,
     healthcareServiceIds,
     allCategories,
     locationId,
@@ -205,7 +217,6 @@ const validateRequestParameters = (input: ZambdaInput): BasicInput => {
     throw MISSING_REQUEST_BODY;
   }
 
-  console.log('input', JSON.stringify(input, null, 2));
   const { secrets } = input;
   const { scheduleId, ownerId, ownerType } = JSON.parse(input.body);
 

@@ -1,15 +1,13 @@
 import { Button } from '@mui/material';
-import { FormFieldItemRecord } from 'config-types';
+import { FormFieldItemRecord } from 'config-types/config/form-fields';
 import { Coverage, Patient } from 'fhir/r4b';
-import { FC, useMemo } from 'react';
-import { Section } from 'src/components/layout';
+import { FC, ReactNode, useMemo } from 'react';
+import { Section } from 'src/components/layout/Section';
 import { dataTestIds } from 'src/constants/data-test-ids';
-import {
-  checkCoverageMatchesDetails,
-  CoverageCheckWithDetails,
-  CoverageWithPriority,
-  PATIENT_RECORD_CONFIG,
-} from 'utils';
+import { checkCoverageMatchesDetails } from 'utils/lib/fhir/billing';
+import { PATIENT_RECORD_CONFIG } from 'utils/lib/ottehr-config/patient-record';
+import { CoverageCheckWithDetails } from 'utils/lib/types/api/patient-account';
+import { CoverageWithPriority } from 'utils/lib/types/data/account';
 import { InsuranceContainer } from './InsuranceContainer';
 import { SectionSaveButton } from './SectionSaveButton';
 
@@ -42,6 +40,11 @@ export const InsuranceSection: FC<{
   onCloseAddInsurance: () => void;
   newInsuranceOrdinal: number;
   encounterId?: string;
+  /**
+   * Visit-page-only: renders a coverage's compact card thumbnail inside its insurance block.
+   * Called with the 0-based card ordinal (0 = primary, 1 = secondary).
+   */
+  renderInsuranceCardThumbnail?: (ordinal: number) => ReactNode;
 }> = ({
   coverages,
   patient,
@@ -54,24 +57,23 @@ export const InsuranceSection: FC<{
   onCloseAddInsurance,
   newInsuranceOrdinal,
   encounterId,
+  renderInsuranceCardThumbnail,
 }) => {
   const primary = getInsuranceSectionDefinition(0);
   const secondary = getInsuranceSectionDefinition(1);
 
-  const { fieldKeys, requiredFieldKeys } = useMemo(() => {
+  const fieldKeys = useMemo(() => {
     const renderedOrdinals = new Set<number>();
     coverages.forEach((c) => renderedOrdinals.add(c.startingPriority - 1));
     if (isAddingInsurance) renderedOrdinals.add(newInsuranceOrdinal - 1);
 
     const collected: string[] = [];
-    const collectedRequired: string[] = [];
     [primary, secondary].forEach((section, index) => {
       if (!renderedOrdinals.has(index)) return;
       const keys = Object.values(section.items).map((item) => item.key);
       collected.push(...keys);
-      collectedRequired.push(...section.requiredFields.filter((key) => keys.includes(key)));
     });
-    return { fieldKeys: collected, requiredFieldKeys: collectedRequired };
+    return collected;
   }, [coverages, isAddingInsurance, newInsuranceOrdinal, primary, secondary]);
 
   return (
@@ -80,7 +82,6 @@ export const InsuranceSection: FC<{
       titleWidget={
         <SectionSaveButton
           fieldKeys={fieldKeys}
-          requiredFieldKeys={requiredFieldKeys}
           patientId={patient.id}
           encounterId={encounterId}
           onSaveSuccess={isAddingInsurance ? onCloseAddInsurance : undefined}
@@ -101,6 +102,7 @@ export const InsuranceSection: FC<{
             coverage.resource.id !== undefined ? () => onRemoveCoverage(coverage.resource.id!) : undefined
           }
           renderWithoutSection
+          renderInsuranceCardThumbnail={renderInsuranceCardThumbnail}
         />
       ))}
       {isAddingInsurance && (
@@ -110,6 +112,7 @@ export const InsuranceSection: FC<{
           isNew
           onCancelAdd={onCancelAddInsurance}
           renderWithoutSection
+          renderInsuranceCardThumbnail={renderInsuranceCardThumbnail}
         />
       )}
       {coverages.length < 2 && !isAddingInsurance && (

@@ -1,4 +1,4 @@
-import { type ServiceCategoryConfig } from 'config-types';
+import type { ServiceCategoryConfig } from 'config-types/config/booking';
 import {
   Patient,
   Questionnaire,
@@ -6,10 +6,15 @@ import {
   QuestionnaireResponseItem,
   QuestionnaireResponseItemAnswer,
 } from 'fhir/r4b';
-import { FHIR_EXTENSION, getFirstName, getLastName, getMiddleName } from '../fhir';
-import { makeAnswer, pickFirstValueFromAnswerItem } from '../helpers';
+import { FHIR_EXTENSION } from '../fhir/constants';
+import { getFirstName, getLastName, getMiddleName } from '../fhir/patient';
+import { pickFirstValueFromAnswerItem } from '../helpers/paperwork/paperwork';
+import { makeAnswer } from '../helpers/paperwork/prePopulation';
 import { BOOKING_CONFIG, type StrongCoding } from '../ottehr-config/booking';
-import { flattenQuestionnaireAnswers, PatientInfo, PersonSex } from '../types';
+import { PersonSex } from '../types/common';
+import { PATIENT_NO_EMAIL_URL } from '../types/constants';
+import { flattenQuestionnaireAnswers } from '../types/data/paperwork/paperwork.types';
+import { PatientInfo } from '../types/data/telemed/appointments/create-appointment.types';
 
 // Questionnaire fields that distinguish between "not provided" (undefined) vs "cleared" ('')
 // Cleared fields trigger FHIR resource removal in harvest/update-visit-details zambdas
@@ -21,6 +26,26 @@ export const FIELDS_TO_TRACK_CLEARING = ['patient-preferred-name', 'authorized-n
 export const getServiceCategoryCodings = (): StrongCoding[] => {
   return BOOKING_CONFIG.serviceCategories.map((sc) => sc.category);
 };
+
+/**
+ * True when `code` matches a compile-time BOOKING_CONFIG service category.
+ *
+ * BOOKING_CONFIG categories aren't backed by a FHIR HealthcareService — they
+ * can't be referenced from `PractitionerRole.healthcareService[]` and they
+ * can't be allow-listed by a HealthcareService group (groups reference
+ * categories by FHIR id). Booking-flow sites use this helper to enforce the
+ * invariant "PractitionerRole-owned Schedules never support BOOKING_CONFIG
+ * categories" — a Slot stamped with one of these codes must live on a
+ * Location or HealthcareService (group) actor's Schedule.
+ *
+ * Lives here (config-helpers) rather than in `ottehr-config/booking` because
+ * it interprets the active BOOKING_CONFIG rather than defining it. Putting
+ * it next to the config would have forced downstream instances to redefine
+ * the helper alongside their config overrides; here it picks up whatever
+ * config the consuming process sees through the proxy.
+ */
+export const isBookingConfigServiceCategoryCode = (code: string): boolean =>
+  BOOKING_CONFIG.serviceCategories.some((sc) => sc.category.code === code);
 
 /**
  * Whether a service category supports a given (mode, visit type) context.
@@ -197,6 +222,9 @@ export const mapBookingQRItemToPatientInfo = (qrItem: QuestionnaireResponseItem[
       case 'patient-email':
         patientInfo.email = pickFirstValueFromAnswerItem(item, 'string');
         break;
+      case 'patient-no-email':
+        patientInfo.noEmail = pickFirstValueFromAnswerItem(item, 'boolean') ?? false;
+        break;
       case 'patient-phone-number':
         patientInfo.phoneNumber = pickFirstValueFromAnswerItem(item, 'string');
         break;
@@ -269,6 +297,7 @@ export const prepopulateBookingForm = (input: BookingFormPrePopulationInput): Qu
   }
   const patientPreferredName = patient?.name?.find((name) => name.use === 'nickname')?.given?.[0];
   const patientEmail = patient?.telecom?.find((c) => c.system === 'email' && c.period?.end === undefined)?.value;
+  const patientNoEmail = patient?.extension?.find((e) => e.url === PATIENT_NO_EMAIL_URL)?.valueBoolean ?? !patientEmail;
 
   const authorizedNLG = patient?.extension?.find(
     (e) => e.url === FHIR_EXTENSION.Patient.authorizedNonLegalGuardians.url
@@ -327,6 +356,9 @@ export const prepopulateBookingForm = (input: BookingFormPrePopulationInput): Qu
           }
           if (linkId === 'patient-email' && patientEmail) {
             answer = makeAnswer(patientEmail);
+          }
+          if (linkId === 'patient-no-email' && patient) {
+            answer = makeAnswer(patientNoEmail, 'Boolean');
           }
           if (linkId === 'authorized-non-legal-guardian' && authorizedNLG) {
             answer = makeAnswer(authorizedNLG);

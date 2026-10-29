@@ -1,15 +1,21 @@
 import Oystehr from '@oystehr/sdk';
 import { QuestionnaireResponse, QuestionnaireResponseItem } from 'fhir/r4b';
+import { getQuestionnaireItemsAndProgress } from 'utils/lib/helpers/paperwork/paperwork';
 import {
   filterDisabledPages,
-  getQuestionnaireItemsAndProgress,
   makeValidationSchema,
-  PatchPaperworkParameters,
-  QUESTIONNAIRE_RESPONSE_INVALID_ERROR,
   recursiveGroupTransform,
-} from 'utils';
+} from 'utils/lib/helpers/paperwork/validation';
+import { qrSentManually } from 'utils/lib/helpers/practice-managed-questionnaires';
+import { PatchPaperworkParameters } from 'utils/lib/types/data/paperwork/paperwork.types';
+import {
+  QUESTIONNAIRE_RESPONSE_INVALID_CUSTOM_ERROR,
+  QUESTIONNAIRE_RESPONSE_INVALID_ERROR,
+} from 'utils/lib/types/errors';
 import { ValidationError } from 'yup';
-import { ZambdaInput } from '../../shared';
+import { z } from 'zod';
+import { ZambdaInput } from '../../shared/types/common';
+import { safeJsonParse, safeValidate } from '../../shared/validation';
 
 interface BasicInput extends PatchPaperworkParameters {
   appointmentId?: string;
@@ -36,30 +42,27 @@ export interface SubmitPaperworkEffectInput extends Omit<BasicInput, 'answers'>,
   updatedAnswers: QuestionnaireResponseItem[];
   questionnaireResponseId: string;
   currentQRStatus: QuestionnaireResponse['status'];
+  createReviewTaskAndPdf: boolean;
 }
+
+const PaperworkBodySchema = z.object({
+  answers: z.unknown(),
+  questionnaireResponseId: z.string().uuid(),
+  appointmentId: z.string().uuid().optional(),
+});
 
 const basicValidation = (input: ZambdaInput): BasicInput => {
   if (!input.body) {
     throw new Error('No request body provided');
   }
-  const inputJSON = JSON.parse(input.body);
-  const { answers, questionnaireResponseId, appointmentId } = inputJSON;
+  const inputJSON = safeJsonParse(input.body);
+  const { answers, questionnaireResponseId, appointmentId } = safeValidate(PaperworkBodySchema, inputJSON);
 
   if (!answers) {
     throw new Error(`"answers" is a required param`);
   }
-  if (questionnaireResponseId == undefined) {
-    throw new Error(`"questionnaireResponseId" is a required param`);
-  }
-  if (typeof questionnaireResponseId !== 'string') {
-    throw new Error(`"questionnaireResponseId" must be a string`);
-  }
 
-  if (appointmentId && typeof appointmentId !== 'string') {
-    throw new Error(`"appointmentId" must be a string`);
-  }
-
-  return { answers, questionnaireResponseId, appointmentId };
+  return { answers: answers as QuestionnaireResponseItem, questionnaireResponseId, appointmentId };
 };
 
 const itemAnswerHasValue = (item: QuestionnaireResponseItem): boolean => {
@@ -93,6 +96,10 @@ const complexSubmitValidation = async (
   }
 
   const { items, fullQRResource } = qrAndQItems;
+
+  if (fullQRResource.status === 'entered-in-error') {
+    throw QUESTIONNAIRE_RESPONSE_INVALID_CUSTOM_ERROR('This form has been deleted and can no longer be submitted.');
+  }
 
   const currentAnswers = fullQRResource.item ?? [];
 
@@ -200,6 +207,7 @@ const complexSubmitValidation = async (
     questionnaireResponseId,
     updatedAnswers: filteredAnswers,
     currentQRStatus: fullQRResource.status,
+    createReviewTaskAndPdf: qrSentManually(fullQRResource),
   };
 };
 const complexPatchValidation = async (
@@ -215,6 +223,10 @@ const complexPatchValidation = async (
   }
 
   const { items, fullQRResource } = qrAndQItems;
+
+  if (fullQRResource.status === 'entered-in-error') {
+    throw QUESTIONNAIRE_RESPONSE_INVALID_CUSTOM_ERROR('This form has been deleted and can no longer be updated.');
+  }
 
   console.log('validating updates for questionnaire response', questionnaireResponseId);
 
@@ -268,6 +280,7 @@ export const validateSubmitInputs = async (
 ): Promise<SubmitPaperworkEffectInput> => {
   const basic = basicValidation(input);
   const { answers } = basic;
+
   if (!Array.isArray(answers)) {
     throw new Error(`"answers" must be an array`);
   }

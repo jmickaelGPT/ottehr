@@ -1,5 +1,8 @@
-import { Secrets, SendForFinalReadZambdaInput } from 'utils';
-import { validateJsonBody, ZambdaInput } from '../../../shared';
+import { Secrets } from 'utils/lib/secrets';
+import { SendForFinalReadZambdaInput, SendForFinalReadZambdaInputSchema } from 'utils/lib/types/api/radiology';
+import { validateJsonBody } from '../../../shared/helpers';
+import { ZambdaInput } from '../../../shared/types/common';
+import { safeValidate } from '../../../shared/validation';
 
 export interface ValidatedInput {
   body: SendForFinalReadZambdaInput;
@@ -7,7 +10,7 @@ export interface ValidatedInput {
 }
 
 export const validateInput = async (input: ZambdaInput): Promise<ValidatedInput> => {
-  const body = validateBody(input);
+  const body = safeValidate(SendForFinalReadZambdaInputSchema, validateJsonBody(input));
 
   const callerAccessToken = input.headers.Authorization.replace('Bearer ', '');
   if (callerAccessToken == null) {
@@ -20,28 +23,12 @@ export const validateInput = async (input: ZambdaInput): Promise<ValidatedInput>
   };
 };
 
-const validateBody = (input: ZambdaInput): SendForFinalReadZambdaInput => {
-  const { serviceRequestId } = validateJsonBody(input);
-
-  if (!serviceRequestId) {
-    throw new Error('serviceRequestId is required');
-  }
-
-  if (typeof serviceRequestId !== 'string') {
-    throw new Error('serviceRequestId must be a string');
-  }
-
-  return {
-    serviceRequestId,
-  };
-};
-
 export const validateSecrets = (secrets: Secrets | null): Secrets => {
   if (!secrets) {
     throw new Error('Secrets are required');
   }
 
-  const { AUTH0_ENDPOINT, AUTH0_CLIENT, AUTH0_SECRET, AUTH0_AUDIENCE, FHIR_API, PROJECT_API } = secrets;
+  const { AUTH0_ENDPOINT, AUTH0_CLIENT, AUTH0_SECRET, AUTH0_AUDIENCE, FHIR_API, PROJECT_API, ENVIRONMENT } = secrets;
   if (!AUTH0_ENDPOINT || !AUTH0_CLIENT || !AUTH0_SECRET || !AUTH0_AUDIENCE || !FHIR_API || !PROJECT_API) {
     throw new Error('Missing required secrets');
   }
@@ -52,5 +39,7 @@ export const validateSecrets = (secrets: Secrets | null): Secrets => {
     AUTH0_AUDIENCE,
     FHIR_API,
     PROJECT_API,
+    // Required by userMe(); see `resolveCallerPractitionerRef` in shared/practitioners.ts.
+    ENVIRONMENT,
   };
 };

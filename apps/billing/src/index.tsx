@@ -1,3 +1,4 @@
+import './index.css';
 import { Auth0Provider } from '@auth0/auth0-react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { StrictMode } from 'react';
@@ -22,7 +23,7 @@ root.render(
         clientId={import.meta.env.VITE_APP_OYSTEHR_APPLICATION_CLIENT_ID || ''}
         authorizationParams={{
           audience: import.meta.env.VITE_APP_OYSTEHR_APPLICATION_AUDIENCE,
-          redirect_uri: import.meta.env.VITE_APP_OYSTEHR_APPLICATION_REDIRECT_URL,
+          redirect_uri: window.location.origin,
           connection: import.meta.env.VITE_APP_OYSTEHR_CONNECTION_NAME,
         }}
         cacheLocation="localstorage"

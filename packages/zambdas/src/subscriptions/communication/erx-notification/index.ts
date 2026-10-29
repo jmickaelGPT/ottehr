@@ -1,11 +1,14 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Communication, Practitioner } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import { ERX_TASK, Secrets, TASK_ASSIGNED_DATE_TIME_EXTENSION_URL } from 'utils';
-import { getAuth0Token, wrapHandler } from '../../../shared';
-import { assertDefined, createOystehrClient, validateJsonBody } from '../../../shared/helpers';
+import { TASK_ASSIGNED_DATE_TIME_EXTENSION_URL } from 'utils/lib/fhir/constants';
+import { Secrets } from 'utils/lib/secrets';
+import { ERX_TASK } from 'utils/lib/types/data/tasks/types';
+import { getAuth0Token } from '../../../shared/getAuth0Token';
+import { assertDefined, createClinicalOystehrClient, validateJsonBody } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
 import { createTask } from '../../../shared/tasks';
-import { ZambdaInput } from '../../../shared/types';
+import { ZambdaInput } from '../../../shared/types/common';
 
 const ZAMBDA_NAME = 'erx-notification-subscription';
 
@@ -17,7 +20,6 @@ interface Input {
 let oystehrToken: string;
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`Input: ${JSON.stringify(input)}`);
   const { communication, secrets } = validateRequestParameters(input);
 
   if (!oystehrToken) {
@@ -27,7 +29,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     console.log('already have token');
   }
 
-  const oystehr = createOystehrClient(oystehrToken, secrets);
+  const oystehr = createClinicalOystehrClient(oystehrToken, secrets);
 
   const practitioner = assertDefined(
     (

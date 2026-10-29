@@ -1,26 +1,36 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { DocumentReference } from 'fhir/r4b';
+import { getAllFhirSearchPages } from 'utils/lib/fhir/getAllFhirSearchPages';
+import { CODE_SYSTEM_ICD_10 } from 'utils/lib/helpers/rcm/constants';
+import { getSecret, SecretsKeys } from 'utils/lib/secrets';
 import {
-  ALREADY_EXISTS_WITH_MESSAGE,
-  CODE_SYSTEM_ICD_10,
-  getAllFhirSearchPages,
-  getSecret,
-  PATIENT_EDUCATION_APPROVED_DOC_TYPE_CODE,
-  PATIENT_EDUCATION_APPROVED_ICD_EXTENSION_URL,
-  SecretsKeys,
   UpdateApprovedPatientEducationCodesInput,
   UpdateApprovedPatientEducationCodesOutput,
-} from 'utils';
+} from 'utils/lib/types/api/approved-patient-education.types';
 import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  topLevelCatch,
-  wrapHandler,
-  ZambdaInput,
-} from '../../shared';
-import { extractApprovedEducationIcdCodes } from '../shared/approved-patient-education-helpers';
-import { validateRequestParameters } from './validateRequestParameters';
+  PATIENT_EDUCATION_APPROVED_DOC_TYPE_CODE,
+  PATIENT_EDUCATION_APPROVED_ICD_EXTENSION_URL,
+} from 'utils/lib/types/data/paperwork/paperwork.constants';
+import { ALREADY_EXISTS_WITH_MESSAGE } from 'utils/lib/types/errors';
+import { z } from 'zod';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { topLevelCatch } from '../../shared/lambda';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { validateWithSchema } from '../../shared/validation';
+import { findConflictingApprovedEducationIcdCodes } from '../shared/approved-patient-education-helpers';
+
+const icdCodeSchema = z.object({
+  code: z.string().min(1, 'Each icdCode must have a code'),
+  display: z.string(),
+});
+
+const updateApprovedPatientEducationCodesInputSchema: z.ZodType<UpdateApprovedPatientEducationCodesInput> = z.object({
+  documentReferenceId: z.string().min(1, 'documentReferenceId is required'),
+  icdCodes: z.array(icdCodeSchema).min(1, 'icdCodes must be a non-empty array'),
+});
 
 let m2mToken: string;
 
@@ -34,9 +44,9 @@ export const index = wrapHandler(
   'update-approved-patient-education-codes',
   async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
     try {
-      const validatedInput = validateRequestParameters(input);
+      const validatedInput = validateWithSchema(updateApprovedPatientEducationCodesInputSchema, input);
       m2mToken = await checkOrCreateM2MClientToken(m2mToken, validatedInput.secrets);
-      const oystehr = createOystehrClient(m2mToken, validatedInput.secrets);
+      const oystehr = createClinicalOystehrClient(m2mToken, validatedInput.secrets);
 
       const effectInput = await complexValidation(validatedInput, oystehr);
       const result = await performEffect(effectInput, oystehr);
@@ -64,8 +74,8 @@ const complexValidation = async (validatedInput: ValidatedInput, oystehr: Oysteh
     throw new Error('DocumentReference is not an approved patient education entry');
   }
 
-  // Reject duplicates against any other approved-education DocumentReference.
-  const incomingIcdSet = new Set(icdCodes.map((c) => c.code));
+  // Reject duplicates against other approved-education DocumentReferences of the same language —
+  // English and Spanish PDFs for the same ICD code are allowed to coexist.
   const others = await getAllFhirSearchPages<DocumentReference>(
     {
       resourceType: 'DocumentReference',
@@ -73,17 +83,10 @@ const complexValidation = async (validatedInput: ValidatedInput, oystehr: Oysteh
     },
     oystehr
   );
-  const conflictingCodes = new Set<string>();
-  for (const other of others) {
-    if (other.id === documentReferenceId) continue;
-    if (!(other.type?.coding ?? []).some((c) => c.code === PATIENT_EDUCATION_APPROVED_DOC_TYPE_CODE)) continue;
-    for (const { code } of extractApprovedEducationIcdCodes(other)) {
-      if (incomingIcdSet.has(code)) conflictingCodes.add(code);
-    }
-  }
-  if (conflictingCodes.size > 0) {
+  const conflictingCodes = findConflictingApprovedEducationIcdCodes(target, others, icdCodes);
+  if (conflictingCodes.length > 0) {
     throw ALREADY_EXISTS_WITH_MESSAGE(
-      `The following ICD codes are already used by other approved PDFs: ${Array.from(conflictingCodes).join(', ')}`
+      `The following ICD codes are already used by other approved PDFs: ${conflictingCodes.join(', ')}`
     );
   }
 

@@ -1,8 +1,9 @@
-import { Attachment, Reference } from 'fhir/r4b';
+import { Attachment, QuestionnaireResponseItem, Reference } from 'fhir/r4b';
 import { DateTime } from 'luxon';
 import { z } from 'zod';
-import { isValidUUID } from '../../validation';
+import { isNioReferenceUrl } from '../../helpers/helpers';
 import { REASON_ADDITIONAL_MAX_CHAR } from '../../validation/constants';
+import { isValidUUID } from '../../validation/helper';
 import {
   INSURANCE_CARD_BACK_2_ID,
   INSURANCE_CARD_BACK_ID,
@@ -10,7 +11,7 @@ import {
   INSURANCE_CARD_FRONT_ID,
   PHOTO_ID_BACK_ID,
   PHOTO_ID_FRONT_ID,
-} from '../data';
+} from '../data/paperwork/paperwork.constants';
 
 export interface BookingDetails {
   reasonForVisit?: string;
@@ -41,8 +42,9 @@ const organizationReferenceSchema = z
   .string()
   .refine(
     (val) =>
-      val.startsWith(ORGANIZATION_REFERENCE_PREFIX) && isValidUUID(val.slice(ORGANIZATION_REFERENCE_PREFIX.length)),
-    { message: 'reference must be Organization/{uuid}' }
+      (val.startsWith(ORGANIZATION_REFERENCE_PREFIX) && isValidUUID(val.slice(ORGANIZATION_REFERENCE_PREFIX.length))) ||
+      isNioReferenceUrl(val),
+    { message: 'reference must be Organization/{uuid} or a non-insurance organization reference' }
   );
 
 export const FhirOrganizationReferenceSchema = z.object({
@@ -134,7 +136,24 @@ export interface UpdateVisitFilesInput {
   attachment: Attachment;
 }
 
+export interface UpdateVisitFilesOutput {
+  documentReferenceId: string;
+}
+
 export interface DeleteVisitFilesInput {
   documentId: string;
+  patientId: string;
+}
+
+export interface UpdateVisitFormInput {
+  questionnaireResponseId: string;
+  /** The form being edited. A flow response is shared, so this is what says which pages are its own. */
+  questionnaireId: string;
+  patientId: string;
+  pages: QuestionnaireResponseItem[];
+}
+
+export interface DeleteVisitFormInput {
+  questionnaireResponseId: string;
   patientId: string;
 }

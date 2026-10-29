@@ -11,9 +11,13 @@ import {
   Reference,
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import { CPTCodeOption, DiagnosisDTO, LAB_DR_TYPE_TAG, LabelConfig, Pagination } from '../..';
+import { z } from 'zod';
+import { DiagnosisDTO } from '../../api/chart-data/chart-data.types';
+import { CPTCodeOption, LabelConfig } from '../../common';
+import { Pagination } from '../pagination.types';
 import { LabelPdf } from '../printing';
 import { ExternalLabSetDTO, LabSetDTO } from './lab-set.schema';
+import { LAB_DR_TYPE_TAG } from './labs.constants';
 
 // todo labs team - we should do some assessing of all our type files, our types feel a bit unorganized and as a result i think we have some redundancy
 export interface OrderableItemSearchResult {
@@ -154,6 +158,8 @@ export type LabOrderListPageDTO = {
   location: Location | undefined; // Location that ordered the test. Was previously not required for lab orders, so can be undefined
   orderLevelNoteByUser: string | undefined; // communication where cat === LAB_ORDER_LEVEL_NOTE_CATEGORY and sr is referenced in basedOn
   clinicalInfoNoteByUser: string | undefined; // communication where cat === LAB_ORDER_CLINICAL_INFO_COMM_CATEGORY and sr is referenced in basedOn (these notes should be one to one with SRs)
+  hasCptCodes: boolean; // true when the contained ActivityDefinition has at least one CPT code in its code.coding
+  billingType: LabPaymentMethod | undefined; // unsolicited results will be undefined. Labs todo: We should be able to derive it for reflex but not necessary at the moment
 };
 
 export type LabOrderDetailedPageDTO = LabOrderListPageDTO & {
@@ -196,6 +202,8 @@ export type DiagnosticReportLabDetailPageDTO = Omit<
   | 'orderLevelNoteByUser'
   | 'clinicalInfoNoteByUser'
   | 'isGenericOrder'
+  | 'hasCptCodes'
+  | 'billingType'
 >;
 
 export type DiagnosticReportDrivenResultDTO = DiagnosticReportLabDetailPageDTO & {
@@ -325,11 +333,14 @@ export enum LabPaymentMethod {
   WorkersComp = 'workersComp',
 }
 
-export type CreateLabPaymentMethod =
-  | LabPaymentMethod.Insurance
-  | LabPaymentMethod.SelfPay
-  | LabPaymentMethod.ClientBill
-  | LabPaymentMethod.WorkersComp;
+export const CreateLabPaymentMethodSchema = z.enum([
+  LabPaymentMethod.Insurance,
+  LabPaymentMethod.SelfPay,
+  LabPaymentMethod.ClientBill,
+  LabPaymentMethod.WorkersComp,
+]);
+
+export type CreateLabPaymentMethod = z.infer<typeof CreateLabPaymentMethodSchema>;
 
 export type CreateLabOrderParameters = {
   dx: DiagnosisDTO[];

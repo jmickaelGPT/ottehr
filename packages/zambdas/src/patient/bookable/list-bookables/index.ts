@@ -1,22 +1,24 @@
 import Oystehr, { SearchParam } from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { HealthcareService, Location } from 'fhir/r4b';
+import { ServiceModeCoding } from 'utils/lib/fhir/constants';
+import { getAllFhirSearchPages } from 'utils/lib/fhir/getAllFhirSearchPages';
+import { getSlugForBookableResource, serviceModeForHealthcareService } from 'utils/lib/fhir/helpers';
+import { isLocationBookable, isLocationInPerson, isLocationVirtual } from 'utils/lib/fhir/location';
+import { createOystehrClient } from 'utils/lib/helpers/helpers';
+import { getSecret, SecretsKeys } from 'utils/lib/secrets';
 import {
   BookableItem,
   BookableItemListResponse,
-  createOystehrClient,
-  getAllFhirSearchPages,
   GetBookableItemListParams,
-  getSecret,
-  getSlugForBookableResource,
-  isLocationVirtual,
-  SecretsKeys,
   ServiceMode,
-  ServiceModeCoding,
-  serviceModeForHealthcareService,
   stateCodeToFullName,
-} from 'utils';
-import { getAuth0Token, wrapHandler, ZambdaInput } from '../../../shared';
+} from 'utils/lib/types/common';
+import { getAuth0Token } from '../../../shared/getAuth0Token';
+import { truncateForLog } from '../../../shared/logging';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
+import { safeJsonParse } from '../../../shared/validation';
 
 const ZAMBDA_NAME = 'list-bookables';
 
@@ -46,7 +48,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   }
 
   response.items = response.items.sort((i1, i2) => i1.label.localeCompare(i2.label));
-  console.log('response items', response.items);
+  console.log('response items', truncateForLog(response.items));
   return {
     statusCode: 200,
     body: JSON.stringify(response),
@@ -126,7 +128,9 @@ async function getPhysicalLocations(oystehr: Oystehr): Promise<BookableItem[]> {
     oystehr
   );
 
-  const physicalLocations = allLocations.filter((location) => !isLocationVirtual(location));
+  // Include Locations explicitly marked in-person even when they're also virtual
+  // (dual-mode); legacy non-virtual Locations still qualify via the isLocationInPerson default.
+  const physicalLocations = allLocations.filter((location) => isLocationInPerson(location));
 
   console.log('physical locations found', physicalLocations);
 
@@ -138,10 +142,9 @@ async function getPhysicalLocations(oystehr: Oystehr): Promise<BookableItem[]> {
 const makeBookableVirtualLocation = (location: Location): BookableItem | undefined => {
   const stateCode = location.address?.state || '';
   const stateFullName = stateCodeToFullName[location.address?.state || ''] ?? '';
-  const isActive = location.status === 'active';
   const slug = getSlugForBookableResource(location);
 
-  if (!slug || !location.id || !isActive) {
+  if (!slug || !location.id || !isLocationBookable(location)) {
     return undefined;
   }
 
@@ -158,11 +161,10 @@ const makeBookableVirtualLocation = (location: Location): BookableItem | undefin
 };
 
 const makeBookablePhysicalLocation = (location: Location): BookableItem | undefined => {
-  const isActive = location.status === 'active';
   const slug = getSlugForBookableResource(location);
   const stateFullName = stateCodeToFullName[location.address?.state || ''] ?? '';
 
-  if (!slug || !location.id || !isActive) {
+  if (!slug || !location.id || !isLocationBookable(location)) {
     return undefined;
   }
 
@@ -200,7 +202,7 @@ function validateRequestParameters(input: ZambdaInput): GetBookableItemListParam
     throw new Error('No request body provided');
   }
 
-  const { serviceMode } = JSON.parse(input.body);
+  const { serviceMode } = safeJsonParse(input.body);
   if (!serviceMode) {
     throw new Error('serviceType parameter ("in-person"|"virtual") is required');
   }

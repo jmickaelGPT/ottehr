@@ -2,13 +2,10 @@ import { Stack, Typography } from '@mui/material';
 import React from 'react';
 import { dataTestIds } from '../../../../constants/data-test-ids';
 import { Loader } from '../../shared/components/Loader';
-import { MedicalHistoryDoubleCard } from '../../shared/components/medical-history-tab';
-import { SurgicalHistoryPatientColumn } from '../../shared/components/medical-history-tab/SurgicalHistory/SurgicalHistoryPatientColumn';
-import { SurgicalHistoryProviderColumn } from '../../shared/components/medical-history-tab/SurgicalHistory/SurgicalHistoryProviderColumn';
 import { PageTitle } from '../../shared/components/PageTitle';
-import { useAppointmentData, useChartData } from '../../shared/stores/appointment/appointment.store';
-import { InfoAlert } from '../components/InfoAlert';
-import { SurgicalHistoryNotes } from '../components/surgical-history/SurgicalHistoryNotes';
+import { useChartData } from '../../shared/hooks/useChartData';
+import { useAppointmentData } from '../../shared/stores/appointment/appointment.store';
+import { SurgicalHistoryBody } from '../components/surgical-history/SurgicalHistoryBody';
 import { useInPersonNavigationContext } from '../context/InPersonNavigationContext';
 interface SurgicalHistoryProps {
   appointmentID?: string;
@@ -37,14 +34,7 @@ export const SurgicalHistory: React.FC<SurgicalHistoryProps> = () => {
         showIntakeNotesButton={interactionMode === 'main'}
         dataTestId={dataTestIds.surgicalHistory.surgicalHistoryTitle}
       />
-      <InfoAlert text="Ask: Has the patient ever had surgery? If yes, what was the surgery?" />
-      <MedicalHistoryDoubleCard
-        patientSide={<SurgicalHistoryPatientColumn />}
-        patientSideLabel="Patient provided"
-        providerSide={<SurgicalHistoryProviderColumn />}
-        providerSideLabel="Healthcare staff input"
-      />
-      <SurgicalHistoryNotes />
+      <SurgicalHistoryBody />
     </Stack>
   );
 };

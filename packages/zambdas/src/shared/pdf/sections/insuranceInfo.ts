@@ -1,14 +1,15 @@
 import { Coverage, Reference } from 'fhir/r4b';
+import { genderMap } from 'utils/lib/fhir/helpers';
+import { getFullName } from 'utils/lib/fhir/patient';
 import {
-  COVERAGE_ADDITIONAL_INFORMATION_URL,
-  formatDateForDisplay,
-  genderMap,
+  formatZipcodeForDisplay,
   getCandidPlanTypeCodeFromCoverage,
-  getFullName,
   getPayerId,
   getPayerUrl,
-  insuranceTypeOptionsData,
-} from 'utils';
+} from 'utils/lib/helpers/helpers';
+import { insuranceTypeOptionsData } from 'utils/lib/ottehr-config/value-sets';
+import { COVERAGE_ADDITIONAL_INFORMATION_URL } from 'utils/lib/types/constants';
+import { formatDateForDisplay } from 'utils/lib/utils/dateUtils';
 import { createConfiguredSection, DataComposer } from '../pdf-common';
 import { Insurance, InsuranceDataInput, InsuranceInfo, PdfSection } from '../types';
 
@@ -74,7 +75,7 @@ export const composeInsuranceData: DataComposer<InsuranceDataInput, InsuranceInf
   let primarySubscriberFullName = '';
   const relationshipToInsured = primary?.relationship?.coding?.[0].display ?? '';
   const policyHolderAddress = primarySubscriber?.address?.[0];
-  const policyHolderZip = policyHolderAddress?.postalCode ?? '';
+  const policyHolderZip = formatZipcodeForDisplay(policyHolderAddress?.postalCode ?? '');
   const policyHolderState = policyHolderAddress?.state ?? '';
   const policyHolderCity = policyHolderAddress?.city ?? '';
   const policyHolderAddressAdditionalLine = policyHolderAddress?.line?.[1] ?? '';
@@ -92,7 +93,7 @@ export const composeInsuranceData: DataComposer<InsuranceDataInput, InsuranceInf
   let secondarySubscriberFullName = '';
   const secondaryRelationshipToInsured = secondary?.relationship?.coding?.[0].display ?? '';
   const secondaryPolicyHolderAddress = secondarySubscriber?.address?.[0];
-  const secondaryPolicyHolderZip = secondaryPolicyHolderAddress?.postalCode ?? '';
+  const secondaryPolicyHolderZip = formatZipcodeForDisplay(secondaryPolicyHolderAddress?.postalCode ?? '');
   const secondaryPolicyHolderState = secondaryPolicyHolderAddress?.state ?? '';
   const secondaryPolicyHolderCity = secondaryPolicyHolderAddress?.city ?? '';
   const secondaryPolicyHolderAddressAdditionalLine = secondaryPolicyHolderAddress?.line?.[1] ?? '';

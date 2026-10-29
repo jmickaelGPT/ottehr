@@ -1,22 +1,19 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Organization } from 'fhir/r4b';
-import { getSecret, SecretsKeys } from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  topLevelCatch,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+import { getSecret, SecretsKeys } from 'utils/lib/secrets';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { topLevelCatch } from '../../../shared/lambda';
+import { normalizeAddress, normalizeTelecom } from '../../../shared/organization';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { createCandidClientIfConfigured, toggleCandidEmployerPayer, updateCandidEmployerPayer } from '../candid-sync';
 import {
   buildEmployerType,
   getCandidPayerIdFromOrganization,
   isEmployerOrganization,
-  normalizeAddress,
   normalizeEmployerNotesExtension,
   normalizeIdentifier,
-  normalizeTelecom,
 } from '../helpers';
 import { validateRequestParameters } from './validateRequestParameters';
 
@@ -27,7 +24,7 @@ export const index = wrapHandler('update-employer', async (input: ZambdaInput): 
       validateRequestParameters(input);
 
     m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-    const oystehr = createOystehrClient(m2mToken, secrets);
+    const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
     const existing = await oystehr.fhir.get<Organization>({
       resourceType: 'Organization',

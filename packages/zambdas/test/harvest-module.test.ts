@@ -2,16 +2,12 @@
 import { BatchInputPostRequest } from '@oystehr/sdk';
 import { Account, Coverage, Organization, Patient, QuestionnaireResponse, RelatedPerson } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import {
-  ACCOUNT_TYPE_CODE_SYSTEM,
-  COVERAGE_MEMBER_IDENTIFIER_BASE,
-  flattenItems,
-  IN_PERSON_INTAKE_PAPERWORK_QUESTIONNAIRE,
-  INSURANCE_PAY_OPTION,
-  isValidUUID,
-  ORG_TYPE_CODE_SYSTEM,
-  ORG_TYPE_PAYER_CODE,
-} from 'utils';
+import { ACCOUNT_TYPE_CODE_SYSTEM, COVERAGE_MEMBER_IDENTIFIER_BASE } from 'utils/lib/fhir/constants';
+import { flattenItems } from 'utils/lib/helpers/paperwork/validation';
+import { IN_PERSON_INTAKE_PAPERWORK_QUESTIONNAIRE } from 'utils/lib/ottehr-config/intake-paperwork';
+import { INSURANCE_PAY_OPTION } from 'utils/lib/ottehr-config/value-sets';
+import { ORG_TYPE_CODE_SYSTEM, ORG_TYPE_PAYER_CODE } from 'utils/lib/types/constants';
+import { isValidUUID } from 'utils/lib/validation/helper';
 import { v4 as uuidV4 } from 'uuid';
 import { assert, describe, expect, it } from 'vitest';
 import {
@@ -2960,6 +2956,17 @@ describe('Harvest Module', () => {
       const address = buildEmergencyContactAddress(contact, patientWithAddress);
       expect(address).toEqual(fieldAddress);
     });
+
+    it('trims leading and trailing whitespace from emergency contact names', () => {
+      const items = buildEmergencyContactItems(false).map((item) =>
+        item.linkId.endsWith('-name')
+          ? { ...item, answer: [{ valueString: ` ${item.answer?.[0]?.valueString}  ` }] }
+          : item
+      );
+      items.push({ linkId: 'emergency-contact-middle-name', answer: [{ valueString: ' Mid ' }] });
+      const contact = extractEmergencyContact(items);
+      expect(contact).toMatchObject({ firstName: 'Em', middleName: 'Mid', lastName: 'Contact' });
+    });
   });
 });
 
@@ -3666,9 +3673,6 @@ const questionnaireResponse1: QuestionnaireResponse = {
           ],
         },
       ],
-    },
-    {
-      linkId: 'photo-id-page',
     },
     {
       linkId: 'consent-forms-page',

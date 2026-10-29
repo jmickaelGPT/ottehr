@@ -6,48 +6,83 @@ import {
   Communication,
   Condition,
   List,
+  MedicationAdministration,
   Procedure,
   ServiceRequest,
 } from 'fhir/r4b';
+import { collectKnownExamFields } from 'utils/lib/config-helpers/exam-observations';
+import {
+  collectKnownRosFieldsWithComments,
+  getRosSystemKeyForCommentField,
+  ROS_COMMENT_FIELD_KEYS,
+} from 'utils/lib/config-helpers/review-of-systems';
+import { extractCptCodeModifiersFromCoding, getCptBillableUnitsFromCoding } from 'utils/lib/fhir/billing';
 import {
   ACCIDENT_STATE_EXTENSION,
   ACCIDENT_TYPE_SYSTEM,
+  chartDataTagSystem,
+  CPT_CODE_SYSTEM,
+} from 'utils/lib/fhir/constants';
+import { getTag, resourceHasTagSystem } from 'utils/lib/fhir/helpers';
+import {
+  getCptCodesFromMA,
+  getDosageUnitsAndRouteOfMedication,
+  searchRouteByCode,
+} from 'utils/lib/fhir/medication-administration';
+import { CODE_SYSTEM_ICD_10 } from 'utils/lib/helpers/rcm/constants';
+import { examConfig } from 'utils/lib/ottehr-config/examination';
+import { getRosFindingStateFromKey } from 'utils/lib/ottehr-config/review-of-systems';
+import { InPersonRosConfig } from 'utils/lib/ottehr-config/review-of-systems/in-person.config';
+import { getSecret, SecretsKeys } from 'utils/lib/secrets';
+import { inHouseMedicationsMedicationApplianceRoutes } from 'utils/lib/types/api/medication-administration.types';
+import {
   AdminGetTemplateDetailInput,
   AdminGetTemplateDetailOutput,
-  BODY_SITE_SYSTEM,
-  chartDataTagSystem,
-  collectKnownExamFields,
-  collectKnownRosFields,
-  CPT_CODE_SYSTEM,
-  examConfig,
-  extractCptCodeModifiersFromCoding,
-  FHIR_EXTENSION,
-  getRosFindingStateFromKey,
-  getSecret,
-  getTag,
-  ICD_10_CODE_SYSTEM,
-  IN_HOUSE_TEST_CODE_SYSTEM,
-  PERFORMER_TYPE_SYSTEM,
-  PROCEDURE_TYPE_SYSTEM,
-  resourceHasTagSystem,
-  SecretsKeys,
   TemplateAccidentInfo,
   TemplateCodeInfo,
   TemplateCptCodeInfo,
   TemplateExamFinding,
+  TemplateExternalLabPlanDetail,
   TemplateInHouseLabPlanDetail,
+  TemplateInHouseMedicationDetail,
   TemplateProcedurePlan,
+  TemplateRosComment,
   TemplateRosFinding,
-} from 'utils';
-import { checkOrCreateM2MClientToken, topLevelCatch, wrapHandler, ZambdaInput } from '../../shared';
-import { createOystehrClient } from '../../shared/helpers';
+} from 'utils/lib/types/data/admin-template.types';
+import { IN_HOUSE_TEST_CODE_SYSTEM } from 'utils/lib/types/data/in-house/in-house.constants';
+import { z } from 'zod';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { readProcedureFormFieldsFromServiceRequest } from '../../shared/chart-data';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { topLevelCatch } from '../../shared/lambda';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { validateWithSchema } from '../../shared/validation';
+import {
+  fetchPlanItemsByLabGuid,
+  findExternalLabPlans,
+  labelForExternalLabPlan,
+  matchOrderableItemForPlan,
+  parseExternalLabPlan,
+} from '../apply-template/apply-external-labs';
 import {
   indexLatestActivityDefinitionsByUrl,
   urlFromInstantiatesCanonical,
 } from '../apply-template/apply-in-house-labs';
+import {
+  deriveMedicationName,
+  isInHouseMedicationTemplatePlan,
+  makeMedicationsByIdMap,
+} from '../apply-template/apply-in-house-medications';
 import { findProcedurePlans } from '../apply-template/apply-procedures';
 import { analyzeTemplateVersionData, isDiagnosisCondition, verifyIsTemplate } from '../shared/template-helpers';
-import { validateRequestParameters } from './validateRequestParameters';
+
+const AdminGetTemplateDetailSchema = z.object({
+  templateId: z.string().uuid(),
+});
+
+// Local const so that DEPRECATED system doesn't get imported from utils
+const ICD_10_CODE_SYSTEM = 'http://hl7.org/fhir/sid/icd-10';
 
 // Lifting up value to outside of the handler allows it to stay in memory across warm lambda invocations
 let m2mToken: string;
@@ -56,13 +91,13 @@ export const index = wrapHandler(
   'admin-get-template-detail',
   async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
     try {
-      const validatedInput = validateRequestParameters(input);
+      const validatedInput = validateWithSchema(AdminGetTemplateDetailSchema, input);
 
       const { secrets } = validatedInput;
       m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-      const oystehr = createOystehrClient(m2mToken, secrets);
+      const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
-      const result = await performEffect(validatedInput, oystehr);
+      const result = await performEffect(validatedInput, oystehr, m2mToken);
 
       return {
         statusCode: 200,
@@ -145,7 +180,8 @@ function buildFieldLabels(config: Record<string, any>): Map<string, string> {
 
 const performEffect = async (
   validatedInput: AdminGetTemplateDetailInput & Pick<ZambdaInput, 'secrets'>,
-  oystehr: Oystehr
+  oystehr: Oystehr,
+  m2mToken: string
 ): Promise<AdminGetTemplateDetailOutput> => {
   const { templateId } = validatedInput;
 
@@ -184,7 +220,7 @@ const performEffect = async (
   const legacyRosTagSystem = chartDataTagSystem('ros');
 
   const knownExamFields = collectKnownExamFields(examConfig.default.components);
-  const knownRosFields = collectKnownRosFields();
+  const knownRosFields = collectKnownRosFieldsWithComments();
 
   const { isCurrentVersion, unmatchedRosFields, examObservations, rosObservations, rosNote } =
     analyzeTemplateVersionData({
@@ -199,12 +235,21 @@ const performEffect = async (
   const unmatchedRosFieldSet: Set<string> = new Set(unmatchedRosFields);
 
   // Config exam and row into template DTOs
-  const rosFindings: TemplateRosFinding[] = rosObservations.map((obs) => {
+  const rosFindings: TemplateRosFinding[] = [];
+  const rosComments: TemplateRosComment[] = [];
+  rosObservations.forEach((obs) => {
     const fieldCode = getTag(obs, rosTagSystem)?.code ?? 'unknown';
+    const commentSystemKey = getRosSystemKeyForCommentField(fieldCode);
+    if (commentSystemKey) {
+      const note = obs.note?.[0]?.text?.trim();
+      if (note)
+        rosComments.push({ fieldName: fieldCode, systemLabel: InPersonRosConfig[commentSystemKey].label, note });
+      return;
+    }
     const findingState = getRosFindingStateFromKey(fieldCode);
     const label = obs.code.text ?? 'unknown';
     const stale = unmatchedRosFieldSet.has(fieldCode);
-    return { fieldName: fieldCode, label, findingState, stale };
+    rosFindings.push({ fieldName: fieldCode, label, findingState, stale });
   });
 
   const abnormalFieldCodes = buildAbnormalFieldCodes(examConfig.default.components);
@@ -229,7 +274,12 @@ const performEffect = async (
   const diagnosisConditions = contained.filter((r) => isDiagnosisCondition(r)) as Condition[];
 
   const diagnoses: TemplateCodeInfo[] = diagnosisConditions.map((cond) => {
-    const icdCoding = cond.code?.coding?.find((c) => c.system === ICD_10_CODE_SYSTEM);
+    const icdCoding = cond.code?.coding?.find(
+      (c) =>
+        c.system === CODE_SYSTEM_ICD_10 ||
+        // legacy system
+        c.system === ICD_10_CODE_SYSTEM
+    );
     return {
       code: icdCoding?.code ?? '',
       display: icdCoding?.display ?? '',
@@ -258,6 +308,7 @@ const performEffect = async (
       code: coding?.code ?? '',
       display: coding?.display ?? '',
       modifiers: coding ? extractCptCodeModifiersFromCoding(coding) : [],
+      billableUnits: getCptBillableUnitsFromCoding(coding),
     };
   });
 
@@ -357,7 +408,13 @@ const performEffect = async (
 
     const diagnoses: TemplateCodeInfo[] = (plan.reasonCode ?? [])
       .map((rc) => {
-        const icd = rc.coding?.find((c) => c.system === ICD_10_CODE_SYSTEM) ?? rc.coding?.[0];
+        const icd =
+          rc.coding?.find(
+            (c) =>
+              c.system === CODE_SYSTEM_ICD_10 ||
+              // legacy system
+              c.system === ICD_10_CODE_SYSTEM
+          ) ?? rc.coding?.[0];
         return { code: icd?.code ?? '', display: icd?.display ?? rc.text ?? '' };
       })
       .filter((d) => d.code || d.display);
@@ -372,6 +429,61 @@ const performEffect = async (
       notes,
       cptCodes,
       missing: !ad,
+    };
+  });
+
+  // Parse external lab plans. Each plan is a ServiceRequest with intent 'plan'
+  // and the external-lab-template-plan meta tag carrying the lab + test combo,
+  // Dx, note, and PSC flag. We verify each lab + test combo still resolves in
+  // the lab's current compendium so the admin UI can flag tests that would be
+  // skipped at apply time.
+  const externalLabPlans = findExternalLabPlans(templateList);
+  const externalParsedPlans = externalLabPlans.map((plan) => ({ plan, parsed: parseExternalLabPlan(plan) }));
+
+  const externalOrderableItemsByLabGuid = await fetchPlanItemsByLabGuid(
+    externalParsedPlans.map((p) => p.parsed).filter((p): p is NonNullable<typeof p> => p !== null),
+    m2mToken
+  );
+
+  const externalLabs: TemplateExternalLabPlanDetail[] = externalParsedPlans.map(({ plan, parsed }) => {
+    if (!parsed) {
+      // Malformed plan (missing lab guid or item code) - surface it as missing
+      // so an admin can rebuild the template; apply-template skips it with a
+      // warning.
+      return {
+        planId: plan.id ?? '',
+        labGuid: '',
+        labName: '',
+        testName: labelForExternalLabPlan(plan),
+        testCode: '',
+        diagnoses: [],
+        note: null,
+        psc: false,
+        missing: true,
+        cptCodes: [],
+      };
+    }
+    const items = externalOrderableItemsByLabGuid.get(parsed.labGuid);
+    // When the availability check itself failed, don't report a false
+    // "missing" - apply-template re-checks and warns at apply time.
+    const matchedItem = items && items !== 'fetch-failed' ? matchOrderableItemForPlan(parsed, items) : undefined;
+    const missing = items === undefined || items === 'fetch-failed' ? false : !matchedItem;
+    const cptCodes: TemplateCptCodeInfo[] = (matchedItem?.item.cptCodes ?? []).map((c) => ({
+      code: c.cptCode,
+      display: parsed.testName,
+      modifiers: [], // the compendium does not provide modifiers
+    }));
+    return {
+      planId: parsed.planId,
+      labGuid: parsed.labGuid,
+      labName: parsed.labName,
+      testName: parsed.testName,
+      testCode: parsed.itemCode,
+      diagnoses: parsed.dx.map((d) => ({ code: d.code, display: d.display })),
+      note: parsed.note ?? null,
+      psc: parsed.psc,
+      missing,
+      cptCodes,
     };
   });
 
@@ -399,24 +511,19 @@ const performEffect = async (
     }
   }
 
-  const getExtensionString = (sr: ServiceRequest, url: string): string | undefined =>
-    sr.extension?.find((e) => e.url === url)?.valueString;
-  const getExtensionBoolean = (sr: ServiceRequest, url: string): boolean | undefined =>
-    sr.extension?.find((e) => e.url === url)?.valueBoolean;
-  const getExtensionStrings = (sr: ServiceRequest, url: string): string[] =>
-    (sr.extension ?? []).filter((e) => e.url === url).flatMap((e) => (e.valueString ? [e.valueString] : []));
-  const getCodingCode = (
-    concept: { coding?: { system?: string; code?: string }[] } | undefined,
-    system: string
-  ): string | undefined => concept?.coding?.find((c) => c.system === system)?.code;
-
   const procedures: TemplateProcedurePlan[] = procedurePlans.map((plan) => {
     const procedureDiagnoses: TemplateCodeInfo[] = (plan.reasonReference ?? []).flatMap((ref) => {
       const id = ref.reference?.split('/')[1];
       if (!id) return [];
       const cond = conditionById.get(id);
       if (!cond) return [];
-      const icd = cond.code?.coding?.find((c) => c.system === ICD_10_CODE_SYSTEM) ?? cond.code?.coding?.[0];
+      const icd =
+        cond.code?.coding?.find(
+          (c) =>
+            c.system === CODE_SYSTEM_ICD_10 ||
+            // legacy system
+            c.system === ICD_10_CODE_SYSTEM
+        ) ?? cond.code?.coding?.[0];
       if (!icd?.code && !icd?.display) return [];
       return [{ code: icd?.code ?? '', display: icd?.display ?? '' }];
     });
@@ -427,38 +534,94 @@ const performEffect = async (
       if (!proc) return [];
       const coding = proc.code?.coding?.find((c) => c.system === CPT_CODE_SYSTEM) ?? proc.code?.coding?.[0];
       if (!coding?.code && !coding?.display) return [];
-      // Preserve any CPT modifiers stored as Coding.extension on the CPT
-      // Procedure. The standalone CPT Codes section does the same, so a CPT
-      // that the provider modified (e.g. -LT) reads consistently between the
-      // two places it surfaces in the preview.
+      // Preserve the CPT modifiers and the billable quantity stored as
+      // Coding.extension on the CPT Procedure. The standalone CPT Codes section
+      // does the same, so a CPT the provider modified (e.g. -LT) or a suggested
+      // add-on line billed more than once (e.g. 13133 × 2) reads consistently
+      // between the two places it surfaces in the preview — and matches what
+      // applying the template actually copies onto the visit.
       return [
         {
           code: coding?.code ?? '',
           display: coding?.display ?? '',
           modifiers: extractCptCodeModifiersFromCoding(coding),
+          billableUnits: getCptBillableUnitsFromCoding(coding),
         },
       ];
     });
 
+    const fields = readProcedureFormFieldsFromServiceRequest(plan);
+
     return {
       planId: plan.id ?? '',
-      procedureType: getCodingCode(plan.category?.[0], PROCEDURE_TYPE_SYSTEM),
-      performerType: getCodingCode(plan.performerType, PERFORMER_TYPE_SYSTEM),
-      bodySite: getCodingCode(plan.bodySite?.[0], BODY_SITE_SYSTEM),
-      bodySide: getExtensionString(plan, FHIR_EXTENSION.ServiceRequest.bodySide.url),
-      technique: getExtensionStrings(plan, FHIR_EXTENSION.ServiceRequest.technique.url),
-      medicationUsed: getExtensionString(plan, FHIR_EXTENSION.ServiceRequest.medicationUsed.url),
-      suppliesUsed: getExtensionString(plan, FHIR_EXTENSION.ServiceRequest.suppliesUsed.url),
-      procedureDetails: getExtensionString(plan, FHIR_EXTENSION.ServiceRequest.procedureDetails.url),
-      specimenSent: getExtensionBoolean(plan, FHIR_EXTENSION.ServiceRequest.specimenSent.url),
-      complications: getExtensionString(plan, FHIR_EXTENSION.ServiceRequest.complications.url),
-      patientResponse: getExtensionString(plan, FHIR_EXTENSION.ServiceRequest.patientResponse.url),
-      postInstructions: getExtensionString(plan, FHIR_EXTENSION.ServiceRequest.postInstructions.url),
-      timeSpent: getExtensionString(plan, FHIR_EXTENSION.ServiceRequest.timeSpent.url),
-      documentedBy: getExtensionString(plan, FHIR_EXTENSION.ServiceRequest.documentedBy.url),
-      consentObtained: getExtensionBoolean(plan, FHIR_EXTENSION.ServiceRequest.consentObtained.url),
+      procedureType: fields.procedureType,
+      performerType: fields.performerType,
+      bodySite: fields.bodySite,
+      bodySide: fields.bodySide,
+      technique: fields.technique ?? [],
+      medicationUsed: fields.medicationUsed,
+      suppliesUsed: fields.suppliesUsed,
+      procedureDetails: fields.procedureDetails,
+      structuredFacts: fields.structuredFacts,
+      lengthCm: fields.lengthCm,
+      repairDepth: fields.repairDepth,
+      infusionStartTime: fields.infusionStartTime,
+      infusionStopTime: fields.infusionStopTime,
+      specimenSent: fields.specimenSent,
+      complications: fields.complications,
+      patientResponse: fields.patientResponse,
+      postInstructions: fields.postInstructions,
+      timeSpent: fields.timeSpent,
+      documentedBy: fields.documentedBy,
+      consentObtained: fields.consentObtained,
       diagnoses: procedureDiagnoses,
       cptCodes: procedureCptCodes,
+    };
+  });
+
+  // Parse in-house medication template MAs. Each MedicationAdministration
+  // with the in-house-medication-administration-template tag, carries the drug identity as
+  // medicationReference (pointing to a contained Medication in the template List), dosage, CPT codes, reason notes, and ICD-10 diagnoses.
+  const inHouseMedicationTemplatePlans = contained.filter((r): r is MedicationAdministration =>
+    isInHouseMedicationTemplatePlan(r)
+  );
+  const inHouseMedicationReferencedMedicationsById = makeMedicationsByIdMap(contained);
+
+  const inHouseMedications: TemplateInHouseMedicationDetail[] = inHouseMedicationTemplatePlans.map((templateMA) => {
+    const cptEntries = getCptCodesFromMA(templateMA) ?? [];
+    const maCptCodes: TemplateCptCodeInfo[] = cptEntries.map((e) => ({
+      code: e.code,
+      display: e.display,
+      modifiers: [], // you can't currently add modifiers to in house med cpt codes, but this typing is useful downstream
+    }));
+
+    const maDiagnoses: TemplateCodeInfo[] = (templateMA.reasonCode ?? [])
+      .map((rc) => {
+        const icd =
+          rc.coding?.find(
+            (c) =>
+              c.system === CODE_SYSTEM_ICD_10 ||
+              // legacy system
+              c.system === ICD_10_CODE_SYSTEM
+          ) ?? rc.coding?.[0];
+        return { code: icd?.code ?? '', display: icd?.display ?? rc.text ?? '' };
+      })
+      .filter((d) => d.code || d.display);
+
+    const containedMedicationId = templateMA.medicationReference?.reference?.replace('#', '');
+    const medicationName = deriveMedicationName(containedMedicationId, inHouseMedicationReferencedMedicationsById);
+
+    const { route, dose, units } = getDosageUnitsAndRouteOfMedication(templateMA);
+
+    return {
+      planId: templateMA.id ?? '',
+      medicationName,
+      dose,
+      units,
+      route: searchRouteByCode(route, inHouseMedicationsMedicationApplianceRoutes)?.display,
+      instructions: templateMA.dosage?.text,
+      cptCodes: maCptCodes,
+      diagnoses: maDiagnoses,
     };
   });
 
@@ -472,6 +635,9 @@ const performEffect = async (
       moiNote,
       rosNote,
       rosFindings,
+      rosComments: rosComments.sort(
+        (a, b) => ROS_COMMENT_FIELD_KEYS.indexOf(a.fieldName) - ROS_COMMENT_FIELD_KEYS.indexOf(b.fieldName)
+      ),
       examFindings,
       mdm,
       diagnoses,
@@ -480,7 +646,9 @@ const performEffect = async (
       emCode,
       accident,
       inHouseLabs,
+      externalLabs,
       procedures,
+      inHouseMedications,
     },
   };
 };

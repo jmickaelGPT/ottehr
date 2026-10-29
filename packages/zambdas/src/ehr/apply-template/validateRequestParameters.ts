@@ -1,17 +1,17 @@
 import {
   ApplyTemplateZambdaInput,
-  MISSING_REQUEST_BODY,
-  MISSING_REQUEST_SECRETS,
-  NOT_AUTHORIZED,
   TEMPLATE_SECTION_DEFAULT_ACTIONS,
   TEMPLATE_SECTIONS_NO_APPEND,
   TEMPLATE_SECTIONS_NO_OVERWRITE,
   TemplateSectionAction,
   TemplateSectionActions,
   TemplateSectionKey,
-} from 'utils';
+} from 'utils/lib/types/data/apply-template.types';
+import { CreateLabPaymentMethodSchema } from 'utils/lib/types/data/labs/labs.types';
+import { MISSING_REQUEST_BODY, MISSING_REQUEST_SECRETS, NOT_AUTHORIZED } from 'utils/lib/types/errors';
 import { z } from 'zod';
-import { safeValidate, ZambdaInput } from '../../shared';
+import { ZambdaInput } from '../../shared/types/common';
+import { safeValidate } from '../../shared/validation';
 
 const VALID_ACTIONS: readonly TemplateSectionAction[] = ['skip', 'overwrite', 'append'];
 
@@ -56,10 +56,24 @@ const sectionActionsSchema = z
     }
   });
 
+const externalLabSchema = z
+  .object(
+    {
+      paymentMethod: z.enum(CreateLabPaymentMethodSchema.options, {
+        message: `Invalid externalLabs.paymentMethod. Must be one of: ${CreateLabPaymentMethodSchema.options.join(
+          ', '
+        )}`,
+      }),
+    },
+    { invalid_type_error: 'externalLabs must be an object' }
+  )
+  .optional();
+
 const ApplyTemplateSchema = z.object({
   templateName: z.string().trim().min(1),
   encounterId: z.string().uuid(),
   sectionActions: sectionActionsSchema,
+  externalLabs: externalLabSchema,
 });
 
 export function validateRequestParameters(
@@ -80,14 +94,20 @@ export function validateRequestParameters(
   const userToken = authHeader.replace('Bearer ', '');
 
   const parsed = JSON.parse(input.body) as unknown;
-  const { templateName, encounterId, sectionActions } = safeValidate(ApplyTemplateSchema, parsed);
+  const {
+    templateName,
+    encounterId,
+    sectionActions,
+    externalLabs: validatedExternalLabs,
+  } = safeValidate(ApplyTemplateSchema, parsed);
 
-  const validatedSectionActions: TemplateSectionActions = (sectionActions as TemplateSectionActions) ?? {};
+  const validatedSectionActions: TemplateSectionActions = (sectionActions as TemplateSectionActions) ?? undefined;
 
   return {
     templateName,
     encounterId,
     sectionActions: validatedSectionActions,
+    ...(validatedExternalLabs ? { externalLabs: validatedExternalLabs } : {}),
     secrets: input.secrets,
     userToken,
   };

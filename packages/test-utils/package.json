@@ -2,32 +2,27 @@
   "name": "test-utils",
   "type": "module",
   "private": true,
-  "version": "1.36.35",
-  "main": "lib/main.ts",
-  "types": "lib/main.ts",
-  "exports": {
-    ".": "./lib/index.ts",
-    "./*": "./lib/*"
-  },
+  "version": "1.45.20",
   "engines": {
-    "node": ">=22.0.0",
+    "node": ">=22.13.0",
     "npm": ">=10.0.0"
   },
   "scripts": {
     "start": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc",
     "lint": "cross-env NODE_OPTIONS=--max-old-space-size=8192 eslint --ext .ts,.tsx,.js,.jsx --report-unused-disable-directives --max-warnings 0 .",
     "lint:fix": "cross-env NODE_OPTIONS=--max-old-space-size=8192 eslint --ext .ts,.tsx,.js,.jsx --report-unused-disable-directives --max-warnings 0 --fix .",
     "preview": "vite preview",
     "test": "vitest --silent",
+    "test:ci": "vitest run --passWithNoTests --reporter=dot --reporter=github-actions",
     "coverage": "vitest run --coverage",
     "clean-e2e": "tsc scripts/clean-up-e2e.ts"
   },
   "devDependencies": {
-    "aws-cdk-lib": "2.263.0",
-    "@playwright/test": "^1.57.0"
+    "@playwright/test": "^1.57.0",
+    "aws-cdk-lib": "2.263.0"
   },
   "dependencies": {
-    "axios": "^1.19.0"
+    "axios": "v1.12.0"
   }
 }

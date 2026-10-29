@@ -3,7 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QuestionnaireResponse } from 'fhir/r4b';
 import { FC, ReactNode, useEffect } from 'react';
-import { FormProvider, useForm } from 'react-hook-form';
+import { FieldErrors, FormProvider, Resolver, useForm } from 'react-hook-form';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ============================================================================
@@ -44,7 +44,11 @@ vi.mock('../../src/hooks/useGetPatient', () => ({
   }),
 }));
 
-import { PATIENT_RECORD_QUESTIONNAIRE } from 'utils';
+import { PATIENT_RECORD_QUESTIONNAIRE } from 'utils/lib/ottehr-config/patient-record';
+import {
+  ConfirmSave,
+  SaveConfirmationProvider,
+} from '../../src/features/visits/shared/components/patient/SaveConfirmationContext';
 import { SectionSaveButton } from '../../src/features/visits/shared/components/patient/SectionSaveButton';
 
 // ============================================================================
@@ -70,38 +74,52 @@ const ssnFieldConfigured = questionnaireHasLinkId('patient-ssn');
 // HELPERS
 // ============================================================================
 
+// Mirrors the real form: validation is driven by a resolver (createDynamicValidationResolver
+// in production), not by the button. Tests that exercise invalid-field behavior pass a
+// resolver that reports errors for the given keys; the rest run without one (always valid).
+const makeRequiredResolver =
+  (requiredKeys: string[]): Resolver<Record<string, unknown>> =>
+  async (values) => {
+    const errors: FieldErrors<Record<string, unknown>> = {};
+    requiredKeys.forEach((key) => {
+      if (!values[key]) {
+        errors[key] = { type: 'required', message: 'This field is required' };
+      }
+    });
+    return Object.keys(errors).length > 0 ? { values: {}, errors } : { values, errors: {} };
+  };
+
 interface HarnessProps {
   defaultValues: Record<string, unknown>;
   dirtyKeys?: string[];
   fieldKeys: string[];
-  requiredFieldKeys: string[];
+  resolver?: Resolver<Record<string, unknown>>;
   patientId?: string;
   encounterId?: string;
+  confirmSave?: ConfirmSave;
 }
 
 const Harness: FC<HarnessProps> = ({
   defaultValues,
   dirtyKeys = [],
   fieldKeys,
-  requiredFieldKeys,
+  resolver,
   patientId,
   encounterId,
+  confirmSave,
 }) => {
-  const methods = useForm<Record<string, unknown>>({ defaultValues, mode: 'onChange' });
+  const methods = useForm<Record<string, unknown>>({ defaultValues, mode: 'onChange', resolver });
   useEffect(() => {
     dirtyKeys.forEach((key) => {
       methods.setValue(key, `${defaultValues[key] ?? ''}-edited`, { shouldDirty: true });
     });
   }, [dirtyKeys, defaultValues, methods]);
   return (
-    <FormProvider {...methods}>
-      <SectionSaveButton
-        fieldKeys={fieldKeys}
-        requiredFieldKeys={requiredFieldKeys}
-        patientId={patientId}
-        encounterId={encounterId}
-      />
-    </FormProvider>
+    <SaveConfirmationProvider confirmSave={confirmSave}>
+      <FormProvider {...methods}>
+        <SectionSaveButton fieldKeys={fieldKeys} patientId={patientId} encounterId={encounterId} />
+      </FormProvider>
+    </SaveConfirmationProvider>
   );
 };
 
@@ -133,7 +151,6 @@ describe('SectionSaveButton', () => {
     renderHarness({
       defaultValues: { 'patient-email': 'a@b.co' },
       fieldKeys: ['patient-email'],
-      requiredFieldKeys: ['patient-email'],
       patientId: 'p1',
     });
     await waitFor(() => expect(screen.queryByRole('button', { name: /save/i })).toBeNull());
@@ -144,25 +161,108 @@ describe('SectionSaveButton', () => {
       defaultValues: { 'patient-email': 'a@b.co' },
       dirtyKeys: ['patient-email'],
       fieldKeys: ['patient-email'],
-      requiredFieldKeys: ['patient-email'],
       patientId: 'p1',
     });
     await waitFor(() => expect(screen.getByRole('button', { name: /save/i })).toBeInTheDocument());
   });
 
-  it('disables the button when a required field is empty', async () => {
+  it('stays enabled and defers the write to the guard when one is installed', async () => {
+    const user = userEvent.setup();
+    // Stands in for the visit page's consent reminder: the write waits until the guard runs it.
+    let release: (() => Promise<void>) | undefined;
+    const confirmSave: ConfirmSave = (proceed) =>
+      new Promise<void>((resolve) => {
+        release = async () => {
+          await proceed();
+          resolve();
+        };
+      });
+
+    renderHarness({
+      defaultValues: { 'patient-email': 'a@b.co' },
+      dirtyKeys: ['patient-email'],
+      fieldKeys: ['patient-email'],
+      patientId: 'p1',
+      confirmSave,
+    });
+
+    const btn = await screen.findByRole('button', { name: /save/i });
+    // Nothing is disabled any more: the reminder happens on click, not by taking the button away.
+    expect(btn).toBeEnabled();
+
+    await user.click(btn);
+    await waitFor(() => expect(release).toBeDefined());
+    expect(mutateAsyncMock).not.toHaveBeenCalled();
+
+    // Confirming runs the same write with the values the user had typed in.
+    await release!();
+    await waitFor(() => expect(mutateAsyncMock).toHaveBeenCalledOnce());
+  });
+
+  it('never writes when the guard declines to run the save', async () => {
+    const user = userEvent.setup();
+    // Mirrors cancelling the reminder dialog: resolve without ever calling `proceed`.
+    const confirmSave: ConfirmSave = () => Promise.resolve();
+
+    renderHarness({
+      defaultValues: { 'patient-email': 'a@b.co' },
+      dirtyKeys: ['patient-email'],
+      fieldKeys: ['patient-email'],
+      patientId: 'p1',
+      confirmSave,
+    });
+
+    await user.click(await screen.findByRole('button', { name: /save/i }));
+    await waitFor(() => expect(mutateAsyncMock).not.toHaveBeenCalled());
+    // The section is still dirty, so its Save button is still there to try again.
+    expect(screen.getByRole('button', { name: /save/i })).toBeEnabled();
+  });
+
+  it('leaves Save enabled when no guard is installed', async () => {
+    renderHarness({
+      defaultValues: { 'patient-email': 'a@b.co' },
+      dirtyKeys: ['patient-email'],
+      fieldKeys: ['patient-email'],
+      patientId: 'p1',
+    });
+    expect(await screen.findByRole('button', { name: /save/i })).toBeEnabled();
+  });
+
+  it('stays enabled even when a required field is empty (validation surfaces on click)', async () => {
     renderHarness({
       defaultValues: { 'patient-email': '' },
       dirtyKeys: ['patient-phone'],
       fieldKeys: ['patient-email', 'patient-phone'],
-      requiredFieldKeys: ['patient-email'],
+      resolver: makeRequiredResolver(['patient-email']),
       patientId: 'p1',
     });
-    // dirty via patient-phone → button appears, but patient-email is empty → disabled
+    // dirty via patient-phone → button appears; patient-email is empty but the
+    // button is no longer gated on required fields, so it stays clickable.
     await waitFor(() => {
       const btn = screen.getByRole('button', { name: /save/i });
-      expect(btn).toBeDisabled();
+      expect(btn).toBeEnabled();
     });
+  });
+
+  it('does not submit and shows an error snackbar when clicked with an invalid field', async () => {
+    const user = userEvent.setup();
+    renderHarness({
+      defaultValues: { 'patient-email': '' },
+      dirtyKeys: ['patient-phone'],
+      fieldKeys: ['patient-email', 'patient-phone'],
+      resolver: makeRequiredResolver(['patient-email']),
+      patientId: 'p1',
+    });
+
+    const btn = await screen.findByRole('button', { name: /save/i });
+    await user.click(btn);
+
+    await waitFor(() =>
+      expect(snackbarMock).toHaveBeenCalledWith('Please fix all field validation errors and try again', {
+        variant: 'error',
+      })
+    );
+    expect(mutateAsyncMock).not.toHaveBeenCalled();
   });
 
   it('submits a scoped QR containing only this section when clicked', async () => {
@@ -172,7 +272,6 @@ describe('SectionSaveButton', () => {
       defaultValues: { 'patient-email': 'a@b.co', 'other-section-field': 'untouched' },
       dirtyKeys: ['patient-email'],
       fieldKeys: ['patient-email'],
-      requiredFieldKeys: ['patient-email'],
       patientId: 'p1',
       encounterId: 'e1',
     });
@@ -201,7 +300,6 @@ describe('SectionSaveButton', () => {
         defaultValues: { 'patient-ssn': '123-45-6789', 'should-display-ssn-field': true },
         dirtyKeys: ['patient-ssn'],
         fieldKeys: ['patient-ssn'],
-        requiredFieldKeys: [],
         patientId: 'p1',
       });
 
@@ -227,7 +325,6 @@ describe('SectionSaveButton', () => {
       defaultValues: { 'patient-email': 'a@b.co' },
       dirtyKeys: ['patient-email'],
       fieldKeys: ['patient-email'],
-      requiredFieldKeys: ['patient-email'],
       patientId: 'p1',
     });
 

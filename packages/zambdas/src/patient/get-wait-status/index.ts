@@ -2,19 +2,20 @@ import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Appointment, Location } from 'fhir/r4b';
 import { decodeJwt, jwtVerify } from 'jose';
-import {
-  appointmentTypeForAppointment,
-  createOystehrClient,
-  getAppointmentResourceById,
-  getInPersonVisitStatus,
-  getLocationIdFromAppointment,
-  getSecret,
-  PROJECT_WEBSITE,
-  SecretsKeys,
-  WaitingRoomResponse,
-} from 'utils';
-import { getAuth0Token, getUser, getVideoEncounterForAppointment, wrapHandler, ZambdaInput } from '../../shared';
+import { appointmentTypeForAppointment, getAppointmentResourceById } from 'utils/lib/fhir/appointments';
+import { getLocationIdFromAppointment } from 'utils/lib/fhir/helpers';
+import { createOystehrClient } from 'utils/lib/helpers/helpers';
+import { PROJECT_WEBSITE } from 'utils/lib/ottehr-config/branding';
+import { getSecret, SecretsKeys } from 'utils/lib/secrets';
+import { WaitingRoomResponse } from 'utils/lib/types/data/get-wait-status.types';
+import { getInPersonVisitStatus } from 'utils/lib/utils/visitUtils';
 import { estimatedTimeStatesGroups } from '../../shared/appointment/constants';
+import { getUser } from '../../shared/auth';
+import { getVideoEncounterForAppointment } from '../../shared/encounters';
+import { getAuth0Token } from '../../shared/getAuth0Token';
+import { truncateForLog } from '../../shared/logging';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import { convertStatesAbbreviationsToLocationIds, getAllAppointmentsByLocations } from './utils/fhir';
 import { validateRequestParameters } from './validateRequestParameters';
 
@@ -25,7 +26,6 @@ const ZAMBDA_NAME = 'get-wait-status';
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
   console.group('validateRequestParameters');
   const validatedParameters = validateRequestParameters(input);
-  console.log(JSON.stringify(validatedParameters, null, 4));
   const { appointmentID, secrets, authorization } = validatedParameters;
   console.groupEnd();
   console.debug('validateRequestParameters success');
@@ -125,7 +125,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
         appointmentType: appointmentTypeForAppointment(appointment),
       }),
     };
-    console.log(JSON.stringify(response, null, 4));
+    console.log(truncateForLog(response));
     return response;
   } else {
     console.log(videoEncounter.status, appointment.status);
@@ -135,7 +135,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
         status: status === 'cancelled' ? 'cancelled' : 'completed',
       }),
     };
-    console.log(JSON.stringify(response, null, 4));
+    console.log(truncateForLog(response));
     return response;
   }
 });

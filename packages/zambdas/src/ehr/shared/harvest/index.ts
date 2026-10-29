@@ -12,6 +12,7 @@ import {
   Account,
   AccountGuarantor,
   Address,
+  Appointment,
   Attachment,
   Bundle,
   CodeableConcept,
@@ -39,104 +40,126 @@ import {
 import _ from 'lodash';
 import { DateTime } from 'luxon';
 import Stripe from 'stripe';
+import { getConsentAndRelatedDocRefsForAppointment } from 'utils/lib/fhir/appointments';
 import {
   ATTORNEY_FIRM_EXTENSION_URL,
-  buildExtensionObject,
-  CANDID_PLAN_TYPE_SYSTEM,
+  EMPLOYER_ORG_IDENTIFIER_SYSTEM,
+  FHIR_BASE_URL,
+  FHIR_EXTENSION,
+  OCCUPATIONAL_MEDICINE_ACCOUNT_TYPE,
+  PATIENT_BILLING_ACCOUNT_TYPE,
+  PREFERRED_PHARMACY_ERX_ID_FOR_SYNC_URL,
+  PREFERRED_PHARMACY_EXTENSION_URL,
+  PREFERRED_PHARMACY_MANUAL_ENTRY_URL,
+  PREFERRED_PHARMACY_PLACES_ID_URL,
+  PRIVATE_EXTENSION_BASE_URL,
+  SUBSCRIBER_RELATIONSHIP_CODE_MAP,
+  SubscriberRelationship,
+  WORKERS_COMP_ACCOUNT_TYPE,
+} from 'utils/lib/fhir/constants';
+import { deduplicateUnbundledResources } from 'utils/lib/fhir/deduplicateUnbundledResources';
+import {
+  buildCoverageSubscriberRelatedPerson,
   codeableConcept,
-  ConsentSigner,
-  consolidateOperations,
-  ContactTelecomConfig,
-  COVERAGE_ADDITIONAL_INFORMATION_URL,
-  coverageFieldPaths,
   createConsentResource,
   createCoverageMemberIdentifier,
   createFhirHumanName,
   createFilesDocumentReferences,
-  createPatchOperationForTelecom,
-  DateComponents,
   deduplicateContactPoints,
   deduplicateIdentifiers,
   deduplicateObjectsByStrictKeyValEquality,
-  EMPLOYER_ORG_IDENTIFIER_SYSTEM,
   extractResourceTypeAndPath,
-  FHIR_BASE_URL,
-  FHIR_EXTENSION,
   FileDocDataForDocReference,
-  filterHiddenRemovableFields,
-  findOrgMatchingReference,
-  flattenIntakeQuestionnaireItems,
-  flattenItems,
-  formatPhoneNumber,
   getAllStripeCustomerAccountPairs,
   getArrayInfo,
-  getConsentAndRelatedDocRefsForAppointment,
-  getConsentFormsForLocation,
-  getCurrentValue,
+  getMemberIdFromCoverage,
+  getSubscriberRelationshipCodeableConcept,
+  getTaxID,
+  makeOptimisticLockIfMatchHeader,
+  mapBirthSexToGender,
+  takeContainedOrFind,
+} from 'utils/lib/fhir/helpers';
+import { CANDID_PLAN_TYPE_SYSTEM, INSURANCE_CANDID_PLAN_TYPE_CODES } from 'utils/lib/fhir/insurance';
+import { isTelemedAppointment, OTTEHR_MODULE } from 'utils/lib/fhir/moduleIdentification';
+import {
   getEmailForIndividual,
   getFullName,
-  getMemberIdFromCoverage,
+  getPhoneNumberForIndividual,
+  makeSSNIdentifier,
+} from 'utils/lib/fhir/patient';
+import {
+  buildExtensionObject,
+  coverageFieldPaths,
+  getCurrentValue,
   getPatchOperationToAddOrUpdatePreferredLanguage,
   getPatchOperationToAddOrUpdatePreferredName,
   getPatchOperationToRemovePreferredLanguage,
+  patientFieldPaths,
+  PatientMasterRecordResource,
+  relatedPersonFieldPaths,
+} from 'utils/lib/fhir/patientMasterRecord';
+import {
+  consolidateOperations,
+  ContactTelecomConfig,
+  createPatchOperationForTelecom,
+  normalizePhoneNumber,
+} from 'utils/lib/fhir/resourcePatch';
+import {
+  findOrgMatchingReference,
+  formatPhoneNumber,
+  getCustomInsuranceOrgBusinessId,
+  getCustomInsuranceOrgReferenceUrl,
   getPayerId,
   getPayerUrl,
-  getPhoneNumberForIndividual,
-  getSecret,
-  getTaxID,
-  INSURANCE_CANDID_PLAN_TYPE_CODES,
+  isCustomInsuranceOrgReferenceUrl,
+  isNioReferenceUrl,
+  isPayerUrl,
+} from 'utils/lib/helpers/helpers';
+import { filterHiddenRemovableFields, isFieldExplicitlyCleared } from 'utils/lib/helpers/paperwork/paperwork';
+import { flattenItems } from 'utils/lib/helpers/paperwork/validation';
+import { getConsentFormsForLocation } from 'utils/lib/ottehr-config/consent-forms';
+import { VALUE_SETS } from 'utils/lib/ottehr-config/value-sets';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { ConsentSigner, DateComponents } from 'utils/lib/types/common';
+import { COVERAGE_ADDITIONAL_INFORMATION_URL, RESPONSIBLE_PARTY_NO_EMAIL_URL } from 'utils/lib/types/constants';
+import {
+  OrderedCoverages,
+  OrderedCoveragesWithSubscribers,
+  PatientAccountAndCoverageResources,
+} from 'utils/lib/types/data/account';
+import {
   INSURANCE_CARD_BACK_2_ID,
   INSURANCE_CARD_BACK_ID,
   INSURANCE_CARD_CODE,
   INSURANCE_CARD_FRONT_2_ID,
   INSURANCE_CARD_FRONT_ID,
-  IntakeQuestionnaireItem,
-  isFieldExplicitlyCleared,
-  isoStringFromDateComponents,
-  isPayerUrl,
-  isValidUUID,
-  makeOptimisticLockIfMatchHeader,
-  makeSSNIdentifier,
-  mapBirthSexToGender,
-  OCCUPATIONAL_MEDICINE_ACCOUNT_TYPE,
-  OrderedCoverages,
-  OrderedCoveragesWithSubscribers,
-  OTTEHR_MODULE,
   PAPERWORK_CONSENT_CODE_UNIQUE,
-  PATIENT_BILLING_ACCOUNT_TYPE,
-  PATIENT_NOT_FOUND_ERROR,
   PATIENT_PHOTO_CODE,
   PATIENT_PHOTO_ID_PREFIX,
-  PatientAccountAndCoverageResources,
-  patientFieldPaths,
-  PatientMasterRecordResource,
-  PHARMACY_COLLECTION_LINK_IDS,
   PHOTO_ID_BACK_ID,
   PHOTO_ID_CARD_CODE,
   PHOTO_ID_FRONT_ID,
-  PREFERRED_PHARMACY_ERX_ID_FOR_SYNC_URL,
-  PREFERRED_PHARMACY_EXTENSION_URL,
-  PREFERRED_PHARMACY_MANUAL_ENTRY_URL,
-  PREFERRED_PHARMACY_PLACES_ID_URL,
-  prepareQuestionnaireResponseForHarvest,
-  PRIVATE_EXTENSION_BASE_URL,
-  QuestionnaireResponseHarvestInput,
-  relatedPersonFieldPaths,
   SCHOOL_WORK_NOTE_SCHOOL_ID,
   SCHOOL_WORK_NOTE_TEMPLATE_CODE,
   SCHOOL_WORK_NOTE_WORK_ID,
-  Secrets,
-  SecretsKeys,
-  SUBSCRIBER_RELATIONSHIP_CODE_MAP,
-  takeContainedOrFind,
-  uploadPDF,
-  VALUE_SETS,
-  WORKERS_COMP_ACCOUNT_TYPE,
-} from 'utils';
-import { deduplicateUnbundledResources } from 'utils/lib/fhir/deduplicateUnbundledResources';
+} from 'utils/lib/types/data/paperwork/paperwork.constants';
+import {
+  flattenIntakeQuestionnaireItems,
+  IntakeQuestionnaireItem,
+} from 'utils/lib/types/data/paperwork/paperwork.types';
+import {
+  prepareQuestionnaireResponseForHarvest,
+  QuestionnaireResponseHarvestInput,
+} from 'utils/lib/types/data/paperwork/prepareQuestionnaireItemsForHarvest';
+import { PHARMACY_COLLECTION_LINK_IDS } from 'utils/lib/types/data/search-places';
+import { PATIENT_NOT_FOUND_ERROR } from 'utils/lib/types/errors';
+import { isoStringFromDateComponents } from 'utils/lib/utils/date';
+import { uploadPDF } from 'utils/lib/utils/pdf';
+import { isValidUUID } from 'utils/lib/validation/helper';
 import { createOrUpdateFlags } from '../../../patient/paperwork/sharedHelpers';
 import { getInsuranceOverrideList, ListName } from '../../../rcm/get-insurance-override-list/handler';
-import { createPdfBytes } from '../../../shared';
+import { resolveCustomInsuranceOrgReference } from '../../../shared/custom-insurance-org-directory';
+import { createPdfBytes } from '../../../shared/pdf';
 
 export const PATIENT_CONTAINED_PHARMACY_ID = 'pharmacy';
 
@@ -183,6 +206,7 @@ interface ResponsiblePartyContact {
   address: Address;
   email: string;
   number?: string;
+  noEmail?: boolean;
 }
 
 interface EmergencyContact {
@@ -207,7 +231,7 @@ interface PolicyHolder {
   middleName: string;
   lastName: string;
   memberId: string;
-  relationship: 'Self' | 'Child' | 'Parent' | 'Spouse' | 'Common Law Spouse' | 'Injured Party' | 'Other';
+  relationship: SubscriberRelationship;
 
   number?: string;
   email?: string;
@@ -226,7 +250,7 @@ interface CreateConsentResourcesInput {
   questionnaireResponse: QuestionnaireResponse;
   patientResource: Patient;
   locationResource?: Location;
-  appointmentId: string;
+  appointment: Appointment;
   oystehrAccessToken: string;
   oystehr: Oystehr;
   secrets: Secrets | null;
@@ -238,12 +262,13 @@ export async function createConsentResources(input: CreateConsentResourcesInput)
     questionnaireResponse,
     patientResource,
     locationResource,
-    appointmentId,
+    appointment,
     oystehrAccessToken,
     oystehr,
     secrets,
     listResources,
   } = input;
+  const appointmentId = appointment.id!;
   console.log('Checking DocumentReferences for consent forms');
   const paperwork = questionnaireResponse.item ?? [];
 
@@ -364,12 +389,13 @@ export async function createConsentResources(input: CreateConsentResourcesInput)
 
   const nowIso = DateTime.now().setZone('UTC').toISO() || '';
 
-  const isVirtualLocation =
-    locationResource?.extension?.find(
-      (ext) => ext.url === 'https://extensions.fhir.zapehr.com/location-form-pre-release'
-    )?.valueCoding?.code === 'vi';
+  // Key the facility label off the visit's service mode, not the Location's
+  // virtual flag: a Location can be both virtual and in-person (dual-mode), so
+  // an in-person visit at such a Location must still show its physical facility
+  // name rather than "Ottehr Telemedicine".
+  const isTelemedVisit = isTelemedAppointment(appointment);
 
-  const facilityName = isVirtualLocation
+  const facilityName = isTelemedVisit
     ? 'Ottehr Telemedicine'
     : locationResource?.identifier?.find(
         (identifierTemp) => identifierTemp.system === `${FHIR_BASE_URL}/r4/facility-name`
@@ -757,6 +783,8 @@ const paperworkToPatientFieldMap: Record<string, string> = {
   'common-well-consent': patientFieldPaths.commonWellConsent,
   'patient-ssn': patientFieldPaths.ssn,
   'patient-preferred-communication-method': patientFieldPaths.preferredCommunicationMethod,
+  'patient-no-email': patientFieldPaths.noEmail,
+  'patient-has-medicaid': patientFieldPaths.patientHasMedicaid,
   'insurance-carrier': coverageFieldPaths.carrier,
   'insurance-member-id': coverageFieldPaths.memberId,
   'insurance-additional-information': coverageFieldPaths.additionalInformation,
@@ -790,7 +818,7 @@ interface MasterRecordPatchOperations {
   relatedPerson: { [key: string]: ResourcePatchOperations }; // key is RelatedPerson.id
 }
 
-const PCP_FIELDS = ['pcp-first', 'pcp-last', 'pcp-practice', 'pcp-address', 'pcp-number', 'pcp-active'];
+const PCP_FIELDS = ['pcp-first', 'pcp-last', 'pcp-practice', 'pcp-address', 'pcp-number', 'pcp-fax', 'pcp-active'];
 
 export function createMasterRecordPatchOperations(
   questionnaireResponseHarvestInput: QuestionnaireResponseHarvestInput,
@@ -806,20 +834,20 @@ export function createMasterRecordPatchOperations(
 
   const tempOperations: Operation[] = [];
 
-  // Define telecom configurations
+  // Define telecom configurations for fields that go through createPatchOperationForTelecom
+  // (PCP and emergency contact — nested paths with no conflicting clear ops).
   const contactTelecomConfigs: Record<string, ContactTelecomConfig> = {
-    'patient-number': { system: 'phone' },
-    'patient-email': { system: 'email' },
-    'guardian-number': { system: 'phone' },
-    'guardian-email': { system: 'email' },
-    'responsible-party-number': { system: 'phone', use: 'mobile' },
-    'responsible-party-email': { system: 'email' },
     'pcp-number': { system: 'phone' },
     'emergency-contact-number': { system: 'phone' },
   };
 
   const pcpItems: QuestionnaireResponseItem[] = [];
   const extensionIntents: Array<{ url: string; action: 'set' | 'remove'; value?: string }> = [];
+  // Patient top-level telecom (/telecom) and guardian contact telecom (/contact/0/telecom)
+  // are collected as intents and resolved into a single replace/add/remove op each, avoiding
+  // sequential-patch conflicts (e.g. remove-array then append-to-array in the same request).
+  const patientTelecomIntents: TelecomIntent[] = [];
+  const guardianTelecomIntents: TelecomIntent[] = [];
   let isUseMissedInPatientName = false;
 
   flattenedPaperwork.forEach((item) => {
@@ -854,7 +882,33 @@ export function createMasterRecordPatchOperations(
 
     if (resourceType !== 'Patient') return;
 
-    // Handle telecom fields
+    // When patient has no email, queue a remove-email intent (handled via patientTelecomIntents
+    // below to avoid conflicts with any phone-add in the same patch).
+    if (item.linkId === 'patient-no-email' && item.answer?.[0]?.valueBoolean === true) {
+      patientTelecomIntents.push({ system: 'email', value: undefined });
+    }
+
+    // Patient-level telecom — collected as intents, resolved after the loop into a single op
+    if (item.linkId === 'patient-number') {
+      patientTelecomIntents.push({ system: 'phone', value: isAnswerEmpty ? undefined : (value as string) });
+      return;
+    }
+    if (item.linkId === 'patient-email') {
+      patientTelecomIntents.push({ system: 'email', value: isAnswerEmpty ? undefined : (value as string) });
+      return;
+    }
+
+    // Guardian contact telecom — same intent approach for /contact/0/telecom
+    if (item.linkId === 'guardian-number') {
+      guardianTelecomIntents.push({ system: 'phone', value: isAnswerEmpty ? undefined : (value as string) });
+      return;
+    }
+    if (item.linkId === 'guardian-email') {
+      guardianTelecomIntents.push({ system: 'email', value: isAnswerEmpty ? undefined : (value as string) });
+      return;
+    }
+
+    // Handle remaining telecom fields (pcp-number, emergency-contact-number) via patch ops
     const contactTelecomConfig = contactTelecomConfigs[item.linkId];
     if (contactTelecomConfig) {
       const operation = createPatchOperationForTelecom(
@@ -1069,9 +1123,15 @@ export function createMasterRecordPatchOperations(
   });
   result.patient.patchOpsForDirectUpdate = consolidateOperations(result.patient.patchOpsForDirectUpdate, patient);
 
-  // Extension and PCP ops are added after consolidateOperations because they are already
-  // fully resolved and would be mangled by the consolidation pipeline's grouping/normalization.
+  // Extension, telecom, and PCP ops are added after consolidateOperations because they are
+  // already fully resolved and would be mangled by the consolidation pipeline's grouping/normalization.
   result.patient.patchOpsForDirectUpdate.push(...resolveExtensionIntents(extensionIntents, patient));
+  result.patient.patchOpsForDirectUpdate.push(
+    ...resolveTelecomIntents(patientTelecomIntents, patient.telecom, '/telecom')
+  );
+  result.patient.patchOpsForDirectUpdate.push(
+    ...resolveTelecomIntents(guardianTelecomIntents, patient.contact?.[0]?.telecom, '/contact/0/telecom')
+  );
   result.patient.patchOpsForDirectUpdate.push(...getPCPPatchOps(pcpItems, patient));
   // sanitize the patient patch ops so no SSN is leaked in logs
   const sanitizedPatchOps = result.patient.patchOpsForDirectUpdate.map((op) => {
@@ -1129,20 +1189,72 @@ const resolveExtensionIntents = (
   return [{ op: 'replace', path: '/extension', value: targetExtensions }];
 };
 
-const getPCPPatchOps = (flattenedItems: QuestionnaireResponseItem[], patient: Patient): Operation[] => {
+interface TelecomIntent {
+  system: ContactPoint['system'];
+  value?: string; // undefined = remove this system's entry
+  use?: ContactPoint['use'];
+  rank?: number;
+}
+
+const resolveTelecomIntents = (
+  intents: TelecomIntent[],
+  currentTelecom: ContactPoint[] | undefined,
+  telecomPath: string
+): Operation[] => {
+  if (intents.length === 0) return [];
+
+  const target: ContactPoint[] = _.cloneDeep(currentTelecom ?? []);
+
+  for (const intent of intents) {
+    const existingIdx = target.findIndex((t) => t.system === intent.system);
+    const normalizedValue = intent.system === 'phone' ? normalizePhoneNumber(intent.value) || undefined : intent.value;
+
+    if (!normalizedValue) {
+      if (existingIdx !== -1) target.splice(existingIdx, 1);
+    } else if (existingIdx !== -1) {
+      target[existingIdx] = {
+        ...target[existingIdx],
+        value: normalizedValue,
+        ...(intent.use !== undefined ? { use: intent.use } : {}),
+        ...(intent.rank !== undefined ? { rank: intent.rank } : {}),
+      };
+    } else {
+      target.push({
+        system: intent.system,
+        value: normalizedValue,
+        ...(intent.use !== undefined ? { use: intent.use } : {}),
+        ...(intent.rank !== undefined ? { rank: intent.rank } : {}),
+      });
+    }
+  }
+
+  if (_.isEqual(currentTelecom ?? [], target)) return [];
+
+  if (!currentTelecom || currentTelecom.length === 0) {
+    if (target.length === 0) return [];
+    return [{ op: 'add', path: telecomPath, value: target }];
+  }
+
+  if (target.length === 0) return [{ op: 'remove', path: telecomPath }];
+
+  return [{ op: 'replace', path: telecomPath, value: target }];
+};
+
+export const getPCPPatchOps = (flattenedItems: QuestionnaireResponseItem[], patient: Patient): Operation[] => {
   const isActive = flattenedItems.find((field) => field.linkId === 'pcp-active')?.answer?.[0]?.valueBoolean;
   const firstName = flattenedItems.find((field) => field.linkId === 'pcp-first')?.answer?.[0]?.valueString;
   const lastName = flattenedItems.find((field) => field.linkId === 'pcp-last')?.answer?.[0]?.valueString;
   const practiceName = flattenedItems.find((field) => field.linkId === 'pcp-practice')?.answer?.[0]?.valueString;
   const pcpAddress = flattenedItems.find((field) => field.linkId === 'pcp-address')?.answer?.[0]?.valueString;
   const phone = flattenedItems.find((field) => field.linkId === 'pcp-number')?.answer?.[0]?.valueString;
+  const fax = flattenedItems.find((field) => field.linkId === 'pcp-fax')?.answer?.[0]?.valueString;
 
-  console.log('pcp patch inputs', isActive, firstName, lastName, practiceName, pcpAddress, phone);
+  console.log('pcp patch inputs', isActive, firstName, lastName, practiceName, pcpAddress, phone, fax);
 
   const pcpActiveFieldExists = flattenedItems.some((field) => field.linkId === 'pcp-active');
   const shouldDeactivate = isActive === false || (pcpActiveFieldExists && isActive === undefined);
 
-  const hasSomeValue = (firstName && lastName) || practiceName || pcpAddress || phone;
+  const hasSomeValue = (firstName && lastName) || practiceName || pcpAddress || phone || fax;
 
   const hasAnyPCPFields = flattenedItems.some((field) => PCP_FIELDS.includes(field.linkId));
   const shouldClearAllData = hasAnyPCPFields && !hasSomeValue;
@@ -1195,8 +1307,10 @@ const getPCPPatchOps = (flattenedItems: QuestionnaireResponseItem[], patient: Pa
       }
     }
 
-    if (phone) {
-      telecom = [{ system: 'phone', value: formatPhoneNumber(phone) }];
+    if (phone || fax) {
+      telecom = [];
+      if (phone) telecom.push({ system: 'phone', value: formatPhoneNumber(phone) });
+      if (fax) telecom.push({ system: 'fax', value: formatPhoneNumber(fax) });
     }
     if (pcpAddress) {
       address = [{ text: pcpAddress }];
@@ -1252,17 +1366,67 @@ const getPCPPatchOps = (flattenedItems: QuestionnaireResponseItem[], patient: Pa
   return operations;
 };
 
+export interface PcpContactDetails {
+  firstName?: string;
+  lastName?: string;
+  practiceName?: string;
+  phone?: string;
+  fax?: string;
+  active: boolean;
+}
+
+export const getPcpPatchOpsFromDetails = (details: PcpContactDetails, patient: Patient): Operation[] => {
+  const currentPcpRef = patient.generalPractitioner?.[0]?.reference;
+
+  const existingPcp = currentPcpRef
+    ? patient.contained?.find(
+        (resource): resource is Practitioner =>
+          resource.resourceType === 'Practitioner' && `#${resource.id}` === currentPcpRef
+      )
+    : undefined;
+
+  const existingFirstName = existingPcp?.name?.[0]?.given?.[0];
+  const existingLastName = existingPcp?.name?.[0]?.family;
+
+  const existingPractice = existingPcp?.extension?.find(
+    (extension) => extension.url === `${PRIVATE_EXTENSION_BASE_URL}/practice-name`
+  )?.valueString;
+
+  const existingAddress = existingPcp?.address?.[0]?.text;
+  const existingPhone = existingPcp?.telecom?.find((telecom) => telecom.system === 'phone')?.value;
+  const existingFax = existingPcp?.telecom?.find((telecom) => telecom.system === 'fax')?.value;
+
+  const firstName = details.firstName ?? existingFirstName;
+  const lastName = details.lastName ?? existingLastName;
+  const practiceName = details.practiceName ?? existingPractice;
+  const phone = details.phone ?? existingPhone;
+  const fax = details.fax ?? existingFax;
+
+  const items: QuestionnaireResponseItem[] = [
+    { linkId: 'pcp-first', answer: firstName ? [{ valueString: firstName }] : undefined },
+    { linkId: 'pcp-last', answer: lastName ? [{ valueString: lastName }] : undefined },
+    { linkId: 'pcp-practice', answer: practiceName ? [{ valueString: practiceName }] : undefined },
+    { linkId: 'pcp-address', answer: existingAddress ? [{ valueString: existingAddress }] : undefined },
+    { linkId: 'pcp-number', answer: phone ? [{ valueString: phone }] : undefined },
+    { linkId: 'pcp-fax', answer: fax ? [{ valueString: fax }] : undefined },
+    { linkId: 'pcp-active', answer: [{ valueBoolean: details.active }] },
+  ];
+  return getPCPPatchOps(items, patient);
+};
+
 export const createUpdatePharmacyPatchOps = (
   patient: Patient,
   flattenedItems: QuestionnaireResponseItem[]
 ): Operation[] => {
   const pharmacyNameAnswer = getAnswer('pharmacy-name', flattenedItems);
   const pharmacyAddressAnswer = getAnswer('pharmacy-address', flattenedItems);
+  const pharmacyPhoneAnswer = getAnswer('pharmacy-phone', flattenedItems);
 
   const pharmacyWasManuallyEntered = getAnswer('pharmacy-page-manual-entry', flattenedItems);
   const placesPharmacyIdAnswer = getAnswer(PHARMACY_COLLECTION_LINK_IDS.placesId, flattenedItems);
   const placesPharmacyNameAnswer = getAnswer(PHARMACY_COLLECTION_LINK_IDS.placesName, flattenedItems);
   const placesPharmacyAddressAnswer = getAnswer(PHARMACY_COLLECTION_LINK_IDS.placesAddress, flattenedItems);
+  const placesPharmacyPhoneAnswer = getAnswer(PHARMACY_COLLECTION_LINK_IDS.placesPhone, flattenedItems);
   const exrPharmacyIdAnswer = getAnswer(PHARMACY_COLLECTION_LINK_IDS.erxPharmacyId, flattenedItems);
 
   // Skip if the pharmacy section wasn't part of this submission, otherwise a
@@ -1279,6 +1443,8 @@ export const createUpdatePharmacyPatchOps = (
 
   const inputPharmacyName = pharmacyNameAnswer?.valueString ?? placesPharmacyNameAnswer?.valueString;
   const inputPharmacyAddress = pharmacyAddressAnswer?.valueString ?? placesPharmacyAddressAnswer?.valueString;
+  const inputPharmacyPhone = pharmacyPhoneAnswer?.valueString ?? placesPharmacyPhoneAnswer?.valueString;
+  const hasPharmacyInput = Boolean(inputPharmacyName || inputPharmacyAddress || inputPharmacyPhone);
 
   const operations: Operation[] = [];
 
@@ -1286,7 +1452,7 @@ export const createUpdatePharmacyPatchOps = (
   const filteredContained = currentContained.filter((resource) => resource.id !== PATIENT_CONTAINED_PHARMACY_ID);
 
   // Add new pharmacy if provided
-  if (inputPharmacyName || inputPharmacyAddress) {
+  if (hasPharmacyInput) {
     const pharmacyOrg: Organization = {
       resourceType: 'Organization',
       id: PATIENT_CONTAINED_PHARMACY_ID,
@@ -1296,6 +1462,14 @@ export const createUpdatePharmacyPatchOps = (
         ? [
             {
               text: inputPharmacyAddress,
+            },
+          ]
+        : undefined,
+      telecom: inputPharmacyPhone
+        ? [
+            {
+              system: 'phone',
+              value: inputPharmacyPhone,
             },
           ]
         : undefined,
@@ -1344,7 +1518,7 @@ export const createUpdatePharmacyPatchOps = (
   );
 
   // Add pharmacy reference if we have pharmacy data
-  if (inputPharmacyName || inputPharmacyAddress) {
+  if (hasPharmacyInput) {
     filteredExtensions.push({
       url: PREFERRED_PHARMACY_EXTENSION_URL,
       valueReference: {
@@ -1422,7 +1596,7 @@ function extractValueFromItem(item: QuestionnaireResponseItem): string | boolean
 
   // Handle regular answers
   if (!answer) return undefined;
-  if ('valueString' in answer) return answer.valueString;
+  if ('valueString' in answer) return answer.valueString?.trim();
   if ('valueBoolean' in answer) return answer.valueBoolean;
   if ('valueDateTime' in answer) return answer.valueDateTime;
   if ('valueReference' in answer) return answer.valueReference;
@@ -1650,6 +1824,9 @@ export async function searchInsuranceInformation(
         }
         return oystehr.rcm.getPayerByUrl({ url: ref });
       }
+      if (isCustomInsuranceOrgReferenceUrl(ref)) {
+        return resolveCustomInsuranceOrgReference(oystehr, ref);
+      }
       const orgFromFhir = findOrgMatchingReference(ref, resources);
       if (orgFromFhir) {
         return orgFromFhir;
@@ -1774,7 +1951,7 @@ const extractPolicyHolder = (
   keySuffix?: string
 ): PolicyHolder | undefined => {
   const findAnswer = (linkId: string): string | undefined =>
-    items.find((item) => item.linkId === linkId)?.answer?.[0]?.valueString;
+    items.find((item) => item.linkId === linkId)?.answer?.[0]?.valueString?.trim();
   const findBooleanAnswer = (linkId: string): boolean | undefined =>
     items.find((item) => item.linkId === linkId)?.answer?.[0]?.valueBoolean;
 
@@ -1788,12 +1965,7 @@ const extractPolicyHolder = (
     number: findAnswer(`policy-holder-number${suffix}`),
     email: findAnswer(`policy-holder-email${suffix}`),
     memberId: findAnswer(`insurance-member-id${suffix}`) ?? '',
-    relationship: findAnswer(`patient-relationship-to-insured${suffix}`) as
-      | 'Self'
-      | 'Spouse'
-      | 'Parent'
-      | 'Legal Guardian'
-      | 'Other',
+    relationship: findAnswer(`patient-relationship-to-insured${suffix}`) as SubscriberRelationship,
   };
 
   const sameAsPatient = findBooleanAnswer(`policy-holder-address-as-patient${suffix}`) === true;
@@ -1835,7 +2007,7 @@ export function extractAccountGuarantor(
   patient: Patient
 ): ResponsiblePartyContact | undefined {
   const findAnswer = (linkId: string): string | undefined =>
-    items.find((item) => item.linkId === linkId)?.answer?.[0]?.valueString;
+    items.find((item) => item.linkId === linkId)?.answer?.[0]?.valueString?.trim();
   const findBooleanAnswer = (linkId: string): boolean | undefined =>
     items.find((item) => item.linkId === linkId)?.answer?.[0]?.valueBoolean;
 
@@ -1876,6 +2048,7 @@ export function extractAccountGuarantor(
     address: guarantorAddress,
     email: findAnswer('responsible-party-email') ?? '',
     number: findAnswer('responsible-party-number'),
+    noEmail: findBooleanAnswer('responsible-party-no-email'),
   };
 
   if (contact.firstName && contact.lastName && contact.dob && contact.birthSex && contact.relationship) {
@@ -1886,7 +2059,7 @@ export function extractAccountGuarantor(
 
 export function extractEmergencyContact(items: QuestionnaireResponseItem[]): EmergencyContact | undefined {
   const findAnswer = (linkId: string): string | undefined =>
-    items.find((item) => item.linkId === linkId)?.answer?.[0]?.valueString;
+    items.find((item) => item.linkId === linkId)?.answer?.[0]?.valueString?.trim();
   const findBooleanAnswer = (linkId: string): boolean | undefined =>
     items.find((item) => item.linkId === linkId)?.answer?.[0]?.valueBoolean;
 
@@ -2032,7 +2205,8 @@ const mergeGuarantors = (guarantors: Account['guarantor'], organizationReference
     {
       party: {
         reference: organizationReference,
-        type: 'Organization',
+        // An NIO reference token is not a FHIR Organization reference, so it carries no type hint.
+        ...(isNioReferenceUrl(organizationReference) ? {} : { type: 'Organization' }),
       },
     },
   ];
@@ -2110,16 +2284,19 @@ interface BuildEmployerAccountResourceParams {
   patientId: string;
   existingAccount?: Account;
   organizationReference: string;
+  // Persisted on Account.owner so NIO reference tokens render a name without any FHIR read.
+  organizationDisplay?: string;
   accountTypeCoding?: CodeableConcept;
   employerInformation?: EmployerInformation;
   coverageReference?: string;
 }
 
-const buildEmployerAccountResource = (params: BuildEmployerAccountResourceParams): Account => {
+export const buildEmployerAccountResource = (params: BuildEmployerAccountResourceParams): Account => {
   const {
     patientId,
     existingAccount,
     organizationReference,
+    organizationDisplay,
     accountTypeCoding,
     employerInformation,
     coverageReference,
@@ -2143,7 +2320,7 @@ const buildEmployerAccountResource = (params: BuildEmployerAccountResourceParams
     },
     name: employerInformation?.employerName,
     subject,
-    owner: { reference: organizationReference },
+    owner: { reference: organizationReference, ...(organizationDisplay ? { display: organizationDisplay } : {}) },
     guarantor,
     contained: organizationIdFromReference
       ? baseAccount.contained?.filter(
@@ -2371,34 +2548,37 @@ const createCoverageResource = (input: CreateCoverageResourceInput): Coverage =>
   const { org, policyHolder, additionalInformation, typeCode } = insurance;
   const memberId = policyHolder.memberId;
 
-  const payerId = getPayerId(org);
+  // A custom insurance organization carries no RCM payer identifier; its business id ("OTR-...")
+  // takes its place as the coverage class value, matching how billing's own Coverage builder
+  // resolves the same organization (see resolvedPayerId in packages/zambdas/src/billing/shared.ts).
+  const customOrgBusinessId = getCustomInsuranceOrgBusinessId(org);
+  const payerId = getPayerId(org) ?? customOrgBusinessId;
   if (!payerId) {
     throw new Error('payerId unexpectedly missing from insuranceOrg');
   }
 
+  // A custom insurance organization is a billing-app-owned resource: it's referenced by token, never
+  // directly, the same way an NIO reference works (see getNioReferenceUrl).
+  const payorReference = customOrgBusinessId
+    ? getCustomInsuranceOrgReferenceUrl(org.id ?? '')
+    : isValidUUID(org.id ?? '')
+    ? `Organization/${org.id}`
+    : getPayerUrl(payerId);
+  // The member id's assigner mirrors the payor: readers (paperwork prefill, the insurance PDF) find the
+  // member id by matching the two, and a custom org has no clinical Organization to reference directly.
+  const memberIdentifier = createCoverageMemberIdentifier(memberId, org);
+  memberIdentifier.assigner = { ...memberIdentifier.assigner, reference: payorReference };
+
   const policyHolderId = 'coverageSubscriber';
-  const policyHolderName = createFhirHumanName(policyHolder.firstName, policyHolder.middleName, policyHolder.lastName);
   const relationshipCode = SUBSCRIBER_RELATIONSHIP_CODE_MAP[policyHolder.relationship] || 'other';
-  const containedPolicyHolder: RelatedPerson = {
-    resourceType: 'RelatedPerson',
-    id: policyHolderId,
-    name: policyHolderName ? policyHolderName : undefined,
-    birthDate: policyHolder.dob,
-    gender: mapBirthSexToGender(policyHolder.birthSex),
-    patient: { reference: `Patient/${patientId}` },
-    address: [policyHolder.address],
-    relationship: [
-      {
-        coding: [
-          {
-            system: 'http://hl7.org/fhir/ValueSet/relatedperson-relationshiptype',
-            code: relationshipCode,
-            display: policyHolder.relationship,
-          },
-        ],
-      },
-    ],
-  };
+  // Shared builder keeps the subscriber RelatedPerson aligned with the billing app; the clinical EHR
+  // contains it on the Coverage rather than persisting it standalone.
+  const containedPolicyHolder = buildCoverageSubscriberRelatedPerson(
+    patientId,
+    { ...policyHolder, address: policyHolder.address },
+    policyHolder.relationship
+  );
+  containedPolicyHolder.id = policyHolderId;
 
   let contained: Coverage['contained'];
   let subscriberReference = `#${policyHolderId}`;
@@ -2411,7 +2591,7 @@ const createCoverageResource = (input: CreateCoverageResourceInput): Coverage =>
   const coverage: Coverage = {
     contained,
     id: `urn:uuid:${randomUUID()}`,
-    identifier: [createCoverageMemberIdentifier(memberId, org)],
+    identifier: [memberIdentifier],
     resourceType: 'Coverage',
     status: 'active',
     subscriber: {
@@ -2422,13 +2602,9 @@ const createCoverageResource = (input: CreateCoverageResourceInput): Coverage =>
       reference: `Patient/${patientId}`,
     },
     type: typeCode !== undefined ? { coding: [{ system: CANDID_PLAN_TYPE_SYSTEM, code: typeCode }] } : undefined,
-    payor: [
-      {
-        reference: isValidUUID(org.id ?? '') ? `Organization/${org.id}` : getPayerUrl(payerId),
-      },
-    ],
+    payor: [{ reference: payorReference }],
     subscriberId: policyHolder.memberId,
-    relationship: getPolicyHolderRelationshipCodeableConcept(policyHolder.relationship),
+    relationship: getSubscriberRelationshipCodeableConcept(policyHolder.relationship),
     class: [
       {
         type: {
@@ -3017,6 +3193,7 @@ export const getAccountOperations = (input: GetAccountOperationsInput): GetAccou
       patientId: patient.id!,
       existingAccount: existingOccupationalMedicineAccount,
       organizationReference: occupationalMedicineEmployerReference.reference,
+      organizationDisplay: occupationalMedicineEmployerReference.display,
       accountTypeCoding: OCCUPATIONAL_MEDICINE_ACCOUNT_TYPE,
       employerInformation,
     });
@@ -3674,19 +3851,6 @@ const patchOpsForCoverage = (input: GetCoveragePatchOpsInput): Operation[] => {
   return ops;
 };
 
-const getPolicyHolderRelationshipCodeableConcept = (relationship: PolicyHolder['relationship']): CodeableConcept => {
-  const relationshipCode = SUBSCRIBER_RELATIONSHIP_CODE_MAP[relationship] || 'other';
-  return {
-    coding: [
-      {
-        system: 'http://terminology.hl7.org/CodeSystem/subscriber-relationship',
-        code: relationshipCode,
-        display: relationship,
-      },
-    ],
-  };
-};
-
 export const createContainedGuarantor = (guarantor: ResponsiblePartyContact, patientId: string): RelatedPerson => {
   const guarantorId = 'accountGuarantorId';
   const policyHolderName = createFhirHumanName(guarantor.firstName, undefined, guarantor.lastName);
@@ -3703,12 +3867,15 @@ export const createContainedGuarantor = (guarantor: ResponsiblePartyContact, pat
       system: 'phone',
     });
   }
-  if (email) {
+  if (email && !guarantor.noEmail) {
     telecom?.push({
       value: email,
       system: 'email',
     });
   }
+  const extension: Extension[] | undefined = guarantor.noEmail
+    ? [{ url: RESPONSIBLE_PARTY_NO_EMAIL_URL, valueBoolean: true }]
+    : undefined;
   return {
     resourceType: 'RelatedPerson',
     id: guarantorId,
@@ -3718,6 +3885,7 @@ export const createContainedGuarantor = (guarantor: ResponsiblePartyContact, pat
     telecom,
     patient: { reference: `Patient/${patientId}` },
     address: [guarantor.address],
+    extension,
     relationship: [
       {
         coding: [
@@ -3952,6 +4120,44 @@ enum InsuranceCarrierKeys {
   workersComp = 'workers-comp-insurance-name',
 }
 
+export const PATIENT_ACCOUNT_AND_COVERAGE_SEARCH_INCLUDES: { name: string; value: string }[] = [
+  { name: '_revinclude', value: 'Account:patient' },
+  { name: '_include:iterate', value: 'Account:owner' },
+  { name: '_revinclude', value: 'RelatedPerson:patient' },
+  { name: '_revinclude', value: 'Coverage:patient' },
+  { name: '_include:iterate', value: 'Coverage:subscriber' },
+  { name: '_include:iterate', value: 'Coverage:payor' },
+];
+
+const isInsuranceOrganization = (resource: FhirResource): resource is Organization =>
+  resource.resourceType === 'Organization' &&
+  organizationMatchesType(resource, codeableConcept('pay', FHIR_EXTENSION.Organization.organizationType.url));
+
+export const getCoveragePayorReferences = (resources: FhirResource[]): string[] =>
+  resources
+    .filter((res): res is Coverage => res.resourceType === 'Coverage')
+    .flatMap<string | undefined>((cov) => cov.payor.map((ref) => ref.reference))
+    .filter<string>((ref): ref is string => !!ref);
+
+export const assemblePatientAccountAndCoverageResources = (
+  patient: Patient,
+  searchResults: FhirResource[],
+  insuranceOrgs: Organization[]
+): PatientAccountAndCoverageResources => {
+  const resources = searchResults.filter((resource) => {
+    if (resource.resourceType === 'Account') {
+      return resource.status === 'active';
+    }
+
+    return !isInsuranceOrganization(resource);
+  }) as UnbundledAccountResources;
+
+  return getCoverageUpdateResourcesFromUnbundled({
+    patient,
+    resources: [...resources, ...insuranceOrgs],
+  });
+};
+
 export const getAccountAndCoverageResourcesForPatient = async (
   patientId: string,
   oystehr: Oystehr
@@ -3965,30 +4171,7 @@ export const getAccountAndCoverageResourcesForPatient = async (
           name: '_id',
           value: patientId,
         },
-        {
-          name: '_revinclude',
-          value: 'Account:patient',
-        },
-        {
-          name: '_include:iterate',
-          value: 'Account:owner',
-        },
-        {
-          name: '_revinclude',
-          value: 'RelatedPerson:patient',
-        },
-        {
-          name: '_revinclude',
-          value: 'Coverage:patient',
-        },
-        {
-          name: '_include:iterate',
-          value: 'Coverage:subscriber',
-        },
-        {
-          name: '_include:iterate',
-          value: 'Coverage:payor',
-        },
+        ...PATIENT_ACCOUNT_AND_COVERAGE_SEARCH_INCLUDES,
       ],
     })
   ).unbundle();
@@ -4000,36 +4183,15 @@ export const getAccountAndCoverageResourcesForPatient = async (
     (r) => r.resourceType === 'Patient' && r.id === patientId
   ) as Patient;
 
-  const resources = accountAndCoverageResources.filter((resource) => {
-    if (resource.resourceType === 'Account') {
-      return resource.status === 'active';
-    }
-    return true;
-  });
-
   if (!patientResource) {
     throw PATIENT_NOT_FOUND_ERROR;
   }
 
-  const coverageResources = resources.filter((res): res is Coverage => res.resourceType === 'Coverage');
-  const insuranceOrgsFromFhir = resources.filter(
-    (res): res is Organization =>
-      res.resourceType === 'Organization' &&
-      organizationMatchesType(res, codeableConcept('pay', FHIR_EXTENSION.Organization.organizationType.url))
-  );
-  const resourcesWithoutInsuranceOrgsFromFhir = resources.filter(
-    (res) =>
-      res.resourceType !== 'Organization' ||
-      !organizationMatchesType(res, codeableConcept('pay', FHIR_EXTENSION.Organization.organizationType.url))
-  );
-
   // Get payer info for coverages
   const insuranceOrgs = await searchInsuranceInformation(
     oystehr,
-    coverageResources
-      .flatMap<string | undefined>((cov) => cov.payor.map((ref) => ref.reference))
-      .filter<string>((ref): ref is string => !!ref),
-    insuranceOrgsFromFhir
+    getCoveragePayorReferences(accountAndCoverageResources),
+    accountAndCoverageResources.filter(isInsuranceOrganization)
   );
 
   // Get EHR-facing payer notes
@@ -4042,10 +4204,7 @@ export const getAccountAndCoverageResourcesForPatient = async (
     }
   }
 
-  return getCoverageUpdateResourcesFromUnbundled({
-    patient: patientResource,
-    resources: [...resourcesWithoutInsuranceOrgsFromFhir, ...insuranceOrgs],
-  });
+  return assemblePatientAccountAndCoverageResources(patientResource, accountAndCoverageResources, insuranceOrgs);
 };
 
 export interface UpdatePatientAccountInput {
@@ -4297,15 +4456,20 @@ export const updateStripeCustomer = async (input: UpdateStripeCustomerInput): Pr
 
   const stripeCustomerAccountPairs = getAllStripeCustomerAccountPairs(account);
   for (const pair of stripeCustomerAccountPairs) {
-    await stripeClient.customers.update(
-      pair.customerId,
-      {
-        email,
-        name,
-        phone,
-      },
-      { stripeAccount: pair.stripeAccount }
-    );
+    try {
+      await stripeClient.customers.update(
+        pair.customerId,
+        { email, name, phone },
+        { stripeAccount: pair.stripeAccount }
+      );
+    } catch (stripeError: any) {
+      if (stripeError?.type === 'StripeInvalidRequestError' && stripeError?.param === 'email') {
+        console.warn(`Stripe rejected email for customer ${pair.customerId}, updating without email`);
+        await stripeClient.customers.update(pair.customerId, { name, phone }, { stripeAccount: pair.stripeAccount });
+      } else {
+        throw stripeError;
+      }
+    }
   }
 };
 

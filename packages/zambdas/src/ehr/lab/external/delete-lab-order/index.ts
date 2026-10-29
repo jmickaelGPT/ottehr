@@ -10,14 +10,14 @@ import {
   ServiceRequest,
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import { DeleteLabOrderZambdaOutput, EXTERNAL_LAB_ERROR, PROVENANCE_ACTIVITY_CODING_ENTITY } from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  getMyPractitionerId,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../../shared';
+import { PROVENANCE_ACTIVITY_CODING_ENTITY } from 'utils/lib/types/data/labs/labs.constants';
+import { DeleteLabOrderZambdaOutput } from 'utils/lib/types/data/labs/labs.types';
+import { EXTERNAL_LAB_ERROR } from 'utils/lib/types/errors';
+import { checkOrCreateM2MClientToken } from '../../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../../shared/helpers';
+import { getMyPractitionerId } from '../../../../shared/practitioners';
+import { wrapHandler } from '../../../../shared/sentry';
+import { ZambdaInput } from '../../../../shared/types/common';
 import { makeSoftDeleteStatusPatchRequest } from '../../shared/helpers';
 import {
   getLabOrderRelatedResources,
@@ -37,7 +37,7 @@ export const index = wrapHandler('delete-lab-order', async (input: ZambdaInput):
   console.debug('validateRequestParameters success');
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
   const practitionerIdFromCurrentUser = await getMyPractitionerId(
     validatedParameters.userToken,
     validatedParameters.secrets

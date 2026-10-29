@@ -78,7 +78,13 @@ export interface MedicationData {
   manufacturer?: string;
   location?: { code: string; name: string };
   providerId?: string;
-  cptCodes?: { code: string; display: string }[];
+  cptCodes?: {
+    code: string;
+    display: string;
+    isMedication?: boolean;
+    billableUnitSize?: number;
+    billableUnits?: number;
+  }[];
 
   // scanning part
   lotNumber?: string;
@@ -905,6 +911,11 @@ export const medicationApplianceRoutes: MedicationApplianceRoutes = {
     system: 'http://snomed.info/sct',
     display: 'Intracerebroventricular route (qualifier value)',
   },
+  INFUSION: {
+    code: '445214009',
+    system: 'http://snomed.info/sct',
+    display: 'IV Infusion',
+  },
   PERCUTANEOUS: {
     code: '428191002',
     system: 'http://snomed.info/sct',
@@ -1151,6 +1162,22 @@ export const medicationApplianceRoutes: MedicationApplianceRoutes = {
     display: 'Sublabial use',
   },
 } as const;
+
+export const inHouseMedicationsMedicationApplianceRoutes: MedicationApplianceRoutes = {
+  ...medicationApplianceRoutes,
+  INHALATION: {
+    code: '999000051000001100',
+    system: 'http://snomed.info/sct',
+    display: 'Inhalation route',
+  },
+} as const;
+
+/**
+ * Routes that mean IV medication entered the patient, and therefore warrant a vitals re-check once the
+ * order is administered. Administering an order on one of these routes auto-generates a nursing order
+ * prompting the clinician to re-record temp, RR, HR, BP and SpO2.
+ */
+export const IV_ROUTE_CODES_REQUIRING_VITALS_RECHECK: readonly string[] = [medicationApplianceRoutes.INFUSION.code];
 
 export interface EmergencyContactRelationship {
   code: string;

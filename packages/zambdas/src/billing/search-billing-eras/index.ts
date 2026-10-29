@@ -1,9 +1,25 @@
-import Oystehr from '@oystehr/sdk';
+import Oystehr, { SearchParam } from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Claim, ClaimResponse, Organization, PaymentReconciliation } from 'fhir/r4b';
-import { EraListItem, getPayerId, getPayerUrl } from 'utils';
-import { checkOrCreateM2MClientToken, fetchAllPages, wrapHandler, ZambdaInput } from '../../shared';
-import { createBillingClient, ERA_CHECK_SYSTEM, ERA_ID_SYSTEM, resolvePayersByRef } from '../shared';
+import { getPayerId, getPayerUrl } from 'utils/lib/helpers/helpers';
+import { EraListItem } from 'utils/lib/types/data/billing/billing.types';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { fetchAllPages } from '../../shared/fhir';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { countEraClaims, fetchClaimEraLinks, fetchClaimResponsesByPaymentReconciliations } from '../claim-amounts';
+import { resolvePayerIssuerFilter } from '../custom-insurance-org.helpers';
+import { resolveEraPayee } from '../era-remits';
+import {
+  CLAIM_PCN_IDENTIFIER_SYSTEM,
+  createBillingClient,
+  createEraReadClient,
+  CURRENT_STATUS_TAG_SYSTEM,
+  eraCheckNumberMatches,
+  getEraCheckNumber,
+  getEraSource,
+  resolvePayersByRef,
+} from '../shared';
 import { SearchErasParams, validateRequestParameters } from './validateRequestParameters';
 
 let m2mToken: string;
@@ -13,13 +29,15 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   const params = validateRequestParameters(input);
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, params.secrets);
   const oystehr = createBillingClient(m2mToken, params.secrets);
+  const eraReadClient = createEraReadClient(m2mToken, params.secrets);
 
-  const response = await performEffect(oystehr, params);
+  const response = await performEffect(oystehr, eraReadClient, params);
   return { statusCode: 200, body: JSON.stringify(response) };
 });
 
-async function performEffect(
+export async function performEffect(
   oystehr: Oystehr,
+  eraReadClient: Oystehr,
   params: SearchErasParams
 ): Promise<{ eras: EraListItem[]; total: number; offset: number; pageSize: number }> {
   const pageSize = params.pageSize ?? 25;
@@ -29,7 +47,9 @@ async function performEffect(
   // Resolve the payer filter to Oystehr payer list URLs
   let payerIssuerFilter: string | undefined;
   if (params.payerId) {
-    payerIssuerFilter = getPayerUrl(params.payerId);
+    // A business-id-shaped payerId ("OTR-...") names a custom insurance organization rather than an
+    // RCM payer (see resolvePayerIssuerFilter). Only remits keyed in by hand can come from one.
+    payerIssuerFilter = await resolvePayerIssuerFilter(oystehr, params.payerId);
   } else if (params.payerName) {
     const result = await oystehr.rcm.listPayers({ name: params.payerName, limit: 50 });
     const payerIds = result.data.map((p) => getPayerId(p)).filter(Boolean) as string[];
@@ -37,115 +57,237 @@ async function performEffect(
     payerIssuerFilter = payerIds.map((id) => getPayerUrl(id)).join(',');
   }
 
-  // ERA-level FHIR search
-  const searchParams: { name: string; value: string }[] = [
-    { name: '_sort', value: '-created' },
-    { name: '_count', value: String(pageSize) },
-    { name: '_offset', value: String(offset) },
-  ];
-  if (params.eraDateFrom) searchParams.push({ name: 'created', value: `ge${params.eraDateFrom}` });
-  if (params.eraDateTo) searchParams.push({ name: 'created', value: `le${params.eraDateTo}` });
-  if (params.eraStatus) searchParams.push({ name: 'outcome', value: params.eraStatus });
-  if (payerIssuerFilter) searchParams.push({ name: 'payment-issuer', value: payerIssuerFilter });
-  if (params.checkNumber) searchParams.push({ name: 'identifier', value: `${ERA_CHECK_SYSTEM}|${params.checkNumber}` });
-  if (params.eraId) searchParams.push({ name: 'identifier', value: `${ERA_ID_SYSTEM}|${params.eraId}` });
+  // ERA-level FHIR search, without the paging the server can only apply to the filters it runs
+  const filterParams: SearchParam[] = [];
+  if (params.eraDateFrom) filterParams.push({ name: 'created', value: `ge${params.eraDateFrom}` });
+  if (params.eraDateTo) filterParams.push({ name: 'created', value: `le${params.eraDateTo}` });
+  if (payerIssuerFilter) filterParams.push({ name: 'payment-issuer', value: payerIssuerFilter });
 
   if (hasClaimFilters) {
     const claimIds = await findMatchingClaimIds(oystehr, params);
     if (claimIds.size === 0) return { eras: [], total: 0, offset, pageSize };
 
-    const eraIds = await findEraIdentifiersForClaims(oystehr, claimIds);
-    if (eraIds.size === 0) return { eras: [], total: 0, offset, pageSize };
+    const prIds = await findEraPaymentReconciliationIds(eraReadClient, claimIds);
+    if (prIds.size === 0) return { eras: [], total: 0, offset, pageSize };
 
-    searchParams.push({
-      name: 'identifier',
-      value: [...eraIds].map((v) => `${ERA_ID_SYSTEM}|${v}`).join(','),
+    filterParams.push({
+      name: '_id',
+      value: [...prIds].join(','),
     });
   }
 
-  const bundle = await oystehr.fhir.search<PaymentReconciliation>({
-    resourceType: 'PaymentReconciliation',
-    params: searchParams,
-  });
-  const payments = bundle.unbundle();
-  const payersByRef = await resolvePayersByRef(
-    oystehr,
-    payments.map((pr) => pr.paymentIssuer?.reference)
-  );
-  const eras = payments.map((pr) => mapEra(pr, payersByRef));
+  if (params.matchingStatus === 'anyUnmatched') {
+    // unmatched remits point at their contained claim, '#request' (what Oystehr's converters and
+    // manual entry both write) rather than a Claim/{id}
+    filterParams.push({
+      name: '_has:Provenance:target:target:ClaimResponse.request',
+      value: '#request',
+    });
+  }
 
-  return { eras, total: bundle.total ?? 0, offset, pageSize };
+  const normalizedCheckNumber = params.checkNumber?.trim();
+  const { payments, total } = normalizedCheckNumber
+    ? await findErasByCheckNumber(eraReadClient, filterParams, normalizedCheckNumber, offset, pageSize)
+    : await fetchErasPage(eraReadClient, filterParams, offset, pageSize);
+
+  const claimResponsesByPrId = await fetchClaimResponsesByPaymentReconciliations(eraReadClient, payments);
+  // process-era PaymentReconciliations carry no paymentIssuer; resolve the ClaimResponses' payers
+  // as the fallback
+  const payersByRef = await resolvePayersByRef(oystehr, [
+    ...payments.map((pr) => pr.paymentIssuer?.reference),
+    ...[...claimResponsesByPrId.values()].flat().map((cr) => cr.insurer?.reference),
+  ]);
+  const eras = payments.map((pr) => mapEra(pr, payersByRef, claimResponsesByPrId));
+
+  return { eras, total, offset, pageSize };
 }
 
-// For a given set of claim IDs, return the set of ERA business identifiers that reference any of those claims.
-// Claim via `request` and carries its ERA's identifier under ERA_ID_SYSTEM.
-async function findEraIdentifiersForClaims(oystehr: Oystehr, claimIds: Set<string>): Promise<Set<string>> {
-  const eraIds = new Set<string>();
+const ERA_SORT_PARAM = {
+  name: '_sort',
+  value: '-created',
+};
+
+const SCAN_PAGE_SIZE = 200;
+
+async function fetchErasPage(
+  eraReadClient: Oystehr,
+  filterParams: SearchParam[],
+  offset: number,
+  pageSize: number
+): Promise<{
+  payments: PaymentReconciliation[];
+  total: number;
+}> {
+  const bundle = await eraReadClient.fhir.search<PaymentReconciliation>({
+    resourceType: 'PaymentReconciliation',
+    params: [
+      ERA_SORT_PARAM,
+      ...filterParams,
+      {
+        name: '_count',
+        value: String(pageSize),
+      },
+      {
+        name: '_offset',
+        value: String(offset),
+      },
+    ],
+  });
+  return {
+    payments: bundle.unbundle(),
+    total: bundle.total ?? 0,
+  };
+}
+
+async function findErasByCheckNumber(
+  eraReadClient: Oystehr,
+  filterParams: SearchParam[],
+  checkNumber: string,
+  offset: number,
+  pageSize: number
+): Promise<{
+  payments: PaymentReconciliation[];
+  total: number;
+}> {
+  const matchingIds: string[] = [];
+
+  await fetchAllPages(async (scanOffset, count) => {
+    const bundle = await eraReadClient.fhir.search<PaymentReconciliation>({
+      resourceType: 'PaymentReconciliation',
+      params: [
+        ERA_SORT_PARAM,
+        ...filterParams,
+        {
+          name: '_elements',
+          value: 'id,identifier,paymentIdentifier',
+        },
+        {
+          name: '_count',
+          value: String(count),
+        },
+        {
+          name: '_offset',
+          value: String(scanOffset),
+        },
+      ],
+    });
+    for (const pr of bundle.unbundle()) {
+      if (pr.id && eraCheckNumberMatches(pr, checkNumber)) matchingIds.push(pr.id);
+    }
+    return bundle;
+  }, SCAN_PAGE_SIZE);
+
+  const pageIds = matchingIds.slice(offset, offset + pageSize);
+  if (pageIds.length === 0) {
+    return {
+      payments: [],
+      total: matchingIds.length,
+    };
+  }
+
+  const bundle = await eraReadClient.fhir.search<PaymentReconciliation>({
+    resourceType: 'PaymentReconciliation',
+    params: [
+      {
+        name: '_id',
+        value: pageIds.join(','),
+      },
+      {
+        name: '_count',
+        value: String(pageIds.length),
+      },
+    ],
+  });
+  const byId = new Map(bundle.unbundle().map((pr) => [pr.id, pr]));
+
+  return {
+    payments: pageIds.map((id) => byId.get(id)).filter((pr): pr is PaymentReconciliation => !!pr),
+    total: matchingIds.length,
+  };
+}
+
+// For the given claims, return the ids of the PaymentReconciliations that adjudicated them.
+async function findEraPaymentReconciliationIds(eraReadClient: Oystehr, claimIds: Set<string>): Promise<Set<string>> {
+  const claimResponses: ClaimResponse[] = [];
   const ids = [...claimIds];
   const BATCH = 100;
   for (let i = 0; i < ids.length; i += BATCH) {
     const batch = ids.slice(i, i + BATCH).map((id) => `Claim/${id}`);
-    const bundle = await oystehr.fhir.search<ClaimResponse>({
+    const bundle = await eraReadClient.fhir.search<ClaimResponse>({
       resourceType: 'ClaimResponse',
       params: [
         { name: 'request', value: batch.join(',') },
-        { name: '_elements', value: 'identifier' },
+        { name: '_elements', value: 'id,identifier,extension' },
         { name: '_count', value: '1000' },
       ],
     });
-    for (const cr of bundle.unbundle()) {
-      const eraId = cr.identifier?.find((id) => id.system === ERA_ID_SYSTEM)?.value;
-      if (eraId) eraIds.add(eraId);
-    }
+    claimResponses.push(...bundle.unbundle());
   }
-  return eraIds;
+
+  const { paymentReconciliations } = await fetchClaimEraLinks(eraReadClient, claimResponses);
+  return new Set(paymentReconciliations.map((pr) => pr.id).filter((id): id is string => !!id));
 }
 
 async function findMatchingClaimIds(oystehr: Oystehr, params: SearchErasParams): Promise<Set<string>> {
-  const PAGE_SIZE = 200;
-  const baseParams: { name: string; value: string }[] = [{ name: '_elements', value: 'id' }];
-  if (params.claimStatus) baseParams.push({ name: '_tag', value: `current-status|${params.claimStatus}` });
+  const baseParams: SearchParam[] = [{ name: '_elements', value: 'id' }];
+  if (params.claimStatus)
+    baseParams.push({ name: '_tag', value: `${CURRENT_STATUS_TAG_SYSTEM}|${params.claimStatus}` });
   if (params.dosFrom) baseParams.push({ name: 'created', value: `ge${params.dosFrom}` });
   if (params.dosTo) baseParams.push({ name: 'created', value: `le${params.dosTo}` });
   if (params.patientId) baseParams.push({ name: 'patient', value: `Patient/${params.patientId}` });
-  if (params.searchText) baseParams.push({ name: 'patient.name', value: params.searchText });
+
+  const paramsSets: SearchParam[][] = [];
+  if (params.searchText) {
+    paramsSets.push([...baseParams, { name: 'patient.name', value: params.searchText }]);
+    paramsSets.push([
+      ...baseParams,
+      { name: 'identifier', value: CLAIM_PCN_IDENTIFIER_SYSTEM + '|' + params.searchText },
+    ]);
+  } else {
+    paramsSets.push(baseParams);
+  }
 
   const ids = new Set<string>();
-
-  await fetchAllPages(async (offset, count) => {
-    const bundle = await oystehr.fhir.search<Claim>({
-      resourceType: 'Claim',
-      params: [...baseParams, { name: '_count', value: String(count) }, { name: '_offset', value: String(offset) }],
-    });
-    const page = bundle.unbundle();
-    for (const c of page) {
-      if (c.id) ids.add(c.id);
-    }
-    return bundle;
-  }, PAGE_SIZE);
+  for (const params of paramsSets) {
+    await fetchAllPages(async (offset, count) => {
+      const bundle = await oystehr.fhir.search<Claim>({
+        resourceType: 'Claim',
+        params: [...params, { name: '_count', value: String(count) }, { name: '_offset', value: String(offset) }],
+      });
+      const page = bundle.unbundle();
+      for (const c of page) {
+        if (c.id) ids.add(c.id);
+      }
+      return bundle;
+    }, SCAN_PAGE_SIZE);
+  }
 
   return ids;
 }
 
-function mapEra(pr: PaymentReconciliation, payersByRef: Map<string, Organization>): EraListItem {
-  const payerRef = pr.paymentIssuer?.reference;
+function mapEra(
+  pr: PaymentReconciliation,
+  payersByRef: Map<string, Organization>,
+  claimResponsesByPrId: Map<string, ClaimResponse[]>
+): EraListItem {
+  const claimResponses = claimResponsesByPrId.get(pr.id ?? '') ?? [];
+  const payerRef =
+    pr.paymentIssuer?.reference ?? claimResponses.find((cr) => cr.insurer?.reference)?.insurer?.reference;
   const payerOrg = payerRef ? payersByRef.get(payerRef) : undefined;
 
-  const eraId = pr.identifier?.find((id) => id.system === ERA_ID_SYSTEM)?.value ?? '';
-  const checkNumber = pr.identifier?.find((id) => id.system === ERA_CHECK_SYSTEM)?.value ?? '';
-  const claimCount = pr.detail?.length ?? 0;
-  const matchedCount = pr.detail?.filter((d) => d.request?.reference).length ?? 0;
+  const checkNumber = getEraCheckNumber(pr) ?? '';
+  const counts = countEraClaims(claimResponses);
 
   return {
     id: pr.id ?? '',
-    eraId,
     checkNumber,
     payerName: payerOrg?.name ?? pr.paymentIssuer?.display ?? '',
+    billingProviderName: pr.requestor?.display ?? resolveEraPayee(claimResponses)?.name ?? '',
+    source: getEraSource(pr),
     paymentDate: pr.paymentDate ?? pr.created ?? '',
     paymentAmount: pr.paymentAmount?.value ?? 0,
-    status: pr.outcome ?? pr.status ?? '',
-    claimCount,
-    matchedCount,
-    unmatchedCount: claimCount - matchedCount,
+    claimCount: counts.total,
+    matchedCount: counts.matched,
+    unmatchedCount: counts.unmatched,
   };
 }

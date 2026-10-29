@@ -1,9 +1,9 @@
-import { OystehrSdkError } from '@oystehr/sdk/dist/cjs/errors';
+import type Oystehr from '@oystehr/sdk';
 import { DateTime } from 'luxon';
 import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FEATURE_FLAGS } from 'src/constants/feature-flags';
 import { useDeleteCommonLabOrderDialog } from 'src/features/common/useDeleteCommonLabOrderDialog';
-import { DEFAULT_IN_HOUSE_LABS_ITEMS_PER_PAGE, tryFormatDateToISO } from 'utils';
+import { DEFAULT_IN_HOUSE_LABS_ITEMS_PER_PAGE } from 'utils/lib/types/data/in-house/in-house.constants';
 import {
   DeleteInHouseLabOrderParameters,
   GetInHouseOrdersParameters,
@@ -11,8 +11,11 @@ import {
   InHouseOrderListPageItemDTO,
   InHouseOrdersSearchBy,
 } from 'utils/lib/types/data/in-house/in-house.types';
+import { tryFormatDateToISO } from 'utils/lib/utils/date';
 import { deleteInHouseLabOrder, getInHouseOrders } from '../../../../api/api';
 import { useApiClients } from '../../../../hooks/useAppClients';
+
+type OystehrSdkError = Oystehr.OystehrSdkError;
 
 interface UseInHouseLabOrdersResult {
   labOrders: InHouseOrderListPageItemDTO[];

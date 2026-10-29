@@ -1,17 +1,21 @@
 import { useMutation, UseMutationResult, useQuery, useQueryClient, UseQueryResult } from '@tanstack/react-query';
 import { Identifier, Medication } from 'fhir/r4b';
 import { useApiClients } from 'src/hooks/useAppClients';
+import { chooseJson } from 'utils/lib/helpers/oystehrApi';
+import {
+  INVENTORY_VACCINE_TYPE_CODE,
+  MEDICATION_IDENTIFIER_NAME_SYSTEM,
+} from 'utils/lib/types/api/medication-administration.constants';
 import {
   AdministerImmunizationOrderRequest,
   CancelImmunizationOrderRequest,
-  chooseJson,
+  CancelImmunizationOrderResponse,
   CreateUpdateImmunizationOrderRequest,
   CreateUpdateImmunizationOrderResponse,
   GetImmunizationOrdersRequest,
   GetImmunizationOrdersResponse,
-  INVENTORY_VACCINE_TYPE_CODE,
-  MEDICATION_IDENTIFIER_NAME_SYSTEM,
-} from 'utils';
+} from 'utils/lib/types/data/immunization/types';
+import { invalidateChartSections } from '../../shared/hooks/chartSectionCache';
 
 const GET_IMMUNIZATION_ORDERS_KEY = 'get-immunization-orders';
 const GET_VACCINES_KEY = 'get-vaccines';
@@ -91,7 +95,9 @@ export const useGetImmunizationOrders = (
   });
 };
 
-export const useCancelImmunizationOrder = (): UseMutationResult<void, Error, CancelImmunizationOrderRequest> => {
+export const useCancelImmunizationOrder = (
+  encounterId: string | undefined
+): UseMutationResult<CancelImmunizationOrderResponse, Error, CancelImmunizationOrderRequest> => {
   const { oystehrZambda } = useApiClients();
   const queryClient = useQueryClient();
   return useMutation({
@@ -101,13 +107,14 @@ export const useCancelImmunizationOrder = (): UseMutationResult<void, Error, Can
         ...input,
         id: 'cancel-immunization-order',
       });
-      return chooseJson(response);
+      return chooseJson<CancelImmunizationOrderResponse>(response);
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({
         queryKey: [GET_IMMUNIZATION_ORDERS_KEY],
         exact: false,
       });
+      await invalidateChartSections(queryClient, encounterId, ['assessment']);
     },
   });
 };
@@ -122,20 +129,23 @@ export const useGetVaccines = (): UseQueryResult<Vaccine[], Error> => {
         resourceType: 'Medication',
         params: [{ name: 'identifier', value: INVENTORY_VACCINE_TYPE_CODE }],
       });
-      return data.unbundle().flatMap((medication) => {
-        const identifier = medication.identifier?.find(
-          (identifier: Identifier) => identifier.system === MEDICATION_IDENTIFIER_NAME_SYSTEM
-        );
-        if (identifier?.value && medication.id) {
-          return [
-            {
-              id: medication.id,
-              name: identifier?.value,
-            },
-          ];
-        }
-        return [];
-      });
+      return data
+        .unbundle()
+        .flatMap((medication) => {
+          const identifier = medication.identifier?.find(
+            (identifier: Identifier) => identifier.system === MEDICATION_IDENTIFIER_NAME_SYSTEM
+          );
+          if (identifier?.value && medication.id) {
+            return [
+              {
+                id: medication.id,
+                name: identifier?.value,
+              },
+            ];
+          }
+          return [];
+        })
+        .sort((a, b) => a.name.localeCompare(b.name));
     },
     enabled: oystehr != null,
     retry: 2,

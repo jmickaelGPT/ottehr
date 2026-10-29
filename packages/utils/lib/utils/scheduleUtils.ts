@@ -15,21 +15,14 @@ import {
 import { DateTime } from 'luxon';
 import {
   BookableScheduleData,
-  codingContainedInList,
   DEFAULT_APPOINTMENT_LENGTH_MINUTES,
-  getFullName,
-  getPatchOperationForNewMetaTag,
-  isAnnotationFollowupEncounter,
-  isLocationVirtual,
   makeBookingOriginExtensionEntry,
   makeSlotAtLocationExtensionEntry,
   makeSlotBookedViaGroupExtensionEntry,
-  resolveServiceCategory,
   SCHEDULE_EXTENSION_URL,
   SCHEDULE_NUM_DAYS,
   ScheduleAndOwner,
   ScheduleStrategy,
-  scheduleStrategyForHealthcareService,
   SLOT_AT_LOCATION_EXTENSION_URL,
   SLOT_BOOKED_VIA_GROUP_EXTENSION_URL,
   SLOT_BOOKING_FLOW_ORIGIN_EXTENSION_URL,
@@ -39,21 +32,20 @@ import {
   SlotServiceCategory,
   TIMEZONE_EXTENSION_URL,
   WALKIN_APPOINTMENT_TYPE_CODE,
-} from '../fhir';
+} from '../fhir/constants';
 import { SERVICE_CATEGORY_SYSTEM } from '../fhir/constants';
-import { ServiceCategoryCode } from '../ottehr-config';
-import {
-  Closure,
-  ClosureType,
-  CreateSlotParams,
-  OVERRIDE_DATE_FORMAT,
-  ScheduleOwnerFhirResource,
-  ScheduleType,
-  ServiceMode,
-  Timezone,
-  TIMEZONES,
-  VisitType,
-} from '../types';
+import { isAnnotationFollowupEncounter } from '../fhir/encounter';
+import { codingContainedInList, scheduleStrategyForHealthcareService } from '../fhir/helpers';
+import { isLocationVirtual, locationSupportsServiceMode } from '../fhir/location';
+import { getFullName } from '../fhir/patient';
+import { getPatchOperationForNewMetaTag } from '../fhir/resourcePatch';
+import { resolveServiceCategory } from '../fhir/serviceCategoryResolution';
+import { ServiceCategoryCode } from '../ottehr-config/booking';
+import { CreateSlotParams } from '../types/api/prebook-create-appointment/prebook-create-appointment.types';
+import { ScheduleOwnerFhirResource } from '../types/api/schedules';
+import { Closure, ClosureType, OVERRIDE_DATE_FORMAT, ScheduleType, ServiceMode, Timezone } from '../types/common';
+import { TIMEZONES } from '../types/constants';
+import { VisitType } from '../types/data/telemed/appointments/create-appointment.types';
 import { getDateTimeFromDateAndTime } from './date';
 import { convertCapacityListToBucketedTimeSlots, createMinimumAndMaximumTime, distributeTimeSlots } from './dateUtils';
 
@@ -152,9 +144,27 @@ export interface ScheduleDTOOwner {
   slug: string;
   active: boolean;
   detailText?: string; // to take place of Location.address.line[0]
+  // NOTE: not the source of truth for displayed hours. Operating hours live in the
+  // Schedule extension (edited on the Schedule tab); every UI that shows "hours"
+  // reads that via getHoursOfOperationForToday. This mirrors Location.hoursOfOperation,
+  // which currently has no reader — do NOT add a Location.hoursOfOperation editor, as
+  // it would create a second, competing source of truth.
   hoursOfOperation?: Location['hoursOfOperation'];
   timezone: Timezone;
   isVirtual?: boolean;
+  /**
+   * Location owners only — whether the Location should surface in in-person
+   * contexts. Independent of `isVirtual`: a Location may be both. Defaults to
+   * `!isVirtual` for legacy Locations with no explicit in-person marker.
+   */
+  isInPerson?: boolean;
+  /**
+   * Location owners only — true when the Location was created through the EHR
+   * admin "Add location" UI (carries the manually-created marker extension).
+   * The admin is allowed to edit the slug of such Locations; terraform-managed
+   * Location slugs stay read-only.
+   */
+  isManuallyCreated?: boolean;
   /** PR owners only — IDs of HealthcareService resources this role offers. */
   healthcareServiceIds?: string[];
   /**
@@ -284,10 +294,6 @@ export function getWaitingMinutes(now: DateTime, encounters: Encounter[]): numbe
 export function getScheduleExtension(
   scheduleResource: Location | Practitioner | PractitionerRole | HealthcareService | Schedule
 ): ScheduleExtension | undefined {
-  console.log(
-    `extracting schedule and possible overrides from extension on ${scheduleResource.resourceType}`,
-    scheduleResource.id
-  );
   const scheduleExtension = scheduleResource?.extension?.find(function (extensionTemp) {
     return extensionTemp.url === SCHEDULE_EXTENSION_URL;
   })?.valueString;
@@ -307,7 +313,6 @@ export function getTimezone(
   const timezone = schedule.extension?.find((extensionTemp) => extensionTemp.url === TIMEZONE_EXTENSION_URL)
     ?.valueString;
   if (!timezone) {
-    console.error('Schedule does not have timezone; returning default', schedule.resourceType, schedule.id);
     return TIMEZONES[0];
   }
   return timezone;
@@ -2151,6 +2156,42 @@ export const checkSlotAvailable = async (input: CheckSlotAvailableInput, oystehr
   });
 };
 
+/**
+ * Whether a schedule owner can fulfill a booking in the given service mode —
+ * the predicate the get-schedule surfacing filter uses to prune member
+ * schedules a group offers in a mode their Location can't serve.
+ *
+ * - Location owner: checked directly via the location.ts capability seam.
+ * - PractitionerRole owner: kept if ANY paired Location can fulfill the mode
+ *   (the qualifying-Location gate downstream then admits only the mode-capable
+ *   Location(s), and create-appointment backstops the specific-Location case).
+ *   Paired Locations are supplied via `pairedLocationById` because the PR only
+ *   carries references; the caller resolves them once.
+ * - Practitioner / HealthcareService owner: no Location of its own → passes
+ *   through (rare in the current model; downstream narrowing handles it).
+ *
+ * Extracted from the handler so the mode-pruning decision is unit-testable
+ * without a live FHIR backend. All mode reasoning still funnels through the
+ * locationSupportsServiceMode seam.
+ */
+export const scheduleOwnerSupportsServiceMode = (
+  owner: ScheduleOwnerFhirResource,
+  mode: ServiceMode,
+  pairedLocationById: Map<string, Location>
+): boolean => {
+  if (owner.resourceType === 'Location') {
+    return locationSupportsServiceMode(owner as Location, mode);
+  }
+  if (owner.resourceType === 'PractitionerRole') {
+    return ((owner as PractitionerRole).location ?? []).some((ref) => {
+      const id = ref.reference?.split('/')[1];
+      const loc = id ? pairedLocationById.get(id) : undefined;
+      return !!loc && locationSupportsServiceMode(loc, mode);
+    });
+  }
+  return true;
+};
+
 export const getSlotServiceCategoryCodingFromScheduleOwner = (
   owner: ScheduleOwnerFhirResource,
   additionalServiceCategories: Coding[] = []
@@ -2176,9 +2217,15 @@ export const getSlotServiceCategoryCodingFromScheduleOwner = (
   return [SlotServiceCategory.inPersonServiceMode, ...additionalCategories];
 };
 
+/**
+ * A Location may support several service modes (e.g. both virtual and in-person). `preferredServiceMode` lets the
+ * caller pick the one that fits its context (e.g. walk-in → in-person); it applies only if the Location supports it.
+ * If the context can't determine the mode unambiguously, consider passing it explicitly in the booking URL.
+ */
 export const getServiceModeFromScheduleOwner = (
   owner: ScheduleOwnerFhirResource,
-  schedule?: Schedule
+  schedule?: Schedule,
+  preferredServiceMode?: ServiceMode
 ): ServiceMode | undefined => {
   // customization point - override this to return a specific service mode given a known schedule owner, or, optionally a schedule.
   // for use cases that offer virtual or in-person services but not both, the owner resource may be sufficient to determine the service mode.
@@ -2205,6 +2252,17 @@ export const getServiceModeFromScheduleOwner = (
     });
     if (isInPerson) {
       return ServiceMode['in-person'];
+    }
+  }
+
+  if (preferredServiceMode) {
+    const isOwnerLocation = owner.resourceType === 'Location';
+
+    const isPreferredModeSupportedByLocation =
+      isOwnerLocation && locationSupportsServiceMode(owner, preferredServiceMode);
+
+    if (isPreferredModeSupportedByLocation) {
+      return preferredServiceMode;
     }
   }
 
@@ -2405,6 +2463,87 @@ export const scheduleTypeFromFHIRType = (fhirType: FhirResource['resourceType'])
   return ScheduleType.group;
 };
 
+export interface BookingModeLink {
+  mode: ServiceMode;
+  /** Stable key for React lists / copy-button state, e.g. `prebook-virtual`. */
+  key: string;
+  /** Human label; disambiguated by mode only when both modes are offered. */
+  label: string;
+  /** Path + query relative to the intake app base URL. */
+  relativeUrl: string;
+}
+
+export const WALKIN_SERVICE_MODE_QUERY_PARAM = 'serviceMode';
+
+const getEnabledServiceModes = (params: { isVirtual?: boolean; isInPerson?: boolean }): ServiceMode[] => {
+  const modes: ServiceMode[] = [];
+  if (params.isInPerson) {
+    modes.push(ServiceMode['in-person']);
+  }
+  if (params.isVirtual) {
+    modes.push(ServiceMode.virtual);
+  }
+  if (modes.length === 0) {
+    modes.push(ServiceMode['in-person']);
+  }
+  return modes;
+};
+
+const getServiceModeLabel = (mode: ServiceMode): string => (mode === ServiceMode.virtual ? 'Virtual' : 'In person');
+
+/**
+ * Prebook booking links for a schedule owner — one per enabled service mode.
+ * A Location may be tagged both virtual and in-person (see isLocationVirtual /
+ * isLocationInPerson), so each enabled mode gets its own `/prebook/{mode}` link;
+ * the intake prebook route derives the mode from that path segment.
+ */
+export const buildPrebookModeLinks = (params: {
+  fhirType?: FhirResource['resourceType'];
+  slug?: string;
+  isVirtual?: boolean;
+  isInPerson?: boolean;
+}): BookingModeLink[] => {
+  const { fhirType, slug, isVirtual, isInPerson } = params;
+  if (!slug || !fhirType) {
+    return [];
+  }
+  const scheduleType = scheduleTypeFromFHIRType(fhirType);
+  const modes = getEnabledServiceModes({ isVirtual, isInPerson });
+  const disambiguate = modes.length > 1;
+  return modes.map((mode) => ({
+    mode,
+    key: `prebook-${mode}`,
+    label: disambiguate ? `Prebook (${getServiceModeLabel(mode)})` : 'Prebook',
+    relativeUrl: `/prebook/${mode}?bookingOn=${slug}&scheduleType=${scheduleType}`,
+  }));
+};
+
+/**
+ * Walk-in links for a schedule — one per enabled service mode, each pinning its mode via
+ * WALKIN_SERVICE_MODE_QUERY_PARAM so a dual-mode Location never hands out an ambiguous link.
+ */
+export const buildWalkinModeLinks = (params: {
+  scheduleId?: string;
+  isVirtual?: boolean;
+  isInPerson?: boolean;
+}): BookingModeLink[] => {
+  const { scheduleId, isVirtual, isInPerson } = params;
+
+  if (!scheduleId) {
+    return [];
+  }
+
+  const modes = getEnabledServiceModes({ isVirtual, isInPerson });
+  const disambiguate = modes.length > 1;
+
+  return modes.map((mode) => ({
+    mode,
+    key: `walkin-${scheduleId}-${mode}`,
+    label: disambiguate ? `Walk-in (${getServiceModeLabel(mode)})` : 'Walk-in',
+    relativeUrl: `/walkin/schedule/${scheduleId}?${WALKIN_SERVICE_MODE_QUERY_PARAM}=${mode}`,
+  }));
+};
+
 export const getAppointmentDurationFromSlot = (slot: Slot, unit: 'minutes' | 'hours' = 'minutes'): number => {
   const start = DateTime.fromISO(slot.start);
   const end = DateTime.fromISO(slot.end);
@@ -2506,6 +2645,16 @@ interface CreateSlotOptions {
 export const createSlotParamsFromSlotAndOptions = (slot: Slot, options: CreateSlotOptions): CreateSlotParams => {
   const { status, originalBookingUrl, postTelemedLabOnly, serviceModality } = options;
   const walkin = getSlotIsWalkin(slot);
+  // Pass through whatever serviceCategory the vended Slot was stamped with —
+  // get-schedule writes it when the booking URL is category-scoped, and
+  // leaves it absent otherwise. We do NOT default to any specific category
+  // here. The prior `?? 'urgent-care'` fallback silently stamped urgent-care
+  // on every default-flow booking (wrong for any non-urgent-care project,
+  // and now also incompatible with the PR-owned-schedule + BOOKING_CONFIG
+  // guard in create-slot). When undefined reaches create-slot, its own
+  // per-project default (single-category projects stamp their one category;
+  // otherwise just the service-mode coding) takes over.
+  const serviceCategoryCode = getServiceCategoryFromSlot(slot);
   return {
     scheduleId: slot.schedule.reference?.replace('Schedule/', '') ?? '',
     startISO: slot.start,
@@ -2515,7 +2664,7 @@ export const createSlotParamsFromSlotAndOptions = (slot: Slot, options: CreateSl
     walkin,
     originalBookingUrl,
     postTelemedLabOnly,
-    serviceCategoryCode: getServiceCategoryFromSlot(slot) ?? 'urgent-care',
+    ...(serviceCategoryCode && { serviceCategoryCode }),
     atLocationId: getSlotAtLocationId(slot),
     bookedViaGroupId: getSlotBookedViaGroupId(slot),
   };

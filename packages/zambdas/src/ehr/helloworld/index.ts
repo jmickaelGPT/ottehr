@@ -1,5 +1,6 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { wrapHandler, ZambdaInput } from '../../shared';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 const ZAMBDA_NAME = 'helloworld';

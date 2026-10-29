@@ -1,7 +1,7 @@
 import { useCallback } from 'react';
 import useEvolveUser from 'src/hooks/useEvolveUser';
-import { GetChartDataResponse, NoteDTO } from 'utils';
-import { useChartFields } from '../../../hooks/useChartFields';
+import { NoteDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
+import { useChartSection } from '../../../hooks/useChartSection';
 import { useOystehrAPIClient } from '../../../hooks/useOystehrAPIClient';
 import { UseSaveNote } from '../types';
 
@@ -9,10 +9,7 @@ export const useSaveNote: UseSaveNote = ({ encounterId, appointmentId, patientId
   const apiClient = useOystehrAPIClient();
   const user = useEvolveUser();
 
-  const { setQueryCache } = useChartFields({
-    appointmentId,
-    requestedFields: { [apiConfig.fieldName]: apiConfig.searchParams },
-  });
+  const { setSectionData } = useChartSection('notes', { appointmentId, params: { types: [apiConfig.type] } });
 
   const handleSave = useCallback(
     async (text: string): Promise<void> => {
@@ -29,27 +26,16 @@ export const useSaveNote: UseSaveNote = ({ encounterId, appointmentId, patientId
 
       const saveResult = await apiClient?.saveChartData?.({
         encounterId: encounterId,
-        [apiConfig.fieldName]: [newNote],
+        notes: [newNote],
       });
 
-      const savedData = saveResult?.chartData?.[apiConfig.fieldName];
+      const savedNotes = saveResult?.chartData?.notes;
 
-      if (savedData) {
-        setQueryCache((oldData: any) => {
-          if (oldData?.[apiConfig.fieldName]) {
-            return {
-              ...oldData,
-              [apiConfig.fieldName]: [
-                ...savedData,
-                ...oldData[apiConfig.fieldName],
-              ] as GetChartDataResponse[typeof apiConfig.fieldName],
-            };
-          }
-          return oldData;
-        }) as GetChartDataResponse | undefined;
+      if (savedNotes) {
+        setSectionData((previous) => ({ notes: [...savedNotes, ...previous.notes] }));
       }
     },
-    [user, apiConfig, patientId, encounterId, apiClient, setQueryCache]
+    [user, apiConfig, patientId, encounterId, apiClient, setSectionData]
   );
 
   return handleSave;

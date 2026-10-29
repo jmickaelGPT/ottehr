@@ -11,18 +11,15 @@ import {
 import { expectAssessmentPage } from 'tests/e2e/page/in-person/InPersonAssessmentPage';
 import { openInPersonProgressNotePage } from 'tests/e2e/page/in-person/InPersonProgressNotePage';
 import { InPersonHeader } from 'tests/e2e/page/InPersonHeader';
-import {
-  FinalResultPage,
-  InHouseLabsPage,
-  MockReflexTestConfig,
-  OrderInHouseLabPage,
-  PerformTestPage,
-  RadioSelectionResult,
-} from 'tests/e2e/page/lab';
 import { ExternalLabDetailPage } from 'tests/e2e/page/lab/external/ExternalLabDetailPage';
 import { ExternalLabsPage } from 'tests/e2e/page/lab/external/ExternalLabsPage';
 import { MOCK_LAB_RESULTS } from 'tests/e2e/page/lab/external/mock-data';
-import inHouseLabsMockData from 'tests/e2e/page/lab/in-house/mock-data.json' assert { type: 'json' };
+import { FinalResultPage } from 'tests/e2e/page/lab/in-house/FinalResultPage';
+import { InHouseLabsPage } from 'tests/e2e/page/lab/in-house/InHouseLabsPage';
+import { buildRunScopedInhouseLabData, MOCK_E2E_AD_TAG } from 'tests/e2e/page/lab/in-house/mock-data';
+import { OrderInHouseLabPage } from 'tests/e2e/page/lab/in-house/OrderInHouseLabPage';
+import { PerformTestPage } from 'tests/e2e/page/lab/in-house/PerformTestPage';
+import { MockReflexTestConfig, RadioSelectionResult } from 'tests/e2e/page/lab/in-house/types';
 import { LabelPrintingConfigAdminPage } from 'tests/e2e/page/LabelPrintingConfigAdminPage';
 import { expectNursingOrderCreatePage } from 'tests/e2e/page/NursingOrderCreatePage';
 import { expectNursingOrderDetailsPage } from 'tests/e2e/page/NursingOrderDetailsPage';
@@ -31,29 +28,39 @@ import { ProcedureRow } from 'tests/e2e/page/ProceduresPage';
 import { SideMenu } from 'tests/e2e/page/SideMenu';
 import { ENV_LOCATION_NAME } from 'tests/e2e-utils/resource/constants';
 import { ResourceHandler } from 'tests/e2e-utils/resource-handler';
+import { makeCptCodeDisplay, unbundleBatchPostOutput } from 'utils/lib/fhir/helpers';
 import {
   checkActivityDefinitionForReflexLogic,
   convertActivityDefinitionToDataEntryTestItem,
-  CPTCodeDTO,
-  DataEntryTestItem,
-  ExternalLabsStatus,
-  getTimezone,
-  LabPaymentMethod,
-  makeCptCodeDisplay,
-  REPEAT_TEST_CPT_CODE_MODIFIER,
   repeatTestErrorMessage,
-  unbundleBatchPostOutput,
-} from 'utils';
-import procedureBodySides from '../../../../../../config/oystehr/procedure-body-sides.json' assert { type: 'json' };
-import procedureBodySites from '../../../../../../config/oystehr/procedure-body-sites.json' assert { type: 'json' };
-import procedureComplications from '../../../../../../config/oystehr/procedure-complications.json' assert { type: 'json' };
-import procedureMedicationsUsed from '../../../../../../config/oystehr/procedure-medications-used.json' assert { type: 'json' };
-import procedurePatientResponses from '../../../../../../config/oystehr/procedure-patient-responses.json' assert { type: 'json' };
-import procedurePostInstructions from '../../../../../../config/oystehr/procedure-post-instructions.json' assert { type: 'json' };
-import procedureSupplies from '../../../../../../config/oystehr/procedure-supplies.json' assert { type: 'json' };
-import procedureTechniques from '../../../../../../config/oystehr/procedure-techniques.json' assert { type: 'json' };
-import procedureTimeSpent from '../../../../../../config/oystehr/procedure-time-spent.json' assert { type: 'json' };
-import procedureType from '../../../../../../config/oystehr/procedure-type.json' assert { type: 'json' };
+} from 'utils/lib/helpers/in-house-labs';
+import { detectProcedureFamily } from 'utils/lib/procedure-coding/evaluate';
+import { formatProcedureCptCode } from 'utils/lib/procedure-coding/format';
+import { CPTCodeDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
+import { REPEAT_TEST_CPT_CODE_MODIFIER } from 'utils/lib/types/data/in-house/in-house.constants';
+import { DataEntryTestItem } from 'utils/lib/types/data/in-house/in-house.types';
+import { ExternalLabsStatus, LabPaymentMethod } from 'utils/lib/types/data/labs/labs.types';
+import { getTimezone } from 'utils/lib/utils/scheduleUtils';
+import procedureBodySides from '../../../../../../config/oystehr/procedure-body-sides.json';
+import procedureBodySites from '../../../../../../config/oystehr/procedure-body-sites.json';
+import procedureComplications from '../../../../../../config/oystehr/procedure-complications.json';
+import procedureMedicationsUsed from '../../../../../../config/oystehr/procedure-medications-used.json';
+import procedurePatientResponses from '../../../../../../config/oystehr/procedure-patient-responses.json';
+import procedurePostInstructions from '../../../../../../config/oystehr/procedure-post-instructions.json';
+import procedureSupplies from '../../../../../../config/oystehr/procedure-supplies.json';
+import procedureTechniques from '../../../../../../config/oystehr/procedure-techniques.json';
+import procedureTimeSpent from '../../../../../../config/oystehr/procedure-time-spent.json';
+import procedureType from '../../../../../../config/oystehr/procedure-type.json';
+
+interface ProcedureTypeCodingEntry {
+  system: string;
+  code: string;
+  display: string;
+  extension?: Array<{
+    url: string;
+    valueCodeableConcept: { coding: Array<{ system: string; code: string; display: string }> };
+  }>;
+}
 interface ProcedureInfo {
   consentChecked: boolean;
   procedureType: string;
@@ -76,44 +83,55 @@ interface ProcedureInfo {
 }
 const PROCEDURE_TYPE_CODINGS = Object.entries(procedureType.fhirResources).find(([key]) =>
   key.startsWith('value-set-procedure-type')
-)?.[1].resource.expansion.contains;
+)?.[1].resource.expansion.contains as ProcedureTypeCodingEntry[] | undefined;
 const PROCEDURE_MEDICATIONS_USED_CODINGS =
   procedureMedicationsUsed.fhirResources['value-set-procedure-medications-used'].resource.expansion.contains;
-const PROCEDURE_BODY_SITES_CODINGS =
-  procedureBodySites.fhirResources['value-set-procedure-body-sites'].resource.expansion.contains;
+
+const PROCEDURE_BODY_SITES_CODINGS = Object.entries(procedureBodySites.fhirResources).find(([key]) =>
+  key.startsWith('value-set-procedure-body-sites')
+)![1].resource.expansion.contains;
+
 const PROCEDURE_BODY_SIDES_CODINGS =
   procedureBodySides.fhirResources['value-set-procedure-body-sides'].resource.expansion.contains;
-const PROCEDURE_TECHNIQUES_CODINGS =
-  procedureTechniques.fhirResources['value-set-procedure-techniques'].resource.expansion.contains;
-const PROCEDURE_SUPPLIES_CODINGS =
-  procedureSupplies.fhirResources['value-set-procedure-supplies'].resource.expansion.contains;
+
+const PROCEDURE_TECHNIQUES_CODINGS = Object.entries(procedureTechniques.fhirResources).find(([key]) =>
+  key.startsWith('value-set-procedure-techniques')
+)![1].resource.expansion.contains;
+
+const PROCEDURE_SUPPLIES_CODINGS = Object.entries(procedureSupplies.fhirResources).find(([key]) =>
+  key.startsWith('value-set-procedure-supplies')
+)![1].resource.expansion.contains;
+
 const PROCEDURE_COMPLICATIONS_CODINGS =
   procedureComplications.fhirResources['value-set-procedure-complications'].resource.expansion.contains;
+
 const PROCEDURE_PATIENT_RESPONSES_CODINGS =
   procedurePatientResponses.fhirResources['value-set-procedure-patient-responses'].resource.expansion.contains;
+
 const PROCEDURE_POST_INSTRUCTIONS_CODINGS =
   procedurePostInstructions.fhirResources['value-set-procedure-post-instructions'].resource.expansion.contains;
+
 const PROCEDURE_TIME_SPENT_CODINGS =
   procedureTimeSpent.fhirResources['value-set-procedure-time-spent'].resource.expansion.contains;
 
-const CONFIG_PROCEDURES = PROCEDURE_TYPE_CODINGS!.map((procedure) => {
-  const dropDownChoice = procedure.display;
-  const codeableConcept = procedure.extension?.[0].valueCodeableConcept.coding[0];
-  if (!codeableConcept) {
-    return {
-      dropDownChoice,
-    };
-  }
-  return {
-    dropDownChoice,
-    display: codeableConcept.code + ' ' + codeableConcept.display,
-  };
-});
+// Catalog entries no longer supply default CPTs; these scenarios add their codes through search.
+//
+// These scenarios fill every field of the generic procedure form, Site/location and Side of body
+// included. A procedure type whose coding family asks for the site inside its own questions hides
+// those two dropdowns, and a type with no coding family at all reaches out to AI for suggestions —
+// so pick types that keep the generic form and stay on the local rules engine. Picked from the
+// catalog rather than hard-coded, so the spec follows the configuration as the covered set grows.
+const CONFIG_PROCEDURES = PROCEDURE_TYPE_CODINGS!
+  .map((procedure) => ({
+    dropDownChoice: procedure.display,
+    codingFamily: detectProcedureFamily({ procedureType: procedure.display }),
+  }))
+  .filter(({ codingFamily }) => codingFamily && !codingFamily.capturesSite && !codingFamily.capturesSide);
 
 const PROCEDURE_A: ProcedureInfo = {
   consentChecked: true,
   procedureType: CONFIG_PROCEDURES[0].dropDownChoice,
-  cptInfo: [{ procedureTypeCptCode: CONFIG_PROCEDURES[0].display, cptCode: '73000', cptName: 'X-ray of collar bone' }],
+  cptInfo: [{ cptCode: '73000', cptName: 'X-ray of collar bone' }],
   diagnosisCode: 'D51.0',
   diagnosisName: 'Vitamin B12 deficiency anemia due to intrinsic factor deficiency',
   performedBy: 'Healthcare staff',
@@ -136,7 +154,6 @@ const PROCEDURE_B: ProcedureInfo = {
   procedureType: CONFIG_PROCEDURES[1].dropDownChoice,
   cptInfo: [
     {
-      procedureTypeCptCode: CONFIG_PROCEDURES[1].display,
       cptCode: '11900',
       cptName: 'Injection into skin growth, 1-7 growths',
     },
@@ -262,11 +279,65 @@ test.describe('In-house labs page', async () => {
   let mockLabSetListId: string = 'unknown';
   let reflexTest: MockReflexTestConfig;
 
+  async function cleanupLeftoverInHouseLabsMocks(): Promise<void> {
+    try {
+      const oystehr = await resourceHandler.apiClient;
+
+      // Only sweep resources older than an hour so we never delete the in-use mocks of a concurrent
+      // run (or a Playwright retry) that shares this Oystehr backend: every run's mocks carry the
+      // same stable MOCK_E2E_AD_TAG. Mirrors packages/utils/lib/utils/e2eCleanup.ts.
+      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+      const leftOverActivityDefinitions = (
+        await oystehr.fhir.search<ActivityDefinition>({
+          resourceType: 'ActivityDefinition',
+          params: [
+            { name: '_tag', value: `${MOCK_E2E_AD_TAG.system}|${MOCK_E2E_AD_TAG.code}` },
+            { name: '_lastUpdated', value: `lt${oneHourAgo}` },
+          ],
+        })
+      ).unbundle();
+
+      const leftOverLists = (
+        await oystehr.fhir.search<List>({
+          resourceType: 'List',
+          params: [
+            { name: '_tag', value: `${MOCK_E2E_AD_TAG.system}|${MOCK_E2E_AD_TAG.code}` },
+            { name: '_lastUpdated', value: `lt${oneHourAgo}` },
+          ],
+        })
+      ).unbundle();
+
+      const leftoverRefs = [...leftOverActivityDefinitions, ...leftOverLists]
+        .filter((resource): resource is (ActivityDefinition | List) & { id: string } => !!resource.id)
+        .map((resource) => `${resource.resourceType}/${resource.id}`);
+
+      if (leftoverRefs.length) {
+        console.warn(
+          `Found ${
+            leftoverRefs.length
+          } leftover in-house labs mock resource(s) (>1h old) from a prior run; deleting: ${leftoverRefs.join(', ')}`
+        );
+        await oystehr.fhir.batch({
+          requests: leftoverRefs.map((ref) => ({ method: 'DELETE', url: ref })),
+        });
+      }
+    } catch (error) {
+      console.warn('Failed to self-heal leftover in-house labs mock resources (best-effort):', error);
+    }
+  }
+
   test.beforeAll('Handling ActivityDefinition and List resources for in-house labs tests', async () => {
+    await cleanupLeftoverInHouseLabsMocks();
+
+    // Run-scoped copy: every mock AD canonical URL is suffixed with a per-run token so concurrent
+    // runs sharing an Oystehr backend never share or duplicate canonical url|version identifiers.
+    const mockData = buildRunScopedInhouseLabData();
+
     const adRequests: BatchInputPostRequest<ActivityDefinition>[] = [];
 
     // standard + repeatable tests
-    inHouseLabsMockData.activityDefinitions.forEach((ad) => {
+    mockData.activityDefinitions.forEach((ad) => {
       const fhirActivityDefinition = ad as ActivityDefinition;
       const testItem = convertActivityDefinitionToDataEntryTestItem(fhirActivityDefinition);
 
@@ -297,7 +368,7 @@ test.describe('In-house labs page', async () => {
     });
 
     // reflex test
-    const { parentTest, childTest } = inHouseLabsMockData.reflexTest;
+    const { parentTest, childTest } = mockData.reflexTest;
 
     const parentTestItem = convertActivityDefinitionToDataEntryTestItem(
       parentTest.activityDefinition as ActivityDefinition
@@ -335,7 +406,7 @@ test.describe('In-house labs page', async () => {
     });
 
     // lab set
-    const listRequests = inHouseLabsMockData.lists.map((list) => {
+    const listRequests = mockData.lists.map((list) => {
       return {
         method: 'POST' as const,
         url: 'List',
@@ -356,13 +427,19 @@ test.describe('In-house labs page', async () => {
 
   test.afterAll('Deleting all ActivityDefinition and List resources used in in-house lab tests', async () => {
     if (mockResourceIds.length) {
-      const oystehr = await resourceHandler.apiClient;
-      await oystehr.fhir.batch({
-        requests: mockResourceIds.map((ref) => ({
-          method: 'DELETE' as const,
-          url: ref,
-        })),
-      });
+      try {
+        const oystehr = await resourceHandler.apiClient;
+        await oystehr.fhir.batch({
+          requests: mockResourceIds.map((ref) => ({
+            method: 'DELETE' as const,
+            url: ref,
+          })),
+        });
+      } catch (error) {
+        // Best-effort cleanup; a failure here shouldn't fail the suite. Any leftovers are
+        // picked up by cleanupLeftoverInHouseLabsMocks() on the next run.
+        console.warn('Failed to clean up in-house labs mock resources (best-effort):', error);
+      }
     }
   });
 
@@ -1037,7 +1114,7 @@ async function verifyProcedureInfo(
   await documentProcedurePage.verifyConsentForProcedureChecked(procedureInfo.consentChecked);
   await documentProcedurePage.verifyProcedureType(procedureInfo.procedureType);
   for (const cpt of procedureInfo.cptInfo) {
-    await documentProcedurePage.verifyCptCode(cpt.cptCode + ' ' + cpt.cptName);
+    await documentProcedurePage.verifyCptCode(formatProcedureCptCode({ code: cpt.cptCode, display: cpt.cptName }));
   }
   await documentProcedurePage.verifyDiagnosis(procedureInfo.diagnosisName + ' ' + procedureInfo.diagnosisCode);
   await documentProcedurePage.verifyPerformedBy(procedureInfo.performedBy);
@@ -1057,12 +1134,15 @@ async function verifyProcedureInfo(
 
 async function verifyProcedureRow(procedureInfo: ProcedureInfo, procedureRow: ProcedureRow): Promise<void> {
   for (const cpt of procedureInfo.cptInfo) {
-    await procedureRow.verifyProcedureCptCode(cpt.cptCode + '-' + cpt.cptName);
+    await procedureRow.verifyProcedureCptCode(formatProcedureCptCode({ code: cpt.cptCode, display: cpt.cptName }));
   }
   await procedureRow.verifyProcedureType(procedureInfo.procedureType);
   await procedureRow.verifyProcedureDiagnosis(procedureInfo.diagnosisCode + '-' + procedureInfo.diagnosisName);
   await procedureRow.verifyProcedureDocumentedBy(procedureInfo.documentedBy);
 }
+
+// Spelled out here rather than taken from the app's formatter, so a wrong label fails the test.
+const PROGRESS_NOTE_PERFORMER: Record<string, string> = { Both: 'Provider and healthcare staff' };
 
 function progressNoteProcedureDetails(procedureInfo: ProcedureInfo): string[] {
   const cptInfo: string[] = [];
@@ -1070,12 +1150,12 @@ function progressNoteProcedureDetails(procedureInfo: ProcedureInfo): string[] {
     if (cpt.procedureTypeCptCode) {
       cptInfo.push(cpt.procedureTypeCptCode);
     }
-    cptInfo.push(cpt.cptCode + ' ' + cpt.cptName);
+    cptInfo.push(formatProcedureCptCode({ code: cpt.cptCode, display: cpt.cptName }));
   }
   return [
     'CPT:' + cptInfo.join('; '),
     'Dx: ' + procedureInfo.diagnosisCode + ' ' + procedureInfo.diagnosisName,
-    'Performed by: ' + procedureInfo.performedBy,
+    'Performed by: ' + (PROGRESS_NOTE_PERFORMER[procedureInfo.performedBy] ?? procedureInfo.performedBy),
     'Anaesthesia / medication used: ' + procedureInfo.anaesthesia,
     'Site/location: ' + procedureInfo.bodySite,
     'Side of body: ' + procedureInfo.bodySide,

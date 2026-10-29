@@ -1,4 +1,16 @@
-import { ASQObservationDTO, ObservationBooleanFieldDTO, SaveableDTO, VitalsObservationDTO } from '../../api';
+// Backwards compatibility aliases for existing code
+import type {
+  ScreeningField,
+  ScreeningFieldOption,
+  ScreeningFieldType,
+  ScreeningNoteField,
+} from 'config-types/config/screening-questions';
+import {
+  ASQObservationDTO,
+  ObservationBooleanFieldDTO,
+  SaveableDTO,
+  VitalsObservationDTO,
+} from '../../api/chart-data/chart-data.types';
 import {
   HISTORY_OBTAINED_FROM_FIELD,
   HistorySourceKeys,
@@ -7,19 +19,6 @@ import {
   RecentVisitKeys,
   SEEN_IN_LAST_THREE_YEARS_FIELD,
 } from './constants';
-
-// Re-export config contract types from config-types
-export type {
-  ScreeningConditionalSave,
-  ScreeningField,
-  ScreeningFieldOption,
-  ScreeningFieldType,
-  ScreeningNoteField,
-  ScreeningQuestionsConfig,
-} from 'config-types';
-
-// Backwards compatibility aliases for existing code
-import type { ScreeningField, ScreeningFieldOption, ScreeningFieldType, ScreeningNoteField } from 'config-types';
 
 export type Field = ScreeningField;
 export type FieldType = ScreeningFieldType;

@@ -1,6 +1,8 @@
-import { ChargeMasterDesignation, MISSING_REQUEST_BODY } from 'utils';
+import { ChargeMasterDesignation } from 'utils/lib/fhir/constants';
+import { MISSING_REQUEST_BODY } from 'utils/lib/types/errors';
 import { z } from 'zod';
-import { safeValidate, ZambdaInput } from '../../../shared';
+import { ZambdaInput } from '../../../shared/types/common';
+import { safeJsonParse, safeValidate } from '../../../shared/validation';
 
 export interface GetChargeMasterEntryParams {
   designation: ChargeMasterDesignation;
@@ -30,7 +32,7 @@ export function validateRequestParameters(input: ZambdaInput): GetChargeMasterEn
     throw MISSING_REQUEST_BODY;
   }
 
-  const parsed = JSON.parse(input.body);
+  const parsed = safeJsonParse(input.body);
   const { designation, payerOrganizationId, dateOfService, locationId, employerOrganizationId } = safeValidate(
     bodySchema,
     parsed

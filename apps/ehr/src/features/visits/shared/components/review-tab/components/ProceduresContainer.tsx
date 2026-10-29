@@ -2,19 +2,30 @@ import { Box, Stack, Typography, useTheme } from '@mui/material';
 import { DateTime } from 'luxon';
 import { FC, ReactElement } from 'react';
 import { dataTestIds } from 'src/constants/data-test-ids';
-import { useChartData } from '../../../stores/appointment/appointment.store';
+import {
+  SectionHeading,
+  useNoteSectionTitleInCardHeader,
+} from 'src/features/visits/shared/components/NoteSectionHeading';
+import {
+  formatInfusionTimeRange,
+  performerTypeDisplayLabel,
+  repairDepthDisplayLabel,
+} from 'utils/lib/procedure-coding/format';
+import { formatProcedureCptCode, formatStructuredFacts } from 'utils/lib/procedure-coding/format';
+import { useVisitNote } from '../../../hooks/useVisitNote';
 
 export const ProceduresContainer: FC = () => {
-  const { chartData } = useChartData();
+  const titleInCardHeader = useNoteSectionTitleInCardHeader();
+  const { data: note } = useVisitNote();
   const theme = useTheme();
-  const procedures = chartData?.procedures;
+  const procedures = note?.assessment.procedures;
 
   const renderProperty = (label: string, value: string | undefined): ReactElement | undefined => {
-    if (value == null) {
+    if (value == null || value === '') {
       return undefined;
     }
     return (
-      <Box>
+      <Box sx={{ whiteSpace: 'pre-wrap' }}>
         <Typography display="inline" sx={{ fontWeight: '500' }}>
           {label}:
         </Typography>{' '}
@@ -25,9 +36,7 @@ export const ProceduresContainer: FC = () => {
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, width: '100%' }}>
-      <Typography variant="h5" color="primary.dark">
-        Procedures
-      </Typography>
+      {!titleInCardHeader && <SectionHeading>Procedures</SectionHeading>}
       {procedures?.length ? (
         procedures.map((procedure) => (
           <Stack key={procedure.resourceId} data-testid={dataTestIds.progressNotePage.procedureItem}>
@@ -35,7 +44,7 @@ export const ProceduresContainer: FC = () => {
             {renderProperty(
               'CPT',
               procedure.cptCodes != null && procedure.cptCodes.length > 0
-                ? procedure.cptCodes.map((cptCode) => cptCode.code + ' ' + cptCode.display).join('; ')
+                ? procedure.cptCodes.map(formatProcedureCptCode).join('; ')
                 : undefined
             )}
             {renderProperty(
@@ -47,13 +56,29 @@ export const ProceduresContainer: FC = () => {
             {renderProperty(
               'Date and time of the procedure',
               procedure.procedureDateTime != null
-                ? DateTime.fromISO(procedure.procedureDateTime).toFormat('MM/dd/yyyy, HH:mm a')
+                ? DateTime.fromISO(procedure.procedureDateTime).toFormat('MM/dd/yyyy, hh:mm a')
                 : undefined
             )}
-            {renderProperty('Performed by', procedure.performerType)}
+            {renderProperty(
+              'Performed by',
+              procedure.performerType != null ? performerTypeDisplayLabel(procedure.performerType) : undefined
+            )}
             {renderProperty('Anaesthesia / medication used', procedure.medicationUsed)}
             {renderProperty('Site/location', procedure.bodySite)}
             {renderProperty('Side of body', procedure.bodySide)}
+            {renderProperty(
+              'Procedure findings',
+              formatStructuredFacts(procedure.structuredFacts, procedure.procedureType)
+            )}
+            {renderProperty('Wound/lesion size', procedure.lengthCm != null ? `${procedure.lengthCm} cm` : undefined)}
+            {renderProperty(
+              'Repair depth',
+              procedure.repairDepth != null ? repairDepthDisplayLabel(procedure.repairDepth) : undefined
+            )}
+            {renderProperty(
+              'Infusion time',
+              formatInfusionTimeRange(procedure.infusionStartTime, procedure.infusionStopTime)
+            )}
             {renderProperty('Technique', procedure.technique ? procedure.technique.join(', ') : undefined)}
             {renderProperty('Instruments / supplies used', procedure.suppliesUsed)}
             {renderProperty('Procedure details', procedure.procedureDetails)}

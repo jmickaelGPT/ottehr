@@ -1,26 +1,22 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { ActivityDefinition, Encounter, List, Practitioner } from 'fhir/r4b';
+import { getFullestAvailableName } from 'utils/lib/fhir/patient';
+import { getAttendingPractitionerId } from 'utils/lib/fhir/practitioners';
+import { convertActivityDefinitionToDataEntryTestItem } from 'utils/lib/helpers/in-house-labs';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { IN_HOUSE_LAB_LATEST_TAG_DEFINITION } from 'utils/lib/types/data/in-house/in-house.constants';
 import {
-  convertActivityDefinitionToDataEntryTestItem,
   DataEntryTestItem,
-  getAttendingPractitionerId,
   GetCreateInHouseLabOrderResourcesInput,
   GetCreateInHouseLabOrderResourcesOutput,
-  getFullestAvailableName,
-  getSecret,
-  IN_HOUSE_LAB_LATEST_TAG_DEFINITION,
-  LAB_LIST_CODE_CODING,
-  LabSetDTO,
-  Secrets,
-  SecretsKeys,
-} from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  sendErrors,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../../shared';
+} from 'utils/lib/types/data/in-house/in-house.types';
+import { LabSetDTO } from 'utils/lib/types/data/labs/lab-set.schema';
+import { LAB_LIST_CODE_CODING } from 'utils/lib/types/data/labs/labs.constants';
+import { checkOrCreateM2MClientToken } from '../../../../shared/auth';
+import { sendErrors } from '../../../../shared/errors';
+import { createClinicalOystehrClient } from '../../../../shared/helpers';
+import { wrapHandler } from '../../../../shared/sentry';
+import { ZambdaInput } from '../../../../shared/types/common';
 import { formatLabListDTOs } from '../../shared/helpers';
 import { fetchActiveInHouseLabActivityDefinitions } from '../../shared/in-house-labs';
 import { validateRequestParameters } from './validateRequestParameters';
@@ -48,7 +44,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   console.log('validateRequestParameters success');
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   const testItems: DataEntryTestItem[] = [];
   let providerName: string | undefined;

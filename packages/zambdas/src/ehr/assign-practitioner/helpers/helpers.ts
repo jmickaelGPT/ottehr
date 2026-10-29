@@ -1,13 +1,11 @@
 import Oystehr from '@oystehr/sdk';
 import { Operation } from 'fast-json-patch';
 import { Appointment, Coding, Encounter } from 'fhir/r4b';
-import {
-  getAppointmentMetaTagOpForStatusUpdate,
-  getInPersonVisitStatus,
-  getPatchBinary,
-  PRACTITIONER_CODINGS,
-  User,
-} from 'utils';
+import { getAppointmentMetaTagOpForStatusUpdate } from 'utils/lib/fhir/helpers';
+import { getPatchBinary } from 'utils/lib/fhir/resourcePatch';
+import { User } from 'utils/lib/types/api/user.types';
+import { PRACTITIONER_CODINGS } from 'utils/lib/types/data/appointments/appointments.types';
+import { getInPersonVisitStatus } from 'utils/lib/utils/visitUtils';
 
 export const assignPractitionerIfPossible = async (
   oystehr: Oystehr,
@@ -56,7 +54,7 @@ export const assignPractitionerIfPossible = async (
   });
 };
 
-const getAssignPractitionerToEncounterOperation = async (
+export const getAssignPractitionerToEncounterOperation = async (
   encounter: Encounter,
   practitionerId: string,
   userRole: Coding[]
@@ -85,10 +83,11 @@ const getAssignPractitionerToEncounterOperation = async (
   }
 
   // If participants exist, we need to check if someone already has this same role and remove them and add the new person.
-  const participantsExcludingThoseWithRoleWeAreTaking = participants?.filter((participant) => {
-    return participant.type?.some((type) => {
-      return type.coding?.some((coding) => coding.code !== userRole[0].code);
-    });
+  const participantsExcludingThoseWithRoleWeAreTaking = participants.filter((participant) => {
+    const holdsRoleWeAreTaking = participant.type?.some(
+      (type) => type.coding?.some((coding) => coding.code === userRole[0].code)
+    );
+    return !holdsRoleWeAreTaking;
   });
 
   return [

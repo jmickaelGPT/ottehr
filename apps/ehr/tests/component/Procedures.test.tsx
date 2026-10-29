@@ -3,7 +3,8 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ReactNode } from 'react';
 import { BrowserRouter } from 'react-router-dom';
-import { GetChartDataResponse, ProcedureDTO } from 'utils';
+import { ProcedureDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
+import { GetChartDataResponse } from 'utils/lib/types/api/chart-data/get-chart-data.types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { dataTestIds } from '../../src/constants/data-test-ids';
 import Procedures from '../../src/features/visits/in-person/pages/Procedures';
@@ -15,8 +16,11 @@ vi.mock('../../src/features/visits/shared/components/PageTitle', () => ({
 
 // Mock the hooks and stores
 vi.mock('../../src/features/visits/shared/stores/appointment/appointment.store', () => ({
-  useChartData: vi.fn(),
   useDeleteChartData: vi.fn(),
+}));
+
+vi.mock('../../src/features/visits/shared/hooks/useChartData', () => ({
+  useChartData: vi.fn(),
 }));
 
 vi.mock('../../src/features/visits/shared/hooks/useGetAppointmentAccessibility', () => ({
@@ -39,11 +43,9 @@ vi.mock('notistack', () => ({
 
 import { enqueueSnackbar } from 'notistack';
 import { useNavigate, useParams } from 'react-router-dom';
+import { useChartData } from '../../src/features/visits/shared/hooks/useChartData';
 import { useGetAppointmentAccessibility } from '../../src/features/visits/shared/hooks/useGetAppointmentAccessibility';
-import {
-  useChartData,
-  useDeleteChartData,
-} from '../../src/features/visits/shared/stores/appointment/appointment.store';
+import { useDeleteChartData } from '../../src/features/visits/shared/stores/appointment/appointment.store';
 
 const mockUseChartData = vi.mocked(useChartData);
 const mockUseDeleteChartData = vi.mocked(useDeleteChartData);
@@ -122,7 +124,6 @@ describe('Procedures - Delete Procedure Tests', () => {
       isAppointmentReadOnly: false,
       isPractitionerLicensedInState: true,
       isEncounterAssignedToCurrentPractitioner: true,
-      isAppointmentLocked: false,
       visitType: 'main',
     });
 
@@ -172,7 +173,6 @@ describe('Procedures - Delete Procedure Tests', () => {
       isAppointmentReadOnly: true,
       isPractitionerLicensedInState: true,
       isEncounterAssignedToCurrentPractitioner: true,
-      isAppointmentLocked: false,
       visitType: 'main',
     });
 
@@ -228,7 +228,7 @@ describe('Procedures - Delete Procedure Tests', () => {
 
     // Extract and call the onSuccess callback
     const call = mockMutateAsync.mock.calls[0];
-    expect(call[0]).toEqual({ procedures: [mockProcedures[0]] });
+    expect(call[0]).toEqual({ procedures: [mockProcedures[0]], cleanupProcedureDiagnoses: true });
     expect(call[1]).toMatchObject({
       onSuccess: expect.any(Function),
       onError: expect.any(Function),
@@ -386,7 +386,6 @@ describe('Procedures - Delete Procedure Tests', () => {
       isAppointmentReadOnly: true,
       isPractitionerLicensedInState: true,
       isEncounterAssignedToCurrentPractitioner: true,
-      isAppointmentLocked: false,
       visitType: 'main',
     });
 

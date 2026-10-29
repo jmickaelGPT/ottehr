@@ -6,7 +6,11 @@ import { useNavigate } from 'react-router-dom';
 import { dataTestIds } from 'src/constants/data-test-ids';
 import { useGetAppointmentAccessibility } from 'src/features/visits/shared/hooks/useGetAppointmentAccessibility';
 import { useAppointmentData } from 'src/features/visits/shared/stores/appointment/appointment.store';
-import { DiagnosisDTO, EntryMode, getFormattedDiagnoses, InHouseOrderDetailPageItemDTO, LoadingState } from 'utils';
+import { getFormattedDiagnoses } from 'utils/lib/helpers/in-house-labs';
+import { DiagnosisDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
+import { LoadingState } from 'utils/lib/types/data/in-house/in-house.constants';
+import { EntryMode, InHouseOrderDetailPageItemDTO } from 'utils/lib/types/data/in-house/in-house.types';
+import { InHouseLabOrderPrefill } from '../../pages/InHouseLabOrderCreatePage';
 import { configResultPageContainerTestId } from '../../utils/test-ids';
 import { InHouseLabResultCard } from './InHouseLabResultCard';
 
@@ -15,6 +19,7 @@ interface InHouseLabResultsProps {
   setLoadingState: (loadingState: LoadingState) => void;
   onBack: () => void;
   entryMode: EntryMode;
+  onOrderTest?: (prefill: InHouseLabOrderPrefill) => void;
 }
 
 export const InHouseLabResults: React.FC<InHouseLabResultsProps> = ({
@@ -22,6 +27,7 @@ export const InHouseLabResults: React.FC<InHouseLabResultsProps> = ({
   setLoadingState,
   onBack,
   entryMode,
+  onOrderTest,
 }) => {
   const navigate = useNavigate();
   const { isAppointmentReadOnly: isReadOnly } = useGetAppointmentAccessibility();
@@ -78,22 +84,36 @@ export const InHouseLabResults: React.FC<InHouseLabResultsProps> = ({
       });
     }
 
+    const prefill: InHouseLabOrderPrefill = {
+      testItemName: testDetails?.[0]?.testItemName,
+      diagnoses: diagnoses,
+      type: 'repeat',
+    };
+
+    if (onOrderTest) {
+      onOrderTest(prefill);
+      return;
+    }
+
     navigate(`/in-person/${testDetails?.[0].appointmentId}/in-house-lab-orders/create`, {
-      state: {
-        testItemName: testDetails?.[0]?.testItemName,
-        diagnoses: diagnoses,
-        type: 'repeat',
-      },
+      state: prefill,
     });
   };
 
   const handleReflexTestOrderClick = (testName: string): void => {
+    const prefill: InHouseLabOrderPrefill = {
+      testItemName: testName,
+      diagnoses: diagnoses,
+      type: 'reflex',
+    };
+
+    if (onOrderTest) {
+      onOrderTest(prefill);
+      return;
+    }
+
     navigate(`/in-person/${testDetails?.[0].appointmentId}/in-house-lab-orders/create`, {
-      state: {
-        testItemName: testName,
-        diagnoses: diagnoses,
-        type: 'reflex',
-      },
+      state: prefill,
     });
   };
 

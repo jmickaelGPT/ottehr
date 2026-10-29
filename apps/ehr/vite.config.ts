@@ -6,6 +6,7 @@ import * as path from 'path';
 import { defineConfig, loadEnv, UserConfig } from 'vite';
 import svgr from 'vite-plugin-svgr';
 import viteTsconfigPaths from 'vite-tsconfig-paths';
+import { adHocReportRuntime } from './adhoc-report-runtime-plugin';
 
 export default ({ mode }: { mode: string }): UserConfig => {
   console.log(`Mode is: ${mode}`);
@@ -21,7 +22,7 @@ export default ({ mode }: { mode: string }): UserConfig => {
     process.env.VITE_APP_NAME = env.VITE_APP_NAME;
   }
 
-  const plugins = [react(), viteTsconfigPaths(), svgr()];
+  const plugins = [react(), viteTsconfigPaths(), svgr(), adHocReportRuntime()];
 
   const shouldUploadSentrySourceMaps =
     Boolean(env.SENTRY_AUTH_TOKEN) && Boolean(env.SENTRY_ORG) && Boolean(env.SENTRY_PROJECT);
@@ -51,6 +52,9 @@ export default ({ mode }: { mode: string }): UserConfig => {
   return defineConfig({
     envDir: envDir,
     publicDir: 'public',
+    legacy: {
+      inconsistentCjsInterop: true,
+    },
     plugins: plugins,
     server: {
       open: !process.env.VITE_NO_OPEN,

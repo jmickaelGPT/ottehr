@@ -1,5 +1,7 @@
-import { HandleInHouseLabResultsParameters, Secrets } from 'utils';
-import { ZambdaInput } from '../../../../shared';
+import { Secrets } from 'utils/lib/secrets';
+import { HandleInHouseLabResultsParameters } from 'utils/lib/types/data/in-house/in-house.types';
+import { ZambdaInput } from '../../../../shared/types/common';
+import { safeJsonParse } from '../../../../shared/validation';
 
 export function validateRequestParameters(
   input: ZambdaInput
@@ -12,7 +14,7 @@ export function validateRequestParameters(
 
   const userToken = input.headers.Authorization.replace('Bearer ', '');
   const secrets = input.secrets;
-  const { serviceRequestId, data } = JSON.parse(input.body);
+  const { serviceRequestId, data } = safeJsonParse(input.body);
 
   const missingResources = [];
   if (!serviceRequestId) missingResources.push('serviceRequestID');

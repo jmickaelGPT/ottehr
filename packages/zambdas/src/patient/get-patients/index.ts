@@ -1,7 +1,13 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { FHIR_EXTENSION, getPatientsForUser, PatientInfo, Secrets } from 'utils';
-import { createOystehrClient, getAuth0Token, wrapHandler, ZambdaInput } from '../../shared';
+import { getPatientsForUser } from 'utils/lib/auth/user-auth.helper';
+import { FHIR_EXTENSION } from 'utils/lib/fhir/constants';
+import { Secrets } from 'utils/lib/secrets';
+import { PatientInfo } from 'utils/lib/types/data/telemed/appointments/create-appointment.types';
 import { getUser } from '../../shared/auth';
+import { getAuth0Token } from '../../shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 export interface GetPatientsInput {
@@ -29,7 +35,7 @@ export const index = wrapHandler('get-patients', async (input: ZambdaInput): Pro
   // const user = await appClient.getMe();
   // console.log(user);
 
-  const oystehr = createOystehrClient(oystehrToken, secrets);
+  const oystehr = createClinicalOystehrClient(oystehrToken, secrets);
   console.log('getting user');
   const user = await getUser(input.headers.Authorization.replace('Bearer ', ''), secrets);
   console.log('getting patients for user', user);

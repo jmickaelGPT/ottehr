@@ -1,6 +1,7 @@
-import { type FeatureFlagsConfig, FeatureFlagsConfigSchema } from 'config-types';
+import type { FeatureFlagsConfig } from 'config-types/config/feature-flags';
+import { FeatureFlagsConfigSchema } from 'config-types/config/feature-flags';
 
-const FEATURE_FLAGS_DATA: FeatureFlagsConfig = {
+const FEATURE_FLAGS_DATA: FeatureFlagsConfig & { formsEnabled: boolean } = {
   labOrdersEnabled: true,
   inHouseLabsEnabled: true,
   radiologyEnabled: true,
@@ -22,4 +23,7 @@ const FEATURE_FLAGS_DATA: FeatureFlagsConfig = {
   dynamicServiceCategoriesEnabled: true,
 };
 
-export const FEATURE_FLAGS_CONFIG = Object.freeze(FeatureFlagsConfigSchema.parse(FEATURE_FLAGS_DATA));
+export const FEATURE_FLAGS_CONFIG = Object.freeze({
+  ...FEATURE_FLAGS_DATA,
+  ...FeatureFlagsConfigSchema.parse(FEATURE_FLAGS_DATA),
+});

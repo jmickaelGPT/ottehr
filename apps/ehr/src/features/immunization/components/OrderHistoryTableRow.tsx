@@ -5,7 +5,7 @@ import { DateTime } from 'luxon';
 import { enqueueSnackbar } from 'notistack';
 import React, { ReactElement, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { CustomDialog } from 'src/components/dialogs';
+import { CustomDialog } from 'src/components/dialogs/CustomDialog';
 import { dataTestIds } from 'src/constants/data-test-ids';
 import { OrderStatusChip } from 'src/features/immunization/components/OrderStatusChip';
 import {
@@ -17,21 +17,35 @@ import {
   getImmunizationOrderEditUrl,
   getImmunizationVaccineDetailsUrl,
 } from 'src/features/visits/in-person/routing/helpers';
-import { ImmunizationOrder, searchRouteByCode } from 'utils';
+import { searchRouteByCode } from 'utils/lib/fhir/medication-administration';
+import { ImmunizationOrder } from 'utils/lib/types/data/immunization/types';
+import { enqueueOrderDeleteWarnings } from '../../visits/shared/utils/orderDeleteWarnings';
 
 interface Props {
   order: ImmunizationOrder;
   showActions: boolean;
   showGiven?: boolean;
+  onEditOrder?: (orderId: string) => void;
+  onShowDetails?: (orderId: string) => void;
 }
 
-export const OrderHistoryTableRow: React.FC<Props> = ({ order, showActions, showGiven = true }) => {
+export const OrderHistoryTableRow: React.FC<Props> = ({
+  order,
+  showActions,
+  showGiven = true,
+  onEditOrder,
+  onShowDetails,
+}) => {
   const theme = useTheme();
   const navigate = useNavigate();
   const { id: appointmentId } = useParams();
   const [isDeleteDialogOpened, setIsDeleteDialogOpened] = useState(false);
 
   const navigateToEditOrder = (): void => {
+    if (onEditOrder) {
+      onEditOrder(order.id);
+      return;
+    }
     if (!appointmentId) {
       enqueueSnackbar('navigation error', { variant: 'error' });
       return;
@@ -39,13 +53,14 @@ export const OrderHistoryTableRow: React.FC<Props> = ({ order, showActions, show
     navigate(getImmunizationOrderEditUrl(appointmentId, order.id));
   };
 
-  const { mutateAsync: cancelOrder, isPending: isDeleting } = useCancelImmunizationOrder();
+  const { mutateAsync: cancelOrder, isPending: isDeleting } = useCancelImmunizationOrder(order.encounterId);
 
   const handleConfirmDelete = async (): Promise<void> => {
     try {
-      await cancelOrder({
+      const response = await cancelOrder({
         orderId: order.id,
       });
+      enqueueOrderDeleteWarnings(response);
     } catch {
       enqueueSnackbar('An error occurred while deleting the vaccine order. Please try again.', { variant: 'error' });
     } finally {
@@ -54,8 +69,13 @@ export const OrderHistoryTableRow: React.FC<Props> = ({ order, showActions, show
   };
 
   const isPending = order.status === 'pending';
+  const isCancelled = order.status === 'cancelled';
 
   const navigateToDetails = (): void => {
+    if (onShowDetails) {
+      onShowDetails(order.id);
+      return;
+    }
     if (!appointmentId) return;
     requestAnimationFrame(() => {
       navigate(`${getImmunizationVaccineDetailsUrl(appointmentId)}?scrollTo=${order.id}`);
@@ -122,7 +142,7 @@ export const OrderHistoryTableRow: React.FC<Props> = ({ order, showActions, show
           <Stack>
             <OrderStatusChip status={order.status} dataTestId={dataTestIds.immunizationPage.marTableStatusCell} />
             <span data-testid={dataTestIds.immunizationPage.marTableReasonCell}>
-              {reasonListValues[order.reason as ReasonListCodes] ?? order.reason}
+              {!isCancelled && (reasonListValues[order.reason as ReasonListCodes] ?? order.reason)}
             </span>
           </Stack>
           {showActions ? (
@@ -130,7 +150,7 @@ export const OrderHistoryTableRow: React.FC<Props> = ({ order, showActions, show
               <IconButton size="small" aria-label="edit" onClick={isPending ? navigateToEditOrder : navigateToDetails}>
                 <EditIcon sx={{ color: theme.palette.primary.dark }} />
               </IconButton>
-              {isPending && (
+              {!isCancelled && (
                 <>
                   <IconButton size="small" aria-label="delete" onClick={() => setIsDeleteDialogOpened(true)}>
                     <DeleteIcon sx={{ color: theme.palette.error.main }} />
@@ -160,7 +180,7 @@ function formatDateTime(dateTime: string | undefined): string | undefined {
   if (!dateTime) {
     return undefined;
   }
-  return DateTime.fromISO(dateTime)?.toFormat('MM/dd/yyyy HH:mm a');
+  return DateTime.fromISO(dateTime)?.toFormat('MM/dd/yyyy hh:mm a');
 }
 
 function grayText(text: string | undefined): ReactElement {

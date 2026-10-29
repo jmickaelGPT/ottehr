@@ -1,5 +1,7 @@
-import { INVALID_INPUT_ERROR, MISSING_REQUEST_BODY, UpdateEmCodeInput, UpdateEmCodeInputSchema } from 'utils';
-import { ZambdaInput } from '../../../shared';
+import { UpdateEmCodeInput, UpdateEmCodeInputSchema } from 'utils/lib/types/api/config/em-codes';
+import { INVALID_INPUT_ERROR, MISSING_REQUEST_BODY } from 'utils/lib/types/errors';
+import { ZambdaInput } from '../../../shared/types/common';
+import { safeJsonParse } from '../../../shared/validation';
 
 export function validateRequestParameters(input: ZambdaInput): UpdateEmCodeInput {
   if (!input.body) {
@@ -8,7 +10,7 @@ export function validateRequestParameters(input: ZambdaInput): UpdateEmCodeInput
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(input.body);
+    parsed = safeJsonParse(input.body);
   } catch {
     throw INVALID_INPUT_ERROR('Unable to parse request body. Invalid JSON.');
   }

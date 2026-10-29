@@ -5,7 +5,8 @@ import {
   MedicationData,
   MedicationOrderStatusesType,
   UpdateMedicationOrderInput,
-} from 'utils';
+} from 'utils/lib/types/api/medication-administration.types';
+import { OrderDeleteWarnings } from '../../shared/utils/orderDeleteWarnings';
 import { MedicationOrderType } from '../components/medication-administration/medication-editable-card/fieldsConfig';
 import { statusTransitions } from '../components/medication-administration/medicationTypes';
 import { useMedicationAPI } from './useMedicationOperations';
@@ -33,7 +34,7 @@ export const useMedicationManagement = (): {
     id: string;
     message: string;
   }>;
-  deleteMedication: (idToDelete: string) => Promise<void>;
+  deleteMedication: (idToDelete: string) => Promise<OrderDeleteWarnings>;
   getIsMedicationEditable: (type: MedicationOrderType, medication?: ExtendedMedicationDataForResponse) => boolean;
 } => {
   const { medications, isLoading, loadMedications, updateMedication, deleteMedication } = useMedicationAPI();

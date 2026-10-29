@@ -7,10 +7,10 @@ import { DeleteIconButton } from 'src/components/DeleteIconButton';
 import { RoundedButton } from 'src/components/RoundedButton';
 import { dataTestIds } from 'src/constants/data-test-ids';
 import { ProviderSideListSkeleton } from 'src/features/visits/shared/components/ProviderSideListSkeleton';
+import { useChartData } from 'src/features/visits/shared/hooks/useChartData';
 import { useChartDataArrayValue } from 'src/features/visits/shared/hooks/useChartDataArrayValue';
 import { useGetAppointmentAccessibility } from 'src/features/visits/shared/hooks/useGetAppointmentAccessibility';
-import { useChartData } from 'src/features/visits/shared/stores/appointment/appointment.store';
-import { HospitalizationDTO } from 'utils';
+import { HospitalizationDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
 import { HospitalizationOptions } from './hospitalizationOptions';
 
 export const HospitalizationForm: FC = () => {
@@ -28,7 +28,7 @@ export const HospitalizationForm: FC = () => {
 
   const { control, reset, handleSubmit } = methods;
 
-  const { isLoading, onSubmit, onRemove, values: hospitalization } = useChartDataArrayValue('episodeOfCare', reset, {});
+  const { isLoading, onSubmit, onRemove, values: hospitalization } = useChartDataArrayValue('episodeOfCare', reset);
   const [isOtherOptionSelected, setIsOtherOptionSelected] = useState(false);
 
   const handleSelectOption = useCallback(

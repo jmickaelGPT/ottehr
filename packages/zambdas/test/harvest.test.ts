@@ -1,5 +1,7 @@
 import { Patient, Questionnaire, QuestionnaireResponse, QuestionnaireResponseItem } from 'fhir/r4b';
-import { PHARMACY_COLLECTION_LINK_IDS, PREFERRED_PHARMACY_EXTENSION_URL } from 'utils';
+import { PREFERRED_PHARMACY_EXTENSION_URL } from 'utils/lib/fhir/constants';
+import { PATIENT_HAS_MEDICAID_URL } from 'utils/lib/types/constants';
+import { PHARMACY_COLLECTION_LINK_IDS } from 'utils/lib/types/data/search-places';
 import { describe, expect, test } from 'vitest';
 import {
   createMasterRecordPatchOperations,
@@ -35,20 +37,6 @@ describe('Patient Master Record Tests', () => {
             state: 'CA',
             postalCode: '06001',
             country: 'US',
-          },
-        ],
-      },
-      {
-        op: 'add',
-        path: '/telecom',
-        value: [
-          {
-            system: 'email',
-            value: 'okovalenko+testnew@masslight.com',
-          },
-          {
-            system: 'phone',
-            value: '+12027139680',
           },
         ],
       },
@@ -120,6 +108,20 @@ describe('Patient Master Record Tests', () => {
           },
         ],
       },
+      {
+        op: 'add',
+        path: '/telecom',
+        value: [
+          {
+            system: 'email',
+            value: 'okovalenko+testnew@masslight.com',
+          },
+          {
+            system: 'phone',
+            value: '+12027139680',
+          },
+        ],
+      },
     ];
 
     const result = createMasterRecordPatchOperations(
@@ -155,6 +157,46 @@ describe('Patient Master Record Tests', () => {
     });
   });
 
+  test('should trim leading and trailing whitespace from patient name answers', () => {
+    const padNameAnswers = (items: QuestionnaireResponseItem[]): QuestionnaireResponseItem[] =>
+      items.map((item) => ({
+        ...item,
+        item: item.item ? padNameAnswers(item.item) : undefined,
+        answer: ['patient-first-name', 'patient-last-name'].includes(item.linkId)
+          ? item.answer?.map((answer) => ({ ...answer, valueString: `  ${answer.valueString} ` }))
+          : item.answer,
+      }));
+    const paddedItems = padNameAnswers((QR1 as QuestionnaireResponse).item ?? []);
+
+    // same answers as already stored, so padding alone must not produce changes
+    expect(
+      createMasterRecordPatchOperations(
+        {
+          questionnaireResponseItems: paddedItems,
+          sourceQuestionnaire: questionnaire,
+          options: { filterByEnableWhen: true },
+        },
+        patient2 as Patient
+      ).patient.patchOpsForDirectUpdate
+    ).toEqual([]);
+
+    // a name stored with a trailing space gets corrected on the next save
+    const patientWithPaddedName = {
+      ...patient2,
+      name: [{ ...patient2.name[0], family: `${patient2.name[0].family} ` }],
+    } as Patient;
+    expect(
+      createMasterRecordPatchOperations(
+        {
+          questionnaireResponseItems: paddedItems,
+          sourceQuestionnaire: questionnaire,
+          options: { filterByEnableWhen: true },
+        },
+        patientWithPaddedName
+      ).patient.patchOpsForDirectUpdate
+    ).toEqual([{ op: 'replace', path: '/name/0/family', value: patient2.name[0].family }]);
+  });
+
   test('should generate correct JSON patch operations for an old patient with a paperwork, different answers', () => {
     const patientPatchOperations = [
       {
@@ -179,8 +221,11 @@ describe('Patient Master Record Tests', () => {
       },
       {
         op: 'replace',
-        path: '/telecom/1/value',
-        value: '+12027139681',
+        path: '/telecom',
+        value: [
+          { value: 'okovalenko+testnew@masslight.com', system: 'email' },
+          { value: '+12027139681', system: 'phone' },
+        ],
       },
     ];
 
@@ -824,6 +869,39 @@ describe('Patient Master Record Tests', () => {
       coverage: {},
       patient: {
         patchOpsForDirectUpdate: [{ op: 'remove', path: '/identifier/1' }],
+      },
+      relatedPerson: {},
+    });
+  });
+
+  test('harvests patient-has-medicaid from card-payment-page into the Patient extension', () => {
+    const patient: Patient = {
+      id: 'patient-no-medicaid-ext',
+      resourceType: 'Patient',
+      name: [{ given: ['Jane'], family: 'Smith' }],
+    };
+    const qrItems: QuestionnaireResponseItem[] = [
+      {
+        linkId: 'card-payment-page',
+        item: [{ linkId: 'patient-has-medicaid', answer: [{ valueBoolean: true }] }],
+      },
+    ];
+
+    const result = createMasterRecordPatchOperations(
+      { questionnaireResponseItems: qrItems, options: { includeSections: ['card-payment-page'] } },
+      patient
+    );
+
+    expect(result).toEqual({
+      coverage: {},
+      patient: {
+        patchOpsForDirectUpdate: [
+          {
+            op: 'add',
+            path: '/extension',
+            value: [{ url: PATIENT_HAS_MEDICAID_URL, valueBoolean: true }],
+          },
+        ],
       },
       relatedPerson: {},
     });

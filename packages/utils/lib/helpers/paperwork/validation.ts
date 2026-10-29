@@ -6,21 +6,15 @@ import {
   QuestionnaireResponseItemAnswer,
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import {
-  DATE_ERROR_MESSAGE,
-  DOB_DATE_FORMAT,
-  emailRegex,
-  emojiRegex,
-  IntakeQuestionnaireItem,
-  isoDateRegex,
-  phoneRegex,
-  pickFirstValueFromAnswerItem,
-  QuestionnaireItemConditionDefinition,
-  REQUIRED_FIELD_ERROR_MESSAGE,
-  ssnRegex,
-  zipRegex,
-} from 'utils';
 import * as Yup from 'yup';
+import {
+  IntakeQuestionnaireItem,
+  QuestionnaireItemConditionDefinition,
+} from '../../types/data/paperwork/paperwork.types';
+import { DOB_DATE_FORMAT } from '../../utils/date';
+import { DATE_ERROR_MESSAGE, REQUIRED_FIELD_ERROR_MESSAGE } from '../../validation/constants';
+import { emailRegex, emojiRegex, isoDateRegex, phoneRegex, ssnRegex, zipRegex } from '../../validation/regex';
+import { pickFirstValueFromAnswerItem } from './paperwork';
 
 interface ValidatableQuestionnaireItem extends IntakeQuestionnaireItem {
   regex?: RegExp;
@@ -35,6 +29,7 @@ export const PHONE_NUMBER_FIELDS = [
   'responsible-party-number',
   'pharmacy-phone',
   'pcp-number',
+  'pcp-fax',
 ];
 export const EMAIL_FIELDS = ['patient-email', 'guardian-email'];
 export const ZIP_CODE_FIELDS = ['patient-zip'];
@@ -263,6 +258,22 @@ const schemaForItem = (item: ValidatableQuestionnaireItem, context: any): Yup.An
     }
     schemaTemp = schema;
   }
+  if (item.type === 'date' && item.dataType !== 'DOB') {
+    let stringSchema = Yup.string().typeError(DATE_ERROR_MESSAGE).matches(isoDateRegex, DATE_ERROR_MESSAGE);
+
+    if (required) {
+      stringSchema = stringSchema.required(DATE_ERROR_MESSAGE);
+    }
+    let schema: Yup.AnySchema = Yup.object({
+      valueString: stringSchema,
+    });
+    if (required) {
+      schema = schema.required(DATE_ERROR_MESSAGE);
+    } else {
+      schema = schema.optional().default(undefined);
+    }
+    schemaTemp = schema;
+  }
   if (item.type === 'attachment') {
     let objSchema: any;
     if (required) {
@@ -326,7 +337,15 @@ const schemaForItem = (item: ValidatableQuestionnaireItem, context: any): Yup.An
 export const makeValidationSchema = (
   items: IntakeQuestionnaireItem[],
   pageId?: string,
-  externalContext?: { values: any; items: any; questionnaireResponse?: QuestionnaireResponse }
+  externalContext?: { values: any; items: any; questionnaireResponse?: QuestionnaireResponse },
+  // `onlyValidateProvidedFields` scopes whole-questionnaire validation to just the
+  // fields present in each submitted page, rather than the page's full item list.
+  // It only affects the entire-questionnaire branch (pageId === undefined). Default
+  // is whole-section validation, which the intake page-by-page save relies on to
+  // flag omitted required fields. Opt in for partial single-field updates (e.g. the
+  // EHR patient-account update path) where enforcing required siblings the caller
+  // never touched would wrongly reject the submission.
+  options?: { onlyValidateProvidedFields?: boolean }
 ): any => {
   if (pageId !== undefined) {
     // we are validating one page of the questionnaire
@@ -376,16 +395,31 @@ export const makeValidationSchema = (
           return value;
         }
 
+        const onlyValidateProvidedFields = options?.onlyValidateProvidedFields ?? false;
+
         if (answerItem === undefined) {
-          // Only check for required fields if the page is enabled
-          if (questionItem.item?.some((i) => evalRequired(i, context))) {
+          // Only check for required fields if the page is enabled and we're
+          // validating the whole section. In provided-fields-only mode an absent
+          // page carries no fields to validate, so there's nothing to enforce.
+          if (!onlyValidateProvidedFields && questionItem.item?.some((i) => evalRequired(i, context))) {
             return context.createError({ message: 'Item not found' });
           } else {
             return value;
           }
         }
+
+        // In provided-fields-only mode, restrict the schema to the fields actually
+        // present in the submission so required siblings the caller omitted don't
+        // trip validation. Fields left blank in a full section save are still
+        // submitted as bare `{ linkId }` items, so this only relaxes enforcement
+        // for fields entirely absent from the QuestionnaireResponse.
+        const sectionItems = questionItem.item ?? [];
+        const itemsToValidate = onlyValidateProvidedFields
+          ? sectionItems.filter((i) => (answerItem as { linkId: string }[]).some((a) => a.linkId === i.linkId))
+          : sectionItems;
+
         const schema = makeValidationSchemaPrivate({
-          items: questionItem.item ?? [],
+          items: itemsToValidate,
           formValues: value,
           externalContext: { values: context?.parent ?? [], items: items.flatMap((i) => i.item ?? []) },
         });
@@ -837,10 +871,10 @@ const makeItemDict = (items: HasLinkId[]): { [linkId: string]: any } => {
 };
 
 export const evalFilterWhen = (item: IntakeQuestionnaireItem, context: any, questionVal?: any): boolean => {
-  if (item.filterWhen === undefined) {
+  if (!item.filterWhen || item.filterWhen.length === 0) {
     return false;
   }
-  return evalCondition(item.filterWhen, context, item.type, questionVal);
+  return item.filterWhen.some((condition) => evalCondition(condition, context, item.type, questionVal));
 };
 
 export const evalComplexValidationTrigger = (

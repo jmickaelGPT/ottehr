@@ -1,10 +1,17 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Appointment, Coding, Encounter, PractitionerRole } from 'fhir/r4b';
-import { AssignPractitionerInput, AssignPractitionerResponse, Secrets, userMe } from 'utils';
-import { checkOrCreateM2MClientToken, wrapHandler, ZambdaInput } from '../../shared';
-import { createOystehrClient } from '../../shared/helpers';
+import { userMe } from 'utils/lib/auth/user-me.helper';
+import { Secrets } from 'utils/lib/secrets';
+import {
+  AssignPractitionerInput,
+  AssignPractitionerResponse,
+} from 'utils/lib/types/api/assign-practitioner/assign-practitioner.types';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient } from '../../shared/helpers';
 import { getVisitResources } from '../../shared/practitioner/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import { assignPractitionerIfPossible } from './helpers/helpers';
 import { validateRequestParameters } from './validateRequestParameters';
 let m2mToken: string;
@@ -14,7 +21,7 @@ export const index = wrapHandler('assign-practitioner', async (input: ZambdaInpu
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, validatedParameters.secrets);
 
-  const oystehr = createOystehrClient(m2mToken, validatedParameters.secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, validatedParameters.secrets);
   console.log('Created Oystehr client');
 
   const validatedData = await complexValidation(oystehr, validatedParameters);

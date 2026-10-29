@@ -1,21 +1,19 @@
 import { expect, Locator, Page } from '@playwright/test';
-import type { QuestionnaireConfigType, ValueSetsConfig } from 'config-types';
-import { QuestionnaireResponse, QuestionnaireResponseItem } from 'fhir/r4b';
+import type { QuestionnaireConfigType } from 'config-types/config/form-fields';
+import type { ValueSetsConfig } from 'config-types/config/value-sets';
+import { Questionnaire, QuestionnaireResponse, QuestionnaireResponseItem } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import {
-  buildEnableWhenContext,
-  checkFieldHidden,
-  createQuestionnaireFromConfig,
-  evalEnableWhen,
-  evalRequired,
-  IN_PERSON_INTAKE_PAPERWORK_QUESTIONNAIRE,
-  IntakeQuestionnaireItem,
-  mapQuestionnaireAndValueSetsToItemsList,
-  VALUE_SETS,
-  VIRTUAL_INTAKE_PAPERWORK_QUESTIONNAIRE,
-} from 'utils';
+import { checkFieldHidden } from 'utils/lib/config-helpers/intake-paperwork';
+import { createQuestionnaireFromConfig } from 'utils/lib/config-helpers/shared-questionnaire';
+import { mapQuestionnaireAndValueSetsToItemsList } from 'utils/lib/helpers/paperwork/paperwork';
+import { buildEnableWhenContext, evalEnableWhen, evalRequired } from 'utils/lib/helpers/paperwork/validation';
+import { IN_PERSON_INTAKE_PAPERWORK_QUESTIONNAIRE } from 'utils/lib/ottehr-config/intake-paperwork';
+import { VIRTUAL_INTAKE_PAPERWORK_QUESTIONNAIRE } from 'utils/lib/ottehr-config/intake-paperwork-virtual';
+import { VALUE_SETS } from 'utils/lib/ottehr-config/value-sets';
+import { IntakeQuestionnaireItem } from 'utils/lib/types/data/paperwork/paperwork.types';
 import { dataTestIds } from '../../../src/helpers/data-test-ids';
 import { Locators } from '../locators';
+import { logVerbose } from '../logging';
 import {
   collectValidationErrorsDetailed,
   fillChoiceDropdown,
@@ -53,6 +51,8 @@ export class PagedQuestionnaireFlowHelper {
   private collectedResponses: QuestionnaireResponseItem[] = [];
   /** Optional fully-resolved paperwork config for concrete config tests */
   private paperworkConfig?: QuestionnaireConfigType;
+  /** Optional pre-assembled FHIR Questionnaire (e.g. a paperwork flow's effective questionnaire) */
+  private effectiveQuestionnaire?: Questionnaire;
 
   /**
    * @param page - Playwright page instance
@@ -61,15 +61,22 @@ export class PagedQuestionnaireFlowHelper {
    *                          This should be the result of getIntakePaperworkConfig(overrides) or
    *                          getIntakePaperworkVirtualConfig(overrides). When provided, the
    *                          questionnaire is generated from this config to match what's deployed to FHIR.
+   * @param effectiveQuestionnaire - Optional pre-assembled FHIR Questionnaire. When provided it takes
+   *                          precedence over `paperworkConfig`/service-mode defaults and its `item[]` is
+   *                          used to build the page model. This is how a paperwork *flow* is driven: pass
+   *                          the result of `resolveEffectiveQuestionnaire(flowQuestionnaire, oystehr)` so the
+   *                          helper fills/verifies the exact pages the app renders when a flow is configured.
    */
   constructor(
     page: Page,
     serviceMode: 'in-person' | 'virtual' = 'in-person',
-    paperworkConfig?: QuestionnaireConfigType
+    paperworkConfig?: QuestionnaireConfigType,
+    effectiveQuestionnaire?: Questionnaire
   ) {
     this.page = page;
     this.serviceMode = serviceMode;
     this.paperworkConfig = paperworkConfig;
+    this.effectiveQuestionnaire = effectiveQuestionnaire;
     this.locators = new Locators(page);
     this.uploadDocs = new UploadDocs(page);
     this.loadQuestionnaireItems();
@@ -81,7 +88,11 @@ export class PagedQuestionnaireFlowHelper {
   private loadQuestionnaireItems(): void {
     let questionnaire;
 
-    if (this.paperworkConfig) {
+    if (this.effectiveQuestionnaire) {
+      // A pre-assembled questionnaire (e.g. a paperwork flow's effective questionnaire) was provided.
+      // Use it verbatim so the page model matches exactly what the app renders for the flow.
+      questionnaire = this.effectiveQuestionnaire;
+    } else if (this.paperworkConfig) {
       // Generate questionnaire from provided config (matches what's deployed to FHIR)
       questionnaire = createQuestionnaireFromConfig(this.paperworkConfig);
     } else {
@@ -151,6 +162,29 @@ export class PagedQuestionnaireFlowHelper {
     }
 
     console.log(`Clearing field ${linkId}`);
+
+    // Attachment fields don't have an editable input to .clear() — once uploaded,
+    // the FileInput swaps the Upload button for a CardDisplay whose "Clear" button
+    // resets both the local preview and the RHF value. Without this branch, the
+    // fallback .clear() throws on the button element, silently returns false, and
+    // Phase 2 believes the field is empty when it's actually still populated —
+    // leading to unexpected navigation and downstream fills against the wrong page.
+    if (fieldType === 'attachment') {
+      const fieldContainer = this.page.locator(`[for="${linkId}"]`).locator('..');
+      const clearButton = fieldContainer.getByTestId(dataTestIds.fileCardClearButton);
+      const hasClearButton = await clearButton.isVisible({ timeout: 1000 }).catch(() => false);
+      if (!hasClearButton) {
+        return false;
+      }
+      await clearButton.click();
+      // Confirm the field returned to the upload state so downstream fills don't
+      // race against the CardDisplay unmounting.
+      await this.page
+        .locator(`#${linkId}`)
+        .waitFor({ state: 'visible', timeout: 5000 })
+        .catch(() => undefined);
+      return true;
+    }
 
     const locator = this.getFieldLocator(linkId);
     try {
@@ -261,7 +295,7 @@ export class PagedQuestionnaireFlowHelper {
     const type = item.type;
 
     if (item.linkId.startsWith('insurance-carrier')) {
-      console.log('filling item by type', item.linkId, type, value, JSON.stringify(item));
+      logVerbose('filling item by type', item.linkId, type, value, JSON.stringify(item));
     }
 
     switch (type) {
@@ -310,7 +344,7 @@ export class PagedQuestionnaireFlowHelper {
         await fillStringField(locator, String(value));
     }
 
-    console.log(`Filled field ${item.linkId} with value:`, value);
+    logVerbose(`Filled field ${item.linkId} with value:`, value);
   }
 
   /**
@@ -329,7 +363,7 @@ export class PagedQuestionnaireFlowHelper {
       await firstOption.click();
     } else {
       // Standard MUI Autocomplete dropdown
-      console.log(`[DEBUG] fillChoiceFieldLocal: ${item.linkId} with value "${value}"`);
+      logVerbose(`[DEBUG] fillChoiceFieldLocal: ${item.linkId} with value "${value}"`);
       await fillChoiceDropdown(this.page, locator, value);
     }
   }
@@ -399,7 +433,7 @@ export class PagedQuestionnaireFlowHelper {
       // Only check if visible
       if (await checkbox.isVisible()) {
         await checkbox.check();
-        console.log(`Checked consent checkbox ${i + 1}/${count}`);
+        logVerbose(`Checked consent checkbox ${i + 1}/${count}`);
       }
     }
   }
@@ -415,9 +449,9 @@ export class PagedQuestionnaireFlowHelper {
       await this.uploadDocs.fillInsuranceFront();
     } else if (linkId === 'insurance-card-back') {
       await this.uploadDocs.fillInsuranceBack();
-    } else if (linkId === 'secondary-insurance-card-front') {
+    } else if (linkId === 'insurance-card-front-2') {
       await this.uploadDocs.fillSecondaryInsuranceFront();
-    } else if (linkId === 'secondary-insurance-card-back') {
+    } else if (linkId === 'insurance-card-back-2') {
       await this.uploadDocs.fillSecondaryInsuranceBack();
     } else if (linkId === 'photo-id-front') {
       await this.uploadDocs.fillPhotoFrontID();
@@ -853,11 +887,12 @@ export class PagedQuestionnaireFlowHelper {
     const triggerFields = fieldsToFill.filter(([linkId]) => triggerFieldIds.has(linkId));
     const dependentFields = fieldsToFill.filter(([linkId]) => !triggerFieldIds.has(linkId));
 
+    // Joined rather than passed as arrays: console.log spreads an array of ids over one line each,
+    // which turned this page-level summary into dozens of lines. This is the line that makes the
+    // per-field logging above redundant, so it stays on unconditionally — but as one line.
     console.log(
-      'Filling page - triggers:',
-      triggerFields.map(([id]) => id),
-      'dependent:',
-      dependentFields.map(([id]) => id)
+      `Filling page - triggers: [${triggerFields.map(([id]) => id).join(', ')}] ` +
+        `dependent: [${dependentFields.map(([id]) => id).join(', ')}]`
     );
 
     // Track current form values for enableWhen evaluation
@@ -873,13 +908,45 @@ export class PagedQuestionnaireFlowHelper {
     for (const [linkId, value] of dependentFields) {
       // Check if field is enabled based on current trigger values
       if (!this.isFieldEnabled(linkId, currentValues)) {
-        console.log(`Skipping disabled field: ${linkId} (will be auto-filled by app)`);
-        continue;
+        // The enableWhen may hinge on a value the app filled itself (e.g. the hidden
+        // appointment-service-category that gates the photo ID fields), which the test never
+        // fills — trust what the page actually renders in that case.
+        const dependsOnUnknownValue = this.enableWhenDependsOnUnknownValue(linkId, currentValues);
+        if (!dependsOnUnknownValue || !(await this.isFieldRenderedAndEditable(linkId))) {
+          console.log(`Skipping disabled field: ${linkId} (will be auto-filled by app)`);
+          continue;
+        }
       }
 
       await this.fillFieldWithSpecialHandling(linkId, value);
       currentValues[linkId] = this.buildResponseItem(linkId, value);
     }
+  }
+
+  /**
+   * Whether the field's enableWhen references a question the test has no value for — neither filled
+   * on this page nor collected from earlier pages — so evaluating it here can't be trusted.
+   */
+  private enableWhenDependsOnUnknownValue(
+    linkId: string,
+    currentValues: Record<string, QuestionnaireResponseItem>
+  ): boolean {
+    const known = { ...buildEnableWhenContext(this.collectedResponses), ...currentValues };
+    return (this.findItem(linkId)?.enableWhen ?? []).some((condition) => {
+      const questionLinkId = condition.question.split('.').pop() ?? condition.question;
+      return !(condition.question in known) && !(questionLinkId in known);
+    });
+  }
+
+  /**
+   * Whether the page currently renders the field and lets the user edit it.
+   */
+  private async isFieldRenderedAndEditable(linkId: string): Promise<boolean> {
+    const element = this.page.locator(`[id="${linkId}"]`).first();
+    if ((await element.count()) === 0) {
+      return false;
+    }
+    return !(await element.isDisabled());
   }
 
   /**
@@ -1079,9 +1146,20 @@ export class PagedQuestionnaireFlowHelper {
         // Fill the trigger field with valid value (should activate requireWhen)
         await this.fillFieldWithSpecialHandling(triggerLinkId, triggerValidValue);
 
-        // Clear the dependent fields to test they show required errors
-        // Note: Fields may already be empty, but we try to clear them to ensure the test is valid
-        // For this to work properly, the app must show the fields after the trigger is set
+        // Clear the dependent fields so the required-error assertion is real.
+        // The general page-fill (before validation testing) populates every
+        // field from validData, including ones we want to test as
+        // conditionally required here. Without this clear, the form sees
+        // the field as filled and never produces a required-error — masking
+        // a real "is this field actually required?" test as a false pass.
+        // This was a no-op silently for most Phase 2 cases (insurance fields
+        // weren't pre-filled because their parents were disabled), but bit
+        // when responsible-party-email moved from unconditional-required to
+        // conditional after the no-email config landed.
+        for (const fieldLinkId of fieldsNowRequired) {
+          const item = this.findItem(fieldLinkId);
+          await this.clearField(fieldLinkId, item?.type);
+        }
 
         await this.clickContinue();
         await this.page.waitForTimeout(500);
@@ -1104,10 +1182,16 @@ export class PagedQuestionnaireFlowHelper {
 
           // Fail if expected field errors were not found
           if (missingErrors.length > 0) {
+            // Dump the actual error map so the failure is debuggable from
+            // the test log alone — no need to dig through screenshots to
+            // see which field DID error and which expected field didn't.
+            const actualErrorsByField = Array.from(errorResult.fieldErrors.entries())
+              .map(([k, v]) => `${k}="${v}"`)
+              .join(', ');
             throw new Error(
               `[Phase 2] Expected validation errors for conditionally-required fields but none found: ${missingErrors.join(
                 ', '
-              )}`
+              )}.\nActual field errors observed: ${actualErrorsByField || '(none)'}`
             );
           }
 

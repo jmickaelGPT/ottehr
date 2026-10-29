@@ -1,33 +1,53 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { Appointment, DiagnosticReport, Encounter, Practitioner, ServiceRequest, Task } from 'fhir/r4b';
+import {
+  Appointment,
+  DiagnosticReport,
+  DocumentReference,
+  Encounter,
+  Practitioner,
+  ServiceRequest,
+  Task,
+} from 'fhir/r4b';
+import { FHIR_EXTENSION, TASK_ASSIGNED_DATE_TIME_EXTENSION_URL } from 'utils/lib/fhir/constants';
+import { getExtension } from 'utils/lib/fhir/helpers';
+import { getFullestAvailableName } from 'utils/lib/fhir/patient';
 import {
   DIAGNOSTIC_REPORT_PRELIMINARY_REVIEW_ON_EXTENSION_URL,
-  FHIR_EXTENSION,
-  formatDate,
-  getExtension,
-  getFullestAvailableName,
+  ORDER_TYPE_CODE_SYSTEM,
+  SERVICE_REQUEST_NEEDS_TO_BE_SENT_TO_TELERADIOLOGY_EXTENSION_URL,
+  SERVICE_REQUEST_PERFORMED_ON_EXTENSION_URL,
+  SERVICE_REQUEST_REQUESTED_TIME_EXTENSION_URL,
+  SERVICE_REQUEST_SENT_FOR_FINAL_READ_BY_EXTENSION_URL,
+} from 'utils/lib/fhir/radiology';
+import { Secrets } from 'utils/lib/secrets';
+import {
   GetRadiologyOrderListZambdaInput,
   GetRadiologyOrderListZambdaOrder,
   GetRadiologyOrderListZambdaOutput,
-  isPositiveNumberOrZero,
-  ORDER_TYPE_CODE_SYSTEM,
-  Pagination,
-  RADIOLOGY_TASK,
   RadiologyOrderHistoryRow,
   RadiologyOrderStatus,
-  SERVICE_REQUEST_NEEDS_TO_BE_SENT_TO_TELERADIOLOGY_EXTENSION_URL,
-  SERVICE_REQUEST_ORDER_DETAIL_PARAMETER_PRE_RELEASE_CODE_URL,
-  SERVICE_REQUEST_ORDER_DETAIL_PARAMETER_PRE_RELEASE_URL,
-  SERVICE_REQUEST_ORDER_DETAIL_PARAMETER_PRE_RELEASE_VALUE_STRING_URL,
-  SERVICE_REQUEST_ORDER_DETAIL_PRE_RELEASE_URL,
-  SERVICE_REQUEST_PERFORMED_ON_EXTENSION_URL,
-  SERVICE_REQUEST_REQUESTED_TIME_EXTENSION_URL,
-  Task as OttehrTask,
-  TASK_ASSIGNED_DATE_TIME_EXTENSION_URL,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../shared';
-import { getMostRecentReport } from '../shared';
+} from 'utils/lib/types/api/radiology';
+import { Pagination } from 'utils/lib/types/data/pagination.types';
+import { RADIOLOGY_TASK, Task as OttehrTask } from 'utils/lib/types/data/tasks/types';
+import { formatDate } from 'utils/lib/utils/date';
+import { isPositiveNumberOrZero } from 'utils/lib/validation/helper';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { getMyPractitionerId } from '../../../shared/practitioners';
+import {
+  findRadiologyFinalReviewTask,
+  getOrderingProviderIds,
+  getReportAuthor,
+  getReportAuthorId,
+  isCurrentRadiologyResultDocRef,
+  makeRadiologyDTO,
+  resolveOrderingProvider,
+  takeMostRecentPreliminaryReport,
+  takeTheBestFinalDiagnosticReport,
+} from '../../../shared/radiology';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { validateInput, validateSecrets } from './validation';
 
 // Types
@@ -36,7 +56,7 @@ export interface ValidatedInput {
   callerAccessToken: string;
 }
 
-export const DEFAULT_RADIOLOGY_ITEMS_PER_PAGE = 10;
+export const DEFAULT_RADIOLOGY_ITEMS_PER_PAGE = 20;
 
 // Lifting up value to outside of the handler allows it to stay in memory across warm lambda invocations
 let m2mToken: string;
@@ -44,16 +64,14 @@ let m2mToken: string;
 const ZAMBDA_NAME = 'radiology-order-list';
 
 export const index = wrapHandler(ZAMBDA_NAME, async (unsafeInput: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log('input body, ', JSON.stringify(unsafeInput.body));
-
   const secrets = validateSecrets(unsafeInput.secrets);
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   const validatedInput = await validateInput(unsafeInput);
 
-  const response = await performEffect(validatedInput, oystehr);
+  const response = await performEffect(validatedInput, secrets, oystehr);
 
   return {
     statusCode: 200,
@@ -63,6 +81,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (unsafeInput: ZambdaInput): 
 
 const performEffect = async (
   validatedInput: ValidatedInput,
+  secrets: Secrets,
   oystehr: Oystehr
 ): Promise<GetRadiologyOrderListZambdaOutput> => {
   const {
@@ -79,9 +98,26 @@ const performEffect = async (
     serviceRequestId,
     itemsPerPage,
     pageIndex,
+    callerPractitionerId: resolveCallerPractitionerId(validatedInput.callerAccessToken, secrets),
   };
 
   return await getRadiologyOrders(oystehr, searchParams);
+};
+
+/**
+ * Who is asking, for the edit affordances below. Users without a Practitioner profile (admins) must still be
+ * able to read the list, so failing to resolve one costs them the affordance and nothing else.
+ */
+const resolveCallerPractitionerId = async (
+  callerAccessToken: string,
+  secrets: Secrets
+): Promise<string | undefined> => {
+  try {
+    return await getMyPractitionerId(callerAccessToken, secrets);
+  } catch (error) {
+    console.warn('Could not resolve the calling user to a Practitioner; final reads will be read-only.', error);
+    return undefined;
+  }
 };
 
 export const getRadiologyOrders = async (
@@ -92,12 +128,14 @@ export const getRadiologyOrders = async (
     serviceRequestId,
     itemsPerPage = 100,
     pageIndex = 0,
+    callerPractitionerId,
   }: {
     encounterIds?: string[];
     patientId?: string;
     serviceRequestId?: string;
     itemsPerPage?: number;
     pageIndex?: number;
+    callerPractitionerId?: Promise<string | undefined>;
   }
 ): Promise<GetRadiologyOrderListZambdaOutput> => {
   const searchParams = [
@@ -107,8 +145,11 @@ export const getRadiologyOrders = async (
     { name: '_sort', value: '-_lastUpdated' },
     { name: '_revinclude', value: 'Task:based-on' },
     { name: '_revinclude', value: 'DiagnosticReport:based-on' },
+    { name: '_revinclude', value: 'DocumentReference:related' },
     { name: '_include', value: 'ServiceRequest:requester' },
     { name: '_include', value: 'ServiceRequest:encounter' },
+    // The visit's attending provider is the ordering provider we display; see `resolveOrderingProvider`.
+    { name: '_include:iterate', value: 'Encounter:participant:Practitioner' },
     { name: '_tag', value: `${ORDER_TYPE_CODE_SYSTEM}|radiology` },
     { name: 'status:not', value: 'revoked' },
   ];
@@ -135,9 +176,15 @@ export const getRadiologyOrders = async (
 
   const resources = (searchResponse.entry || [])
     .map((entry) => entry.resource)
-    .filter((res): res is ServiceRequest | Task | Practitioner | DiagnosticReport | Encounter => Boolean(res));
+    .filter((res): res is ServiceRequest | Task | Practitioner | DiagnosticReport | Encounter | DocumentReference =>
+      Boolean(res)
+    );
 
-  const { serviceRequests, tasks, diagnosticReports, practitioners, encounters } = extractResources(resources);
+  const { serviceRequests, tasks, diagnosticReports, practitioners, encounters, documentReferences } =
+    extractResources(resources);
+
+  // Awaited before the early return as well, so no path leaves this promise unobserved.
+  const resolvedCallerPractitionerId = await callerPractitionerId;
 
   if (!serviceRequests.length) {
     return {
@@ -147,7 +194,15 @@ export const getRadiologyOrders = async (
   }
 
   const orders = serviceRequests.map((serviceRequest) =>
-    parseResultsToOrder(serviceRequest, tasks, diagnosticReports, practitioners, encounters)
+    parseResultsToOrder(
+      serviceRequest,
+      tasks,
+      diagnosticReports,
+      practitioners,
+      encounters,
+      documentReferences,
+      resolvedCallerPractitionerId
+    )
   );
 
   return {
@@ -156,35 +211,17 @@ export const getRadiologyOrders = async (
   };
 };
 
-const parseResultsToOrder = (
+export const parseResultsToOrder = (
   serviceRequest: ServiceRequest,
   tasks: Task[],
   diagnosticReports: DiagnosticReport[],
   practitioners: Practitioner[],
-  encounters: Encounter[]
+  encounters: Encounter[],
+  documentReferences: DocumentReference[],
+  callerPractitionerId: string | undefined
 ): GetRadiologyOrderListZambdaOrder => {
   if (serviceRequest.id == null) {
     throw new Error('ServiceRequest ID is unexpectedly null');
-  }
-
-  const cptCode = serviceRequest.code?.coding?.[0]?.code;
-  if (!cptCode) {
-    throw new Error('cptCode is unexpectedly null');
-  }
-
-  const diagnosisCode = serviceRequest.reasonCode?.[0]?.coding?.[0]?.code;
-  if (!diagnosisCode) {
-    throw new Error('diagnosisCode is unexpectedly null');
-  }
-
-  const diagnosisDisplay = serviceRequest.reasonCode?.[0]?.coding?.[0]?.display;
-  if (!diagnosisDisplay) {
-    throw new Error('diagnosisDisplay is unexpectedly null');
-  }
-
-  const cptCodeDisplay = serviceRequest.code?.coding?.[0]?.display;
-  if (!cptCodeDisplay) {
-    throw new Error('cptCodeDisplay is unexpectedly null');
   }
 
   const orderAddedDateTime = serviceRequest.authoredOn;
@@ -192,27 +229,20 @@ const parseResultsToOrder = (
     throw new Error('Order added date time is unexpectedly null');
   }
 
-  const myRequestingProvider = practitioners.find(
-    (practitioner) => practitioner.id === serviceRequest.requester?.reference?.split('/')[1]
-  );
-  if (!myRequestingProvider) {
+  const encounter = encounters.find((enc) => enc.id === parseEncounterId(serviceRequest));
+
+  const orderingProvider = resolveOrderingProvider(serviceRequest, encounter, practitioners);
+  if (!orderingProvider) {
     throw new Error('Service Request has no requesting provider');
   }
-  const providerName = getFullestAvailableName(myRequestingProvider);
+  const providerName = getFullestAvailableName(orderingProvider);
   if (!providerName) {
     throw new Error('Provider name is unexpectedly null');
   }
 
   let status: RadiologyOrderStatus | undefined;
 
-  const finalReviewTask = tasks.find((task) => {
-    const basedOnSr = task.basedOn?.some((basedOn) => basedOn.reference === `ServiceRequest/${serviceRequest.id}`);
-    const isRadiologyTask = task.groupIdentifier?.value === RADIOLOGY_TASK.category;
-    const isFinalReview = task.code?.coding?.some(
-      (c) => c.system === RADIOLOGY_TASK.system && c.code === RADIOLOGY_TASK.code.reviewFinalResultTask
-    );
-    return basedOnSr && isRadiologyTask && isFinalReview && task.status !== 'cancelled';
-  });
+  const finalReviewTask = findRadiologyFinalReviewTask(tasks, serviceRequest.id);
   console.log('finalReviewTask found: ', finalReviewTask?.id);
   let formattedFinalReviewTask: OttehrTask | undefined;
 
@@ -222,13 +252,8 @@ const parseResultsToOrder = (
   );
 
   const preliminaryDiagnosticReport = takeMostRecentPreliminaryReport(relatedDiagnosticReports);
-  const preliminaryReportData = preliminaryDiagnosticReport?.presentedForm?.find(
-    (attachment) => attachment.contentType === 'text/html'
-  )?.data;
 
   const bestFinalReport = takeTheBestFinalDiagnosticReport(relatedDiagnosticReports);
-  const finalReportData = bestFinalReport?.presentedForm?.find((attachment) => attachment.contentType === 'text/html')
-    ?.data;
 
   // Check if order is being or was sent for final read and we are awaiting the final read.
   const existingExtensions = serviceRequest.extension;
@@ -279,79 +304,136 @@ const parseResultsToOrder = (
     throw new Error('Order is in an invalid state, could not determine status.');
   }
 
+  // External (print-only) orders never flow through AdvaPACS; they use a simplified lifecycle driven by
+  // manually-attached result DocumentReferences: `ordered` until a result exists, then `reviewed`. Deriving
+  // it here (rather than persisting on the SR) keeps the status and history in sync as results are added
+  // or deleted. The AdvaPACS-derived status/history above is overridden entirely for these orders.
+  const isExternal = !!getExtension(serviceRequest, FHIR_EXTENSION.ServiceRequest.externalRadiologyOrder.url)
+    ?.valueBoolean;
+  const resultDocRefs = documentReferences.filter((docRef) =>
+    isCurrentRadiologyResultDocRef(docRef, serviceRequest.id ?? '')
+  );
+  if (isExternal) {
+    status = resultDocRefs.length > 0 ? RadiologyOrderStatus.reviewed : RadiologyOrderStatus.ordered;
+  }
+
   const appointmentId = parseAppointmentId(serviceRequest, encounters);
 
-  const history = buildHistory(
-    serviceRequest,
-    bestFinalReport,
-    preliminaryDiagnosticReport,
-    providerName,
-    finalReviewTask
-  );
+  const radiologyDTO = makeRadiologyDTO(serviceRequest, preliminaryDiagnosticReport, bestFinalReport);
 
-  const clinicalHistory = extractOrderDetailValue(serviceRequest, 'clinical-history');
-  const studyName = extractOrderDetailValue(serviceRequest, 'requested-procedure-description');
+  const history = isExternal
+    ? buildExternalHistory(serviceRequest, providerName, resultDocRefs)
+    : buildHistory(
+        serviceRequest,
+        bestFinalReport,
+        preliminaryDiagnosticReport,
+        providerName,
+        radiologyDTO.performedBy?.name,
+        finalReviewTask
+      );
 
   const consentObtained = !!getExtension(serviceRequest, FHIR_EXTENSION.ServiceRequest.consentObtained.url)
     ?.valueBoolean;
 
   return {
+    ...radiologyDTO,
     serviceRequestId: serviceRequest.id,
     appointmentId,
-    studyType: `${cptCode} — ${cptCodeDisplay}`,
     visitDateTime: '', // TODO
     orderAddedDateTime,
     providerName,
-    diagnosis: `${diagnosisCode} — ${diagnosisDisplay}`,
+    providerId: orderingProvider.id ?? '',
+    canEditPreliminaryReport: canCallerEditReport(
+      serviceRequest,
+      encounter,
+      preliminaryDiagnosticReport,
+      status,
+      callerPractitionerId
+    ),
+    canEditFinalReport: canCallerEditReport(serviceRequest, encounter, bestFinalReport, status, callerPractitionerId),
     status,
     isStat: serviceRequest.priority === 'stat',
-    preliminaryReport: preliminaryReportData,
-    finalReport: finalReportData,
-    clinicalHistory,
-    studyName,
     history,
     task: formattedFinalReviewTask,
     consentObtained,
   };
 };
 
-const takeMostRecentPreliminaryReport = (diagnosticReports: DiagnosticReport[]): DiagnosticReport | undefined => {
-  if (!diagnosticReports.length) {
-    return undefined;
+/**
+ * Whether the caller may correct a read — the same rule for both reads, so they can't drift apart.
+ *
+ * Two people may correct a read, independently of each other: the practitioner who wrote it, and the
+ * provider who ordered the study. Requiring one person to be both would leave a read written by anyone else
+ * uncorrectable by anyone at all, including its own author — the very thing this feature exists to fix.
+ *
+ * "Ordered it" means either identity the order carries (see `getOrderingProviderIds`), because a nurse
+ * routinely places the order on the provider's behalf.
+ *
+ * A read with no author of ours was not written here — that is how teleradiology's reads are recognised, and
+ * they are not ours to rewrite, so nobody may edit them. It also covers reads written before authorship was
+ * recorded, which are read-only for the same reason: we can't tell whose they were.
+ *
+ * `radiology-update-report` enforces this on save; this is what tells the UI whether to offer the pencil.
+ */
+export const canCallerEditReport = (
+  serviceRequest: ServiceRequest,
+  encounter: Encounter | undefined,
+  report: DiagnosticReport | undefined,
+  status: RadiologyOrderStatus,
+  callerPractitionerId: string | undefined
+): boolean => {
+  if (!callerPractitionerId || status === RadiologyOrderStatus.reviewed) {
+    return false;
   }
 
-  const preliminaryReports = diagnosticReports.filter((report) => report.status === 'preliminary');
-
-  return getMostRecentReport(preliminaryReports);
-};
-
-const takeTheBestFinalDiagnosticReport = (diagnosticReports: DiagnosticReport[]): DiagnosticReport | undefined => {
-  if (!diagnosticReports.length) {
-    return undefined;
+  const authorId = getReportAuthorId(report);
+  if (!authorId) {
+    return false;
   }
 
-  // Filter reports by status priority
-  const amendedCorrectedAppended = diagnosticReports.filter(
-    (report) => report.status === 'amended' || report.status === 'corrected' || report.status === 'appended'
+  return (
+    authorId === callerPractitionerId ||
+    getOrderingProviderIds(serviceRequest, encounter).includes(callerPractitionerId)
   );
-
-  const finalReports = diagnosticReports.filter((report) => report.status === 'final');
-
-  // Apply priority logic
-  if (amendedCorrectedAppended.length > 0) {
-    return getMostRecentReport(amendedCorrectedAppended);
-  } else if (finalReports.length > 0) {
-    return getMostRecentReport(finalReports);
-  }
-
-  return undefined;
 };
 
-const buildHistory = (
+// External (print-only) orders: a two-row history mirroring the ordered -> reviewed lifecycle.
+const buildExternalHistory = (
+  serviceRequest: ServiceRequest,
+  orderingProviderName: string,
+  resultDocRefs: DocumentReference[]
+): RadiologyOrderHistoryRow[] => {
+  const history: RadiologyOrderHistoryRow[] = [];
+
+  const orderedDate =
+    serviceRequest.extension?.find((ext) => ext.url === SERVICE_REQUEST_REQUESTED_TIME_EXTENSION_URL)?.valueDateTime ??
+    serviceRequest.authoredOn ??
+    '';
+  history.push({ status: RadiologyOrderStatus.ordered, performer: orderingProviderName, date: orderedDate });
+
+  const latestResultDocRef = resultDocRefs
+    .filter((docRef) => docRef.date ?? docRef.meta?.lastUpdated)
+    .sort((a, b) => (a.date ?? a.meta?.lastUpdated ?? '').localeCompare(b.date ?? b.meta?.lastUpdated ?? ''))
+    .pop();
+  if (latestResultDocRef) {
+    history.push({
+      status: RadiologyOrderStatus.reviewed,
+      // The provider reviews and signs the result before uploading it, so the uploader
+      // (recorded as the DocumentReference author) is the reviewer.
+      performer: latestResultDocRef.author?.[0]?.display ?? '',
+      date: latestResultDocRef.date ?? latestResultDocRef.meta?.lastUpdated ?? '',
+    });
+  }
+
+  return history;
+};
+
+export const buildHistory = (
   serviceRequest: ServiceRequest,
   bestDiagnosticReport: DiagnosticReport | undefined,
   preliminaryDiagnosticReport: DiagnosticReport | undefined,
   orderingProviderName: string,
+  performedByName: string | undefined,
   finalReviewTask?: Task
 ): RadiologyOrderHistoryRow[] => {
   const history: RadiologyOrderHistoryRow[] = [];
@@ -373,7 +455,7 @@ const buildHistory = (
   if (performedHistoryExtensionValue) {
     history.push({
       status: RadiologyOrderStatus.performed,
-      performer: '',
+      performer: performedByName ?? '',
       date: performedHistoryExtensionValue,
     });
   }
@@ -384,17 +466,20 @@ const buildHistory = (
   const diagnosticReportPreliminaryReadTimeExtensionValueFromPreliminary = preliminaryDiagnosticReport?.extension?.find(
     (ext) => ext.url === DIAGNOSTIC_REPORT_PRELIMINARY_REVIEW_ON_EXTENSION_URL
   )?.valueDateTime;
-  if (diagnosticReportPreliminaryReadTimeExtensionValueFromBest) {
+  // Prefer the preliminary report itself. The fallback covers orders finalized before the preliminary read
+  // was kept as its own resource, and leaves the performer blank there: that report's `performer` is the
+  // *final* read's author and must not stand in for this row.
+  if (diagnosticReportPreliminaryReadTimeExtensionValueFromPreliminary) {
+    history.push({
+      status: RadiologyOrderStatus.preliminary,
+      performer: getReportAuthor(preliminaryDiagnosticReport)?.display ?? '',
+      date: diagnosticReportPreliminaryReadTimeExtensionValueFromPreliminary,
+    });
+  } else if (diagnosticReportPreliminaryReadTimeExtensionValueFromBest) {
     history.push({
       status: RadiologyOrderStatus.preliminary,
       performer: '',
       date: diagnosticReportPreliminaryReadTimeExtensionValueFromBest,
-    });
-  } else if (diagnosticReportPreliminaryReadTimeExtensionValueFromPreliminary) {
-    history.push({
-      status: RadiologyOrderStatus.preliminary,
-      performer: '',
-      date: diagnosticReportPreliminaryReadTimeExtensionValueFromPreliminary,
     });
   }
 
@@ -410,7 +495,10 @@ const buildHistory = (
     if (needsFinalReadExtensionValue) {
       history.push({
         status: RadiologyOrderStatus.pendingFinal,
-        performer: '',
+        // Who sent it for the final read, recorded by send-for-final-read alongside the timestamp.
+        performer:
+          existingExtensions?.find((ext) => ext.url === SERVICE_REQUEST_SENT_FOR_FINAL_READ_BY_EXTENSION_URL)
+            ?.valueReference?.display ?? '',
         date: needsFinalReadExtensionValue,
       });
     }
@@ -419,7 +507,8 @@ const buildHistory = (
   if (bestDiagnosticReport) {
     history.push({
       status: RadiologyOrderStatus.final,
-      performer: '',
+      // Blank for teleradiology's reads, which arrive from AdvaPACS with no name we can show.
+      performer: getReportAuthor(bestDiagnosticReport)?.display ?? '',
       date: bestDiagnosticReport.issued || bestDiagnosticReport.meta?.lastUpdated || '',
     });
   }
@@ -438,43 +527,22 @@ const buildHistory = (
   return history;
 };
 
-const extractOrderDetailValue = (serviceRequest: ServiceRequest, code: string): string | undefined => {
-  const matchingExtension = serviceRequest.extension
-    ?.filter((ext) => ext.url === SERVICE_REQUEST_ORDER_DETAIL_PRE_RELEASE_URL)
-    ?.find((orderDetailExt) => {
-      const parameterExt = orderDetailExt.extension?.find(
-        (ext) => ext.url === SERVICE_REQUEST_ORDER_DETAIL_PARAMETER_PRE_RELEASE_URL
-      );
-      const codeExt = parameterExt?.extension?.find(
-        (ext) => ext.url === SERVICE_REQUEST_ORDER_DETAIL_PARAMETER_PRE_RELEASE_CODE_URL
-      );
-      return codeExt?.valueCodeableConcept?.coding?.[0]?.code === code;
-    });
-
-  const parameterExt = matchingExtension?.extension?.find(
-    (ext) => ext.url === SERVICE_REQUEST_ORDER_DETAIL_PARAMETER_PRE_RELEASE_URL
-  );
-  const valueStringExt = parameterExt?.extension?.find(
-    (ext) => ext.url === SERVICE_REQUEST_ORDER_DETAIL_PARAMETER_PRE_RELEASE_VALUE_STRING_URL
-  );
-
-  return valueStringExt?.valueString;
-};
-
 const extractResources = (
-  resources: (ServiceRequest | Task | Practitioner | DiagnosticReport | Encounter | Appointment)[]
+  resources: (ServiceRequest | Task | Practitioner | DiagnosticReport | Encounter | Appointment | DocumentReference)[]
 ): {
   serviceRequests: ServiceRequest[];
   tasks: Task[];
   diagnosticReports: DiagnosticReport[];
   practitioners: Practitioner[];
   encounters: Encounter[];
+  documentReferences: DocumentReference[];
 } => {
   const serviceRequests: ServiceRequest[] = [];
   const tasks: Task[] = [];
   const results: DiagnosticReport[] = [];
   const practitioners: Practitioner[] = [];
   const encounters: Encounter[] = [];
+  const documentReferences: DocumentReference[] = [];
 
   for (const resource of resources) {
     if (resource.resourceType === 'ServiceRequest') {
@@ -487,6 +555,8 @@ const extractResources = (
       practitioners.push(resource as Practitioner);
     } else if (resource.resourceType === 'Encounter') {
       encounters.push(resource as Encounter);
+    } else if (resource.resourceType === 'DocumentReference') {
+      documentReferences.push(resource as DocumentReference);
     }
   }
 
@@ -496,6 +566,7 @@ const extractResources = (
     diagnosticReports: results,
     practitioners,
     encounters,
+    documentReferences,
   };
 };
 

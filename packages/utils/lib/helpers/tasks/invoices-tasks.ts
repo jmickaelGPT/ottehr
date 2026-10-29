@@ -1,7 +1,14 @@
 import { Task, TaskInput } from 'fhir/r4b';
-import { RcmTaskCode } from '../../fhir';
+import { RcmTaskCode } from '../../fhir/constants';
 import { ottehrCodeSystemUrl } from '../../fhir/systemUrls';
-import { InvoiceTaskDisplayStatus, InvoiceTaskInput, InvoiceTaskInputSchema } from '../../types';
+import {
+  INVOICE_TASK_CLAIM_ID_IDENTIFIER_SYSTEM,
+  INVOICE_TASK_SOURCE_SYSTEM,
+  InvoiceTaskDisplayStatus,
+  InvoiceTaskInput,
+  InvoiceTaskInputSchema,
+  InvoiceTaskSource,
+} from '../../types/api/invoicing.types';
 
 export function createInvoiceTaskInput(input: InvoiceTaskInput): TaskInput[] {
   const fieldsNames = Object.keys(input);
@@ -49,6 +56,25 @@ function getInvoiceTaskInputFieldByCode(code: keyof InvoiceTaskInput, task: Task
   )?.valueString;
 }
 
+export function getInvoiceTaskSource(task: Pick<Task, 'meta'>): InvoiceTaskSource {
+  const code = task.meta?.tag?.find((tag) => tag.system === INVOICE_TASK_SOURCE_SYSTEM)?.code;
+  return code === 'ottehr-billing' ? 'ottehr-billing' : 'candid';
+}
+
+export function getInvoiceTaskClaimId(task: Pick<Task, 'identifier'>): string | undefined {
+  return task.identifier?.find((identifier) => identifier.system === INVOICE_TASK_CLAIM_ID_IDENTIFIER_SYSTEM)?.value;
+}
+
+export function invoiceTaskSourceSearchParam(
+  source: InvoiceTaskSource | undefined
+): { name: string; value: string } | undefined {
+  if (!source) return undefined;
+  return {
+    name: source === 'candid' ? '_tag:not' : '_tag',
+    value: `${INVOICE_TASK_SOURCE_SYSTEM}|ottehr-billing`,
+  };
+}
+
 export function mapInvoiceTaskStatusToDisplay(status: Task['status']): InvoiceTaskDisplayStatus {
   switch (status) {
     case 'ready':
@@ -82,11 +108,31 @@ export function mapDisplayToInvoiceTaskStatus(status: InvoiceTaskDisplayStatus):
 }
 
 export function getLatestTaskOutput(task: Task): { type: 'error' | 'success'; message?: string } | undefined {
-  const lastTaskOutput = task.output?.at(-1);
-  if (lastTaskOutput?.type?.coding?.find((coding) => coding.code === RcmTaskCode.sendInvoiceOutputInvoiceId)) {
-    return { type: 'success', message: lastTaskOutput.valueString };
-  } else if (lastTaskOutput?.type?.coding?.find((coding) => coding.code === RcmTaskCode.sendInvoiceOutputError)) {
-    return { type: 'error', message: lastTaskOutput.valueString };
+  const outputs = [...(task.output ?? [])].reverse();
+  for (const output of outputs) {
+    if (output.type?.coding?.find((c) => c.code === RcmTaskCode.sendInvoiceOutputInvoiceId)) {
+      return { type: 'success', message: output.valueString };
+    }
+    if (output.type?.coding?.find((c) => c.code === RcmTaskCode.sendInvoiceOutputError)) {
+      return { type: 'error', message: output.valueString };
+    }
   }
   return undefined;
+}
+
+export function getInvoiceTaskOutputs(task: Task): {
+  invoiceId?: string;
+  error?: string;
+  stripeInvoiceStatus?: string;
+} {
+  const outputs = task.output ?? [];
+  const reversed = outputs.slice().reverse();
+  const invoiceId = reversed.find((o) => o.type?.coding?.find((c) => c.code === RcmTaskCode.sendInvoiceOutputInvoiceId))
+    ?.valueString;
+  const error = reversed.find((o) => o.type?.coding?.find((c) => c.code === RcmTaskCode.sendInvoiceOutputError))
+    ?.valueString;
+  const stripeInvoiceStatus = reversed.find(
+    (o) => o.type?.coding?.find((c) => c.code === RcmTaskCode.stripeInvoiceStatus)
+  )?.valueString;
+  return { invoiceId, error, stripeInvoiceStatus };
 }

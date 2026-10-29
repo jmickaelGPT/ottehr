@@ -15,34 +15,35 @@ import {
 } from '@mui/material';
 import Oystehr from '@oystehr/sdk';
 import { useQuery } from '@tanstack/react-query';
-import { Location, Schedule, Slot } from 'fhir/r4b';
+import type { ServiceCategoryConfig } from 'config-types/config/booking';
+import { VisitType } from 'config-types/config/booking';
+import { Location, Patient, Schedule, Slot } from 'fhir/r4b';
 import { DateTime } from 'luxon';
 import { enqueueSnackbar } from 'notistack';
 import { useEffect, useMemo, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import type { FollowupPrefill } from 'src/features/visits/shared/components/patient/followupPrefill';
 import { useCopyChartDataToFollowup } from 'src/features/visits/shared/components/patient/useCopyChartDataToFollowup';
 import { AddVisitPatientInformationCard } from 'src/features/visits/shared/components/staff-add-visit/AddVisitPatientInformationCard';
 import { useReasonForVisitOptions } from 'src/features/visits/shared/hooks/useReasonForVisitOptions';
+import { serviceCategorySupportsContext } from 'utils/lib/config-helpers/booking';
+import { SERVICE_CATEGORY_SYSTEM, SLUG_SYSTEM } from 'utils/lib/fhir/constants';
+import { SCHEDULED_FOLLOWUP_OTHER_REASON, SCHEDULED_FOLLOWUP_REASONS } from 'utils/lib/fhir/encounter';
+import { getFirstName, getLastName, getMiddleName } from 'utils/lib/fhir/patient';
+import { getPhoneNumberDigits } from 'utils/lib/helpers/helpers';
+import { BOOKING_CONFIG } from 'utils/lib/ottehr-config/booking';
 import {
-  APIError,
-  BOOKING_CONFIG,
   CopyableFollowupField,
   CreateAppointmentInputParams,
   CreateSlotParams,
   FollowUpOptions,
-  getAppointmentDurationFromSlot,
-  GetScheduleRequestParams,
-  GetScheduleResponse,
-  getTimezone,
-  isApiError,
-  PatientInfo,
-  SCHEDULED_FOLLOWUP_OTHER_REASON,
-  SCHEDULED_FOLLOWUP_REASONS,
-  ScheduleType,
-  ServiceMode,
-  SLUG_SYSTEM,
-} from 'utils';
-import { createAppointment, createSlot, getLocations, listServiceCategories } from '../api/api';
+} from 'utils/lib/types/api/prebook-create-appointment/prebook-create-appointment.types';
+import { ScheduleType, ServiceMode, ServiceVisitType } from 'utils/lib/types/common';
+import { GetScheduleRequestParams, GetScheduleResponse } from 'utils/lib/types/data/get-schedule.types';
+import { PatientInfo } from 'utils/lib/types/data/telemed/appointments/create-appointment.types';
+import { APIError, isApiError } from 'utils/lib/types/errors';
+import { getAppointmentDurationFromSlot, getTimezone } from 'utils/lib/utils/scheduleUtils';
+import { createAppointment, createPatient, createSlot, getLocations, listServiceCategories } from '../api/api';
 import BookableSelect, { BookableMode, BookableTarget } from '../components/BookableSelect';
 import CustomBreadcrumbs from '../components/CustomBreadcrumbs';
 import { CustomDialog } from '../components/dialogs/CustomDialog';
@@ -90,14 +91,24 @@ export interface LocationWithWalkinSchedule extends Location {
 const defaultServiceCategory =
   BOOKING_CONFIG.serviceCategories.length === 1 ? BOOKING_CONFIG.serviceCategories[0]?.category.code : '';
 
-// todo: this lives in the util folder and is redundantly declared here - should be consolidated
-enum VisitType {
-  InPersonWalkIn = 'in-person-walk-in',
-  InPersonPreBook = 'in-person-pre-booked',
-  InPersonPostTelemed = 'in-person-post-telemed',
-  VirtualOnDemand = 'virtual-on-demand',
-  VirtualScheduled = 'virtual-scheduled',
-}
+// Maps each visit type to the (mode, visit-context) pair we use to filter the
+// service-category dropdown via serviceCategorySupportsContext. The patient-
+// side picker uses the same helper, so a category that shows on patient flows
+// for (in-person, prebook) will show in the EHR Add Visit form for the same
+// visit type, keeping staff and patient views in sync.
+//
+// PostTelemed deliberately leaves `visitCtx` undefined. It's an in-person
+// follow-up to a virtual visit — neither 'prebook' nor 'walk-in' cleanly
+// applies, and a strict prebook filter would silently exclude walk-in-only
+// categories that staff still need to reach in this back-conversion flow.
+// Mode is still enforced (always in-person).
+const visitTypeContext: Record<VisitType, { mode: ServiceMode; visitCtx: ServiceVisitType | undefined }> = {
+  [VisitType.InPersonWalkIn]: { mode: ServiceMode['in-person'], visitCtx: ServiceVisitType['walk-in'] },
+  [VisitType.InPersonPreBook]: { mode: ServiceMode['in-person'], visitCtx: ServiceVisitType.prebook },
+  [VisitType.InPersonPostTelemed]: { mode: ServiceMode['in-person'], visitCtx: undefined },
+  [VisitType.VirtualOnDemand]: { mode: ServiceMode.virtual, visitCtx: ServiceVisitType['walk-in'] },
+  [VisitType.VirtualScheduled]: { mode: ServiceMode.virtual, visitCtx: ServiceVisitType.prebook },
+};
 
 export const getPostAppointmentSnackbar = ({
   hasClientCopyFailures,
@@ -120,8 +131,15 @@ export const getPostAppointmentSnackbar = ({
   return { message: 'Visit added successfully', variant: 'success' };
 };
 
-export default function AddPatient(): JSX.Element {
+interface AddPatientProps {
+  // creates only the patient, without visit fields
+  patientOnly?: boolean;
+}
+
+export default function AddPatient({ patientOnly = false }: AddPatientProps): JSX.Element {
   const location = useLocation();
+  const [searchParams] = useSearchParams();
+  const patientIdFromUrl = searchParams.get('patientId') ?? undefined;
   const followUpState = location.state as
     | {
         followUpOptions?: FollowUpOptions;
@@ -129,6 +147,7 @@ export default function AddPatient(): JSX.Element {
         patientId?: string;
         patientInfo?: AddVisitPatientInfo;
         clientCopyFields?: CopyableFollowupField[];
+        prefill?: FollowupPrefill;
       }
     | undefined;
   const followUpOptions = followUpState?.followUpOptions;
@@ -160,8 +179,12 @@ export default function AddPatient(): JSX.Element {
   // Scheduled follow-ups pick a reason from SCHEDULED_FOLLOWUP_REASONS; "Other" reveals this free text.
   const [otherReason, setOtherReason] = useState<string>('');
   const [reasonForVisitAdditional, setReasonForVisitAdditional] = useState<string>('');
-  const [visitType, setVisitType] = useState<VisitType>();
-  const [serviceCategory, setServiceCategory] = useState<string>(defaultServiceCategory);
+  // Follow-ups open with the parent visit's type and service already selected; both
+  // controls stay enabled so the provider can change either before submitting.
+  const [visitType, setVisitType] = useState<VisitType | undefined>(followUpState?.prefill?.visitType);
+  const [serviceCategory, setServiceCategory] = useState<string>(
+    followUpState?.prefill?.serviceCategoryCode ?? defaultServiceCategory
+  );
   const [slot, setSlot] = useState<Slot | undefined>();
   const [loading, setLoading] = useState<boolean>(false);
   const [errors, setErrors] = useState<AddVisitErrorState>({
@@ -184,7 +207,7 @@ export default function AddPatient(): JSX.Element {
   const [selectSlotDialogOpen, setSelectSlotDialogOpen] = useState<boolean>(false);
   const [validReasonForVisit, setValidReasonForVisit] = useState<boolean>(true);
   const [showFields, setShowFields] = useState<AddVisitFormState>(
-    isScheduledFollowUp ? 'existingPatientSelected' : 'initialPatientSearch'
+    isScheduledFollowUp || !!patientIdFromUrl ? 'existingPatientSelected' : 'initialPatientSearch'
   );
 
   useEffect(() => {
@@ -207,7 +230,30 @@ export default function AddPatient(): JSX.Element {
   }, [showFields, reasonForVisitOptions.length]);
   // general variables
   const navigate = useNavigate();
-  const { oystehrZambda } = useApiClients();
+  const { oystehr, oystehrZambda } = useApiClients();
+
+  const { data: patientFromUrl } = useQuery({
+    queryKey: ['add-visit-patient-prefill', patientIdFromUrl],
+    queryFn: () => oystehr!.fhir.get<Patient>({ resourceType: 'Patient', id: patientIdFromUrl! }),
+    enabled: !!oystehr && !!patientIdFromUrl,
+  });
+
+  useEffect(() => {
+    if (!patientFromUrl) return;
+    setPatientInfo({
+      id: patientFromUrl.id,
+      newPatient: false,
+      firstName: getFirstName(patientFromUrl),
+      middleName: getMiddleName(patientFromUrl),
+      lastName: getLastName(patientFromUrl),
+      dateOfBirth: patientFromUrl.birthDate,
+      sex: patientFromUrl.gender,
+      phoneNumber: getPhoneNumberDigits(patientFromUrl.telecom?.find((t) => t.system === 'phone')?.value),
+    });
+    setBirthDate(patientFromUrl.birthDate ? DateTime.fromISO(patientFromUrl.birthDate) : null);
+    setShowFields('existingPatientSelected');
+  }, [patientFromUrl]);
+
   const copyChartDataToFollowupMutation = useCopyChartDataToFollowup();
   const reasonForVisitErrorMessage = `Input cannot be more than ${MAXIMUM_CHARACTER_LIMIT} characters`;
 
@@ -216,7 +262,7 @@ export default function AddPatient(): JSX.Element {
   // FHIR-managed admin-created services so categories created in Admin →
   // Services (e.g., massage30/45/90) appear here too. BOOKING_CONFIG wins on
   // code collisions, matching the patient-side useServiceCategories merge.
-  const { data: fhirServiceCategories } = useQuery({
+  const { data: fhirServiceCategories, isFetched: isCatalogLoaded } = useQuery({
     queryKey: ['add-patient-service-categories'],
     queryFn: async () => {
       if (!oystehrZambda) return { serviceCategories: [] };
@@ -228,25 +274,165 @@ export default function AddPatient(): JSX.Element {
     },
     enabled: !!oystehrZambda,
   });
-  const mergedServiceCategories = useMemo(() => {
+  // Merge the compiled-in BOOKING_CONFIG entries with admin-managed FHIR
+  // records, keeping the full ServiceCategoryConfig shape (plus `source`) so
+  // the dropdown can filter via serviceCategorySupportsContext below. Same
+  // BOOKING_CONFIG-wins-on-code-collision rule as the patient-side merge.
+  const mergedSourcedCategories = useMemo<
+    Array<ServiceCategoryConfig & { source: 'booking-config' | 'fhir'; fhirId?: string }>
+  >(() => {
     const fhirRecords = fhirServiceCategories?.serviceCategories ?? [];
     const bookingCodes = new Set(
       BOOKING_CONFIG.serviceCategories.map((sc) => sc.category.code).filter((c): c is string => !!c)
     );
+    const bookingEntries = BOOKING_CONFIG.serviceCategories.map((sc) => ({ ...sc, source: 'booking-config' as const }));
     const fhirOnly = fhirRecords
       .filter((r) => r.active !== false && r.code && !bookingCodes.has(r.code))
-      .map((r) => ({ code: r.code as string, display: r.name }));
-    const bookingEntries = BOOKING_CONFIG.serviceCategories.map((sc) => ({
-      code: sc.category.code as string,
-      display: sc.category.display ?? sc.category.code ?? '',
-    }));
-    return [...bookingEntries, ...fhirOnly].sort((a, b) => a.display.localeCompare(b.display));
+      .map((r) => ({
+        // StrongCoding requires a non-empty system. SERVICE_CATEGORY_SYSTEM
+        // is what BOOKING_CONFIG entries use and what the Slot/Schedule
+        // category readers look for downstream — keep FHIR-sourced entries
+        // on the same system so any future consumer that filters codings by
+        // system (the BookableSelect schedule filter does exactly this) sees
+        // both sources uniformly.
+        category: { code: r.code as string, display: r.name, system: SERVICE_CATEGORY_SYSTEM },
+        serviceModes: r.config.serviceModes,
+        visitTypes: r.config.visitTypes,
+        reasonsForVisit: { default: r.config.reasonsForVisit ?? [] },
+        source: 'fhir' as const,
+        // Preserve the FHIR HealthcareService id. The BookableSelect
+        // resolver hands it to `practitionerRoleOffersCategory` so Group
+        // and PR-direct tiers can answer "does this PR offer the picked
+        // FHIR category" via the authoritative per-PR opt-in
+        // (`role.healthcareService[]`). Without it, FHIR categories can
+        // only admit Locations via the Location-Schedule tier — Locations
+        // whose only relevant availability is provider-direct or Group-
+        // routed would silently disappear from the picker.
+        fhirId: r.id,
+      }));
+    return [...bookingEntries, ...fhirOnly];
   }, [fhirServiceCategories]);
-  // When a bookable target is later selected, a v2 enhancement could narrow
-  // this list further to the target's offered services. For now (v1) we show
-  // the merged catalog — the slot picker will return no slots if the wrong
-  // category is picked for the chosen target, which is a recoverable state.
-  const filteredServiceCategories = mergedServiceCategories;
+
+  // Resolved descriptor for the picked category — code + FHIR id (if
+  // FHIR-sourced) — passed to BookableSelect so the resolver can branch
+  // BOOKING_CONFIG (Location-Schedule with empty-supports-all back-compat)
+  // vs FHIR (strict per-tier opt-in via Schedule tagging or
+  // practitionerRoleOffersCategory).
+  const pickedCategoryFhirId = useMemo<string | undefined>(() => {
+    if (!serviceCategory) return undefined;
+    return mergedSourcedCategories.find((sc) => sc.source === 'fhir' && sc.category.code === serviceCategory)?.fhirId;
+  }, [mergedSourcedCategories, serviceCategory]);
+  // Filter the category dropdown by the selected visit type's (mode,
+  // visit-context) pair so staff can't pick a category that the chosen visit
+  // type doesn't support. Shares the helper with the patient-side picker, so
+  // both sides admit the same set for the same (mode, visit-context). With
+  // no visit type selected we show the full merged catalog.
+  const filteredServiceCategories = useMemo(() => {
+    const source = visitType ? visitTypeContext[visitType] : undefined;
+    const matches = source
+      ? mergedSourcedCategories.filter((sc) => serviceCategorySupportsContext(sc, source.mode, source.visitCtx))
+      : mergedSourcedCategories;
+    return matches
+      .map((sc) => ({
+        code: sc.category.code as string,
+        display: sc.category.display ?? sc.category.code ?? '',
+      }))
+      .sort((a, b) => a.display.localeCompare(b.display));
+  }, [mergedSourcedCategories, visitType]);
+
+  // Symmetric filter on the visit-type dropdown: when a service category is
+  // picked first, only offer visit types the category actually supports. This
+  // is what makes the "pick service first, then modality" flow discoverable,
+  // and — combined with the invalidation effects below — prevents the form
+  // from silently swapping the user's service pick when they later change
+  // visit type. With no service category picked (or one we can't find in the
+  // merged catalog) we fall back to the full option list.
+  const filteredVisitTypes = useMemo(() => {
+    const picked = serviceCategory
+      ? mergedSourcedCategories.find((sc) => sc.category.code === serviceCategory)
+      : undefined;
+    if (!picked) return BOOKING_CONFIG.ehrBookingOptions;
+    return BOOKING_CONFIG.ehrBookingOptions.filter((opt) => {
+      const ctx = visitTypeContext[opt.id as VisitType];
+      if (!ctx) return true;
+      return serviceCategorySupportsContext(picked, ctx.mode, ctx.visitCtx);
+    });
+  }, [mergedSourcedCategories, serviceCategory]);
+
+  // The picker is locked when the merged catalog has exactly one entry —
+  // there's nothing to choose between, so we disable the Select and let the
+  // auto-select effect below pin the pick to that entry. Merged, not
+  // BOOKING_CONFIG-only: a project with one compiled-in category plus
+  // admin-created FHIR services must let staff pick between them.
+  //
+  // Deliberately NOT locking when the merged catalog is empty. A disabled
+  // empty picker paired with a required serviceCategory would strand the
+  // form in an unrecoverable state (nothing to select, nothing to submit).
+  // Leaving it enabled surfaces the empty-state helper below and the
+  // standard required-field validation on submit, which at least
+  // communicates that something is wrong. In practice merged.length===0
+  // means both BOOKING_CONFIG is empty AND the FHIR query returned nothing
+  // or failed — a config/environment bug rather than normal operation.
+  const isPickerLocked = mergedSourcedCategories.length === 1;
+  // The merged catalog only speaks for itself once the FHIR half has settled. Before
+  // that, an absent code means "not loaded yet", not "not offered" — which is why both
+  // the empty-state message and the stale-selection cleanup below wait on it.
+  const isPickerEmpty = mergedSourcedCategories.length === 0 && isCatalogLoaded;
+
+  // When the merged catalog resolves to exactly one entry, force the pick to
+  // that entry's code. Covers two shapes that would otherwise strand the
+  // form: (a) BOOKING_CONFIG is empty and the sole option arrives via FHIR —
+  // without this the form renders with no selection; (b) the current pick is
+  // no longer in the merged catalog (e.g., an admin deleted the FHIR service
+  // after the user selected it), and the picker is now locked so the cleanup
+  // effect below skips — nothing else can rescue the stale selection.
+  //
+  // Waits on isCatalogLoaded for the same reason the cleanup effect below does: while
+  // the FHIR half is pending, a project with a single BOOKING_CONFIG service reports
+  // length === 1 and this effect would overwrite a follow-up's seeded admin-created
+  // code with that lone entry — and nothing restores it once the real catalog lands.
+  useEffect(() => {
+    if (!isCatalogLoaded || mergedSourcedCategories.length !== 1) return;
+    const only = mergedSourcedCategories[0]?.category.code;
+    if (only && serviceCategory !== only) setServiceCategory(only);
+  }, [mergedSourcedCategories, serviceCategory, isCatalogLoaded]);
+
+  // When visit type changes, drop a stale category that's no longer offered.
+  // Keep the selection if it's still valid (avoid yanking the user's choice
+  // when they switch between two visit types that share a category). When
+  // the selection becomes invalid, CLEAR it rather than substituting the
+  // first remaining option — silently swapping the user's service pick was
+  // the confusing behavior reported in OTR-2721 (pick "Crystal Therapy",
+  // pick In-person walk-in → service jumps to "Acne Facial"). Clearing
+  // forces a re-pick and makes the constraint visible.
+  //
+  // Skip when the picker is locked: the single available entry is the pick
+  // and the dropdown is disabled — clearing would strand the form in an
+  // invalid state the user can't recover from. That single entry gets the
+  // empty-arrays-supports-all pass anyway when it's a BOOKING_CONFIG entry,
+  // so it won't be filtered out in practice.
+  // Skip while the catalog is still loading, too: a follow-up seeds the parent visit's
+  // category up front, and an admin-created (FHIR-sourced) code isn't in the merged list
+  // until that query resolves — clearing it here would silently discard the prefill.
+  useEffect(() => {
+    if (!serviceCategory || isPickerLocked || !isCatalogLoaded) return;
+    if (!filteredServiceCategories.some((sc) => sc.code === serviceCategory)) {
+      setServiceCategory('');
+    }
+  }, [filteredServiceCategories, serviceCategory, isPickerLocked, isCatalogLoaded]);
+
+  // Mirror of the effect above: when the service-category pick makes the
+  // current visit type unsupported, clear the visit type (and any slot tied
+  // to it). Together these guarantee the form never silently swaps one of
+  // the two anchor selections in response to a change in the other — the
+  // invalidated selection is cleared, and the user re-picks.
+  useEffect(() => {
+    if (!visitType) return;
+    if (!filteredVisitTypes.some((opt) => opt.id === visitType)) {
+      setVisitType(undefined);
+      setSlot(undefined);
+    }
+  }, [filteredVisitTypes, visitType]);
 
   const handleAdditionalReasonForVisitChange = (newValue: string): void => {
     setValidReasonForVisit(newValue.length <= MAXIMUM_CHARACTER_LIMIT);
@@ -264,7 +450,9 @@ export default function AddPatient(): JSX.Element {
       } finally {
         setLoadingSlotState({
           status: 'loaded',
-          input: `${params.slug}|${params.scheduleType}|${params.serviceCategoryCode ?? ''}`,
+          input: `${params.slug}|${params.scheduleType}|${params.serviceCategoryCode ?? ''}|${
+            params.atLocationSlug ?? ''
+          }`,
         });
       }
     };
@@ -280,12 +468,23 @@ export default function AddPatient(): JSX.Element {
     // For groups, the picked service category is required so the slot grid
     // reflects the right service's duration/cadence. For locations and
     // PR-direct (typically single-service), it's optional.
+    //
+    // atLocationSlug is set on Group / PR sub-options surfaced under a
+    // Location by BookableSelect's per-Location resolver. Passing it here
+    // narrows get-schedule to slots at that Location — without it, a
+    // Group whose members span multiple Locations returns the empty-
+    // slots + pickableLocations envelope (interpreted downstream as "no
+    // slots available"). For Location-tier targets it's undefined; the
+    // scheduleType=location flow already narrows by the Location slug.
     const params: GetScheduleRequestParams = {
       slug: selectedBookable.slug,
       scheduleType,
       ...(serviceCategory ? { serviceCategoryCode: serviceCategory as any } : {}),
+      ...(selectedBookable.atLocationSlug ? { atLocationSlug: selectedBookable.atLocationSlug } : {}),
     };
-    const key = `${params.slug}|${params.scheduleType}|${params.serviceCategoryCode ?? ''}`;
+    const key = `${params.slug}|${params.scheduleType}|${params.serviceCategoryCode ?? ''}|${
+      params.atLocationSlug ?? ''
+    }`;
 
     if (
       loadingSlotState.status === 'loading' ||
@@ -304,25 +503,67 @@ export default function AddPatient(): JSX.Element {
       return;
     }
 
+    if (patientOnly && patientInfo.id) {
+      navigate(`/patient/${patientInfo.id}`);
+      return;
+    }
+
     const validations: Array<{ invalid: boolean; field: keyof AddVisitErrorState }> = [
       // first name, last name, and phone are empty strings when untouched
       { field: 'firstName', invalid: patientInfo.firstName != null && patientInfo.firstName.length === 0 },
       { field: 'lastName', invalid: patientInfo.lastName != null && patientInfo.lastName.length === 0 },
-      { field: 'phone', invalid: patientInfo.phoneNumber != null && patientInfo.phoneNumber.length !== 10 },
+      {
+        field: 'phone',
+        invalid: patientInfo.phoneNumber != null && getPhoneNumberDigits(patientInfo.phoneNumber) == null,
+      },
       {
         field: 'dateOfBirth',
         invalid: patientInfo.newPatient ? !birthDate : !patientInfo.dateOfBirth,
       },
       { field: 'sexAtBirth', invalid: !patientInfo.sex },
-      { field: 'visitType', invalid: !visitType },
-      { field: 'serviceCategory', invalid: !serviceCategory },
-      { field: 'location', invalid: !!visitType && !selectedBookable },
-      { field: 'reasonForVisit', invalid: shouldShowReasonForVisitFields && !reasonForVisit },
-      { field: 'otherReason', invalid: isOtherFollowUpReason && !otherReason.trim() },
+      { field: 'visitType', invalid: !patientOnly && !visitType },
+      { field: 'serviceCategory', invalid: !patientOnly && !serviceCategory },
+      { field: 'location', invalid: !patientOnly && !!visitType && !selectedBookable },
+      { field: 'reasonForVisit', invalid: !patientOnly && shouldShowReasonForVisitFields && !reasonForVisit },
+      { field: 'otherReason', invalid: !patientOnly && isOtherFollowUpReason && !otherReason.trim() },
     ];
     const fieldErrors = Object.fromEntries(validations.map((v) => [v.field, v.invalid]));
     setErrors((prev) => ({ ...prev, ...fieldErrors }));
     if (validations.some((v) => v.invalid)) {
+      return;
+    }
+
+    if (patientOnly) {
+      if (showFields.includes('PatientSearch')) {
+        setErrors({ search: true });
+        return;
+      }
+      if (!validDate) return;
+      if (!oystehrZambda) throw new Error('Zambda client not found');
+      setLoading(true);
+      try {
+        const { patientId } = await createPatient(oystehrZambda, {
+          patient: {
+            firstName: patientInfo.firstName,
+            middleName: patientInfo.middleName,
+            lastName: patientInfo.lastName,
+            dateOfBirth: patientInfo.dateOfBirth || birthDate?.toISODate() || undefined,
+            sex: patientInfo.sex,
+            phoneNumber: patientInfo.phoneNumber,
+          },
+        });
+        enqueueSnackbar('Patient added', { variant: 'success' });
+        navigate(`/patient/${patientId}/info`);
+      } catch (error) {
+        console.error(`Failed to add patient: ${error}`);
+        const errorMessage = isApiError(error)
+          ? (error as APIError).message
+          : 'An unexpected error occurred, please try again.';
+        enqueueSnackbar(errorMessage, { variant: 'error' });
+        setErrors({ submit: true });
+      } finally {
+        setLoading(false);
+      }
       return;
     }
 
@@ -475,10 +716,17 @@ export default function AddPatient(): JSX.Element {
         <Grid item xs={3.5} />
         <Grid item xs={5}>
           <CustomBreadcrumbs
-            chain={[
-              { link: '/visits', children: 'Tracking Board' },
-              { link: '#', children: isScheduledFollowUp ? 'Add Scheduled Follow-up' : 'Add Visit' },
-            ]}
+            chain={
+              patientOnly
+                ? [
+                    { link: '/patients', children: 'Patients' },
+                    { link: '#', children: 'Add Patient' },
+                  ]
+                : [
+                    { link: '/visits', children: 'Tracking Board' },
+                    { link: '#', children: isScheduledFollowUp ? 'Add Scheduled Follow-up' : 'Add Visit' },
+                  ]
+            }
           />
 
           {/* page title */}
@@ -489,86 +737,115 @@ export default function AddPatient(): JSX.Element {
             color={'primary.dark'}
             data-testid={dataTestIds.addPatientPage.pageTitle}
           >
-            {isScheduledFollowUp ? 'Add Scheduled Follow-up Visit' : 'Add Visit'}
+            {patientOnly ? 'Add Patient' : isScheduledFollowUp ? 'Add Scheduled Follow-up Visit' : 'Add Visit'}
           </Typography>
 
           {/* form content */}
           <Paper>
             <form noValidate onSubmit={(e) => handleFormSubmit(e)}>
               <Stack spacing={2} padding={4}>
-                <FormControl fullWidth error={!!errors.visitType}>
-                  <InputLabel id="visit-type-label">Visit type *</InputLabel>
-                  <Select
-                    data-testid={dataTestIds.addPatientPage.visitTypeDropdown}
-                    labelId="visit-type-label"
-                    id="visit-type-select"
-                    value={visitType || ''}
-                    label="Visit type *"
-                    required
-                    onChange={(event) => {
-                      setSlot(undefined);
-                      setVisitType(event.target.value as VisitType);
-                    }}
-                  >
-                    {BOOKING_CONFIG.ehrBookingOptions.map((option) => (
-                      <MenuItem value={option.id} key={option.id}>
-                        {option.label}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                  {errors.visitType && <FormHelperText>Visit type is required</FormHelperText>}
-                </FormControl>
+                {!patientOnly && (
+                  <>
+                    <FormControl fullWidth error={!!errors.visitType}>
+                      <InputLabel id="visit-type-label">Visit type *</InputLabel>
+                      <Select
+                        data-testid={dataTestIds.addPatientPage.visitTypeDropdown}
+                        labelId="visit-type-label"
+                        id="visit-type-select"
+                        value={visitType || ''}
+                        label="Visit type *"
+                        required
+                        onChange={(event) => {
+                          setSlot(undefined);
+                          setVisitType(event.target.value as VisitType);
+                        }}
+                      >
+                        {filteredVisitTypes.map((option) => (
+                          <MenuItem value={option.id} key={option.id}>
+                            {option.label}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                      {errors.visitType && <FormHelperText>Visit type is required</FormHelperText>}
+                    </FormControl>
 
-                <FormControl fullWidth error={!!errors.serviceCategory}>
-                  <InputLabel id="service-category-label">Service category *</InputLabel>
-                  <Select
-                    data-testid={dataTestIds.addPatientPage.serviceCategoryDropdown}
-                    labelId="service-category-label"
-                    id="service-category-select"
-                    value={serviceCategory || ''}
-                    label="Service category *"
-                    required
-                    disabled={defaultServiceCategory !== ''}
-                    onChange={(event) => {
-                      setServiceCategory(event.target.value);
-                    }}
-                  >
-                    {filteredServiceCategories.map((sc) => (
-                      <MenuItem value={sc.code} key={sc.code}>
-                        {sc.display}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                  {errors.serviceCategory && <FormHelperText>Service category is required</FormHelperText>}
-                </FormControl>
+                    <FormControl fullWidth error={!!errors.serviceCategory || isPickerEmpty}>
+                      <InputLabel id="service-category-label">Service *</InputLabel>
+                      <Select
+                        data-testid={dataTestIds.addPatientPage.serviceCategoryDropdown}
+                        labelId="service-category-label"
+                        id="service-category-select"
+                        value={serviceCategory || ''}
+                        label="Service *"
+                        required
+                        disabled={isPickerLocked}
+                        onChange={(event) => {
+                          setServiceCategory(event.target.value);
+                        }}
+                      >
+                        {filteredServiceCategories.map((sc) => (
+                          <MenuItem value={sc.code} key={sc.code}>
+                            {sc.display}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                      {isPickerEmpty ? (
+                        <FormHelperText>No services available — contact an administrator.</FormHelperText>
+                      ) : (
+                        errors.serviceCategory && <FormHelperText>Service is required</FormHelperText>
+                      )}
+                    </FormControl>
 
-                <BookableSelect
-                  dataTestId={dataTestIds.addPatientPage.bookableSelect}
-                  selected={selectedBookable}
-                  setSelected={(target) => {
-                    setSelectedBookable(target);
-                    // Reset slot when the target changes so we don't try to
-                    // book a slot belonging to a previously-picked target.
-                    setSlot(undefined);
-                    setLoadingSlotState({ status: 'initial', input: undefined });
-                  }}
-                  required
-                  disabled={!visitType}
-                  mode={
-                    visitType === VisitType.InPersonWalkIn ||
-                    visitType === VisitType.InPersonPreBook ||
-                    visitType === VisitType.InPersonPostTelemed
-                      ? [BookableMode.IN_PERSON]
-                      : [BookableMode.VIRTUAL]
-                  }
-                  onLocationsLoaded={() => {
-                    // Side-load not strictly required by the new flow but kept
-                    // so existing callers that consumed setLocations stay
-                    // unaffected if they're added later.
-                  }}
-                  error={!!errors.location}
-                  helperText="Location is required"
-                />
+                    <BookableSelect
+                      dataTestId={dataTestIds.addPatientPage.bookableSelect}
+                      selected={selectedBookable}
+                      setSelected={(target) => {
+                        setSelectedBookable(target);
+                        // Reset slot when the target changes so we don't try to
+                        // book a slot belonging to a previously-picked target.
+                        setSlot(undefined);
+                        setLoadingSlotState({ status: 'initial', input: undefined });
+                      }}
+                      required
+                      disabled={!visitType}
+                      mode={
+                        visitType === VisitType.InPersonWalkIn ||
+                        visitType === VisitType.InPersonPreBook ||
+                        visitType === VisitType.InPersonPostTelemed
+                          ? [BookableMode.IN_PERSON]
+                          : [BookableMode.VIRTUAL]
+                      }
+                      // Location-rooted resolver mode: every option is anchored
+                      // to a Location (staff pick "the physical place"), but the
+                      // resolved target may be the Location itself OR a
+                      // Group/PR-direct surface at that Location that fulfills
+                      // the picked FHIR service. When a Location's own Schedule
+                      // covers the category, it's returned as-is; otherwise the
+                      // picker surfaces sub-options for the Group(s) / PR(s) at
+                      // the Location that offer the service. `selected.resourceType`
+                      // therefore isn't always 'Location' — the create-slot /
+                      // slot-loader downstream key off `resourceType` +
+                      // `atLocationSlug` to route to the right bookable surface.
+                      // See BookableSelect's `resourceTypes` prop docblock for
+                      // the full contract.
+                      resourceTypes={['Location']}
+                      serviceCategoryCode={serviceCategory || undefined}
+                      serviceCategoryFhirId={pickedCategoryFhirId}
+                      // Until the merged catalog resolves, an admin-created (FHIR) code has
+                      // no `pickedCategoryFhirId`, and without that id the resolver can't
+                      // admit the Group/PR tiers — a parent-seeded location would look
+                      // unsupported and be dropped before the id ever arrives.
+                      categoryFiltersReady={isCatalogLoaded}
+                      onLocationsLoaded={() => {
+                        // Side-load not strictly required by the new flow but kept
+                        // so existing callers that consumed setLocations stay
+                        // unaffected if they're added later.
+                      }}
+                      error={!!errors.location}
+                      helperText="Location is required"
+                    />
+                  </>
+                )}
 
                 {!isScheduledFollowUp && (
                   <AddVisitPatientInformationCard
@@ -590,20 +867,20 @@ export default function AddPatient(): JSX.Element {
                 )}
 
                 {/* Visit Information */}
-                {shouldShowReasonForVisitFields && (
+                {shouldShowReasonForVisitFields && !patientOnly && (
                   <Box marginTop={4}>
                     <Typography variant="h4" color="primary.dark">
                       Visit information
                     </Typography>
                     <Box marginTop={2}>
                       <FormControl fullWidth error={!!errors.reasonForVisit}>
-                        <InputLabel id="reason-for-visit-label">Reason for visit *</InputLabel>
+                        <InputLabel id="reason-for-visit-label">Reason for today's visit *</InputLabel>
                         <Select
                           data-testid={dataTestIds.addPatientPage.reasonForVisitDropdown}
                           labelId="reason-for-visit-label"
                           id="reason-for-visit-select"
                           value={reasonForVisit || ''}
-                          label="Reason for visit *"
+                          label="Reason for today's visit *"
                           required
                           onChange={(event) => {
                             setReasonForVisit(event.target.value);
@@ -618,7 +895,7 @@ export default function AddPatient(): JSX.Element {
                             </MenuItem>
                           ))}
                         </Select>
-                        {errors.reasonForVisit && <FormHelperText>Reason for visit is required</FormHelperText>}
+                        {errors.reasonForVisit && <FormHelperText>Reason for today's visit is required</FormHelperText>}
                       </FormControl>
                     </Box>
                     {isOtherFollowUpReason && (
@@ -715,7 +992,7 @@ export default function AddPatient(): JSX.Element {
                       marginRight: 1,
                     }}
                   >
-                    Add {visitType}
+                    {patientOnly ? patientInfo?.id ? 'Open patient record' : 'Add patient' : <>Add {visitType}</>}
                   </LoadingButton>
                   <Button
                     data-testid={dataTestIds.addPatientPage.cancelButton}
@@ -725,7 +1002,7 @@ export default function AddPatient(): JSX.Element {
                       fontWeight: 600,
                     }}
                     onClick={() => {
-                      navigate('/visits');
+                      navigate(patientOnly ? '/patients' : '/visits');
                     }}
                   >
                     Cancel

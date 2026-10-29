@@ -1,32 +1,29 @@
 import Oystehr from '@oystehr/sdk';
-import { isValidUUID, PaymentMethodDeleteParameters, Secrets } from 'utils';
-import { ZambdaInput } from '../../../shared';
+import { Secrets } from 'utils/lib/secrets';
+import { PaymentMethodDeleteParameters } from 'utils/lib/types/data/payment/payment-method-types';
+import { MISSING_REQUEST_BODY } from 'utils/lib/types/errors';
+import { z } from 'zod';
+import { ZambdaInput } from '../../../shared/types/common';
+import { safeJsonParse, safeValidate } from '../../../shared/validation';
 import { getStripeCustomerId } from '../helpers';
+
+const PaymentMethodDeleteBodySchema = z.object({
+  beneficiaryPatientId: z.string().min(1),
+  paymentMethodId: z.string().min(1),
+  appointmentId: z.string().uuid(),
+});
 
 export function validateRequestParameters(
   input: ZambdaInput
 ): PaymentMethodDeleteParameters & { secrets: Secrets | null } {
   if (!input.body) {
-    throw new Error('No request body provided');
+    throw MISSING_REQUEST_BODY;
   }
 
-  const { beneficiaryPatientId, paymentMethodId, appointmentId } = JSON.parse(input.body);
-
-  if (!beneficiaryPatientId) {
-    throw new Error('beneficiaryPatientId is not defined');
-  }
-
-  if (!paymentMethodId) {
-    throw new Error('paymentMethodId is not defined');
-  }
-
-  if (!appointmentId) {
-    throw new Error('appointmentId is not defined');
-  }
-
-  if (!isValidUUID(appointmentId)) {
-    throw new Error('appointmentId is not a valid UUID');
-  }
+  const { beneficiaryPatientId, paymentMethodId, appointmentId } = safeValidate(
+    PaymentMethodDeleteBodySchema,
+    safeJsonParse(input.body)
+  );
 
   return {
     beneficiaryPatientId,

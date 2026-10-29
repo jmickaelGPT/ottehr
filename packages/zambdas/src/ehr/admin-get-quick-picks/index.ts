@@ -1,13 +1,11 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { INVALID_INPUT_ERROR, QuickPickListInput, Secrets } from 'utils';
-import {
-  assertDefined,
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  validateJsonBody,
-  wrapHandler,
-  ZambdaInput,
-} from '../../shared';
+import { Secrets } from 'utils/lib/secrets';
+import { QuickPickListInput } from 'utils/lib/types/api/quick-picks.types';
+import { INVALID_INPUT_ERROR } from 'utils/lib/types/errors';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { assertDefined, createClinicalOystehrClient, validateJsonBody } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import {
   ALLERGY_QUICK_PICK_CATEGORY,
   IMMUNIZATION_QUICK_PICK_CATEGORY,
@@ -48,7 +46,7 @@ export const index = wrapHandler(
   async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
     const { secrets, category } = validateInput(input);
     m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-    const oystehr = createOystehrClient(m2mToken, secrets);
+    const oystehr = createClinicalOystehrClient(m2mToken, secrets);
     const quickPicks = await searchQuickPicks(oystehr, CATEGORY_MAP[category]);
     return {
       statusCode: 200,

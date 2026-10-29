@@ -1,4 +1,5 @@
-import { DEFAULT_PROGRESS_NOTE_CONFIG } from 'utils';
+import { SIGN_REVIEW_PROMPT_MAX_LENGTH } from 'utils/lib/types/api/progress-note-config/progress-note-config.types';
+import { DEFAULT_PROGRESS_NOTE_CONFIG } from 'utils/lib/utils/progress-note-config';
 import { describe, expect, test } from 'vitest';
 import { validateRequestParameters } from '../../../src/ehr/progress-note-config/admin-update-progress-note-config/validateRequestParameters';
 import { createMockSecrets, createMockZambdaInput } from './helpers';
@@ -52,5 +53,65 @@ describe('admin-update-progress-note-config - validateRequestParameters', () => 
       medicalDecisionDefaultText: '   ',
     });
     expect(() => validateRequestParameters(input)).toThrow('default text is required');
+  });
+
+  test('should return the provided vitalsUnitInputOrder', () => {
+    const input = createMockZambdaInput({
+      ...DEFAULT_PROGRESS_NOTE_CONFIG,
+      vitalsUnitInputOrder: 'imperial-metric',
+    });
+    const result = validateRequestParameters(input);
+    expect(result.vitalsUnitInputOrder).toBe('imperial-metric');
+  });
+
+  test('should default vitalsUnitInputOrder to metric-imperial when omitted (backward compatible)', () => {
+    const { vitalsUnitInputOrder: _vitalsUnitInputOrder, ...bodyWithoutOrder } = DEFAULT_PROGRESS_NOTE_CONFIG;
+    const input = createMockZambdaInput(bodyWithoutOrder);
+    const result = validateRequestParameters(input);
+    expect(result.vitalsUnitInputOrder).toBe('metric-imperial');
+  });
+
+  test('should throw when vitalsUnitInputOrder is not a valid option', () => {
+    const input = createMockZambdaInput({
+      ...DEFAULT_PROGRESS_NOTE_CONFIG,
+      vitalsUnitInputOrder: 'something-else',
+    });
+    expect(() => validateRequestParameters(input)).toThrow('vitalsUnitInputOrder');
+  });
+
+  test('should return the provided vitalsHeaderUnitSystem', () => {
+    const input = createMockZambdaInput({
+      ...DEFAULT_PROGRESS_NOTE_CONFIG,
+      vitalsHeaderUnitSystem: 'imperial',
+    });
+    expect(validateRequestParameters(input).vitalsHeaderUnitSystem).toBe('imperial');
+  });
+
+  test('should leave vitalsHeaderUnitSystem undefined when omitted, so the stored setting is left alone', () => {
+    const { vitalsHeaderUnitSystem: _vitalsHeaderUnitSystem, ...bodyWithoutHeaderUnits } = DEFAULT_PROGRESS_NOTE_CONFIG;
+    const input = createMockZambdaInput(bodyWithoutHeaderUnits);
+    expect(validateRequestParameters(input).vitalsHeaderUnitSystem).toBeUndefined();
+  });
+
+  test('should throw when vitalsHeaderUnitSystem is not a valid option', () => {
+    const input = createMockZambdaInput({
+      ...DEFAULT_PROGRESS_NOTE_CONFIG,
+      vitalsHeaderUnitSystem: 'cubits',
+    });
+    expect(() => validateRequestParameters(input)).toThrow('vitalsHeaderUnitSystem');
+  });
+
+  test('should leave signReviewPrompt undefined when omitted, so the stored prompt is left alone', () => {
+    const { signReviewPrompt: _signReviewPrompt, ...bodyWithoutPrompt } = DEFAULT_PROGRESS_NOTE_CONFIG;
+    const input = createMockZambdaInput(bodyWithoutPrompt);
+    expect(validateRequestParameters(input).signReviewPrompt).toBeUndefined();
+  });
+
+  test('should throw when signReviewPrompt exceeds the maximum length', () => {
+    const input = createMockZambdaInput({
+      ...DEFAULT_PROGRESS_NOTE_CONFIG,
+      signReviewPrompt: 'x'.repeat(SIGN_REVIEW_PROMPT_MAX_LENGTH + 1),
+    });
+    expect(() => validateRequestParameters(input)).toThrow('signReviewPrompt');
   });
 });

@@ -1,19 +1,20 @@
 import { BatchInputRequest } from '@oystehr/sdk';
-import { captureException } from '@sentry/aws-serverless';
+import { captureException } from '@sentry/node-core/light';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Operation } from 'fast-json-patch';
 import { DocumentReference, FhirResource, Provenance, ServiceRequest } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import {
-  EXTERNAL_LAB_ERROR,
-  externalLabOrderUsesFriendlyPatientId,
-  getPatchBinary,
-  getPatientFriendlyId,
-  MANUAL_EXTERNAL_LAB_ORDER_CATEGORY_CODING,
-  SubmitLabOrderOutput,
-  userMe,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../../shared';
+import { userMe } from 'utils/lib/auth/user-me.helper';
+import { getPatientFriendlyId } from 'utils/lib/fhir/patient';
+import { getPatchBinary } from 'utils/lib/fhir/resourcePatch';
+import { externalLabOrderUsesFriendlyPatientId } from 'utils/lib/helpers/labs/helpers';
+import { MANUAL_EXTERNAL_LAB_ORDER_CATEGORY_CODING } from 'utils/lib/types/data/labs/labs.constants';
+import { SubmitLabOrderOutput } from 'utils/lib/types/data/labs/labs.types';
+import { EXTERNAL_LAB_ERROR } from 'utils/lib/types/errors';
+import { checkOrCreateM2MClientToken } from '../../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../../shared/helpers';
+import { wrapHandler } from '../../../../shared/sentry';
+import { ZambdaInput } from '../../../../shared/types/common';
 import {
   getBundledOrderResources,
   makeOrderFormsAndDocRefs,
@@ -28,7 +29,6 @@ const ZAMBDA_NAME = 'submit-lab-order';
 let m2mToken: string;
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`Input: ${JSON.stringify(input)}`);
   console.log('Validating input');
   const { serviceRequestIDs, manualOrder, secrets } = validateRequestParameters(input);
   console.log('manualOrder', serviceRequestIDs, manualOrder);
@@ -37,7 +37,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
   console.log('token', m2mToken);
 
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   const userToken = input.headers.Authorization.replace('Bearer ', '');
   const currentUser = await userMe(userToken, secrets);

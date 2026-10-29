@@ -1,17 +1,18 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
 import {
   FileType,
   FileTypeMap,
-  getSecret,
   LegacyFile,
   LegacyPatientRecord,
-  MISSING_REQUIRED_PARAMETERS,
   SearchLegacyRecordsInput,
   SearchLegacyRecordsOutput,
-  Secrets,
-  SecretsKeys,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../shared';
+} from 'utils/lib/types/data/legacy-data/legacy-data.types';
+import { MISSING_REQUIRED_PARAMETERS } from 'utils/lib/types/errors';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 
 const ZAMBDA_NAME = 'ehr-search-legacy-records';
 const LEGACY_DATA_BUCKET_SUFFIX = 'legacy-data';
@@ -28,7 +29,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     validateRequestParameters(input);
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   const projectId = getSecret(SecretsKeys.PROJECT_ID, secrets);
   const bucketName = `${projectId}-${LEGACY_DATA_BUCKET_SUFFIX}`;

@@ -1,6 +1,6 @@
 import { Appointment, Slot } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import { formatDate } from 'utils';
+import { formatDate } from './date';
 import { Capacity, SlotCapacityMap } from './scheduleUtils';
 
 export function createMinimumAndMaximumTime(date: DateTime, numDays: number): { minimum: string; maximum: string } {
@@ -299,6 +299,16 @@ export function calculatePatientAge(date: string | null | undefined): string | n
   const fullDays = now.diff(dob).as('days');
   return `${Math.floor(fullDays)} d`;
 }
+
+const PEDIATRIC_AGE_LIMIT_YEARS = 18;
+
+/** Under 18 on `onDate` (today when omitted); an unknown or unparsable birth date counts as adult. */
+export const isPediatricOnDate = (birthDate: string | undefined, onDate?: string): boolean => {
+  if (!birthDate) return false;
+  const dob = DateTime.fromISO(birthDate);
+  const at = onDate ? DateTime.fromISO(onDate) : DateTime.now();
+  return dob.isValid && at.isValid && at.diff(dob, 'years').years < PEDIATRIC_AGE_LIMIT_YEARS;
+};
 
 export const formatDOB = (birthDate: string | undefined): string | undefined => {
   if (!birthDate) return undefined;

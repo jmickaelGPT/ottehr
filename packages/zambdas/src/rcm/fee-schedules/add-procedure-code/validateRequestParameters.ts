@@ -1,5 +1,15 @@
-import { INVALID_INPUT_ERROR, MISSING_REQUEST_BODY, MISSING_REQUIRED_PARAMETERS } from 'utils';
-import { ZambdaInput } from '../../../shared';
+import { MISSING_REQUEST_BODY } from 'utils/lib/types/errors';
+import { z } from 'zod';
+import { ZambdaInput } from '../../../shared/types/common';
+import { safeJsonParse, safeValidate } from '../../../shared/validation';
+
+const AddProcedureCodeBodySchema = z.object({
+  feeScheduleId: z.string().uuid(),
+  code: z.string().min(1),
+  description: z.string().optional(),
+  modifier: z.string().optional(),
+  amount: z.number(),
+});
 
 export interface AddProcedureCodeParams {
   feeScheduleId: string;
@@ -15,19 +25,10 @@ export function validateRequestParameters(input: ZambdaInput): AddProcedureCodeP
     throw MISSING_REQUEST_BODY;
   }
 
-  const { feeScheduleId, code, description, modifier, amount } = JSON.parse(input.body);
-
-  if (!feeScheduleId) {
-    throw MISSING_REQUIRED_PARAMETERS(['feeScheduleId']);
-  }
-
-  if (!code) {
-    throw MISSING_REQUIRED_PARAMETERS(['code']);
-  }
-
-  if (amount == null || typeof amount !== 'number') {
-    throw INVALID_INPUT_ERROR('"amount" must be a number');
-  }
+  const { feeScheduleId, code, description, modifier, amount } = safeValidate(
+    AddProcedureCodeBodySchema,
+    safeJsonParse(input.body)
+  );
 
   return {
     feeScheduleId,

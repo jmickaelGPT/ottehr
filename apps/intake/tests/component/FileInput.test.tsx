@@ -2,24 +2,21 @@ import { fireEvent, render, waitFor } from '@testing-library/react';
 import imageCompression from 'browser-image-compression';
 import { FC } from 'react';
 import { FormProvider, useForm } from 'react-hook-form';
-import { describe, expect, test, vi } from 'vitest';
+import { PaperworkContext } from 'ui-components/lib/components/paperwork/context';
 import FileInput, {
   COMPRESS_TARGET_MB,
   COMPRESS_THRESHOLD_MB,
-} from '../../src/features/paperwork/components/FileInput';
-import { PaperworkContext } from '../../src/features/paperwork/context';
+} from 'ui-components/lib/components/paperwork/form-components/FileInput';
+import { describe, expect, test, vi } from 'vitest';
 
 vi.mock('browser-image-compression', () => ({
   default: vi.fn(async (file: File) => file),
 }));
 
-vi.mock('ui-components', async () => {
-  const actual = await vi.importActual<typeof import('ui-components')>('ui-components');
-  return {
-    ...actual,
-    convertHeicToJpegIfNeeded: vi.fn(async (file: File) => file),
-  };
-});
+// Mock the module that declares it: FileInput/index.tsx imports it by relative path.
+vi.mock('ui-components/lib/utils/heic', () => ({
+  convertHeicToJpegIfNeeded: vi.fn(async (file: File) => file),
+}));
 
 vi.mock('../../src/hooks/useUCZambdaClient', () => ({
   useUCZambdaClient: () => null,
@@ -38,6 +35,9 @@ const stubPaperworkContext = (): PaperworkContext =>
   ({
     appointment: { id: 'appt-1' },
     setSaveButtonDisabled: vi.fn(),
+    paperworkComponentHelpers: {
+      createZ3Object: vi.fn(),
+    },
   }) as unknown as PaperworkContext;
 
 const Wrapper: FC<{ attachmentType?: 'image' | 'pdf' }> = ({ attachmentType = 'image' }) => {

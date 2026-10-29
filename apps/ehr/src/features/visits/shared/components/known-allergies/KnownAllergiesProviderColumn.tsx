@@ -22,15 +22,21 @@ import { sortByRecencyAndStatus } from 'src/helpers';
 import { useCommandPaletteSource } from 'src/hooks/useCommandPaletteSource';
 import { useMergedAllergyQuickPicks } from 'src/hooks/useMergedQuickPicks';
 import { usePendingQuickPick } from 'src/hooks/usePendingQuickPick';
-import { AllergyDTO, AllergyQuickPickData, isTelemedAppointment } from 'utils';
+import { isTelemedAppointment } from 'utils/lib/fhir/moduleIdentification';
+import { AllergyDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
+import { AllergyQuickPickData } from 'utils/lib/types/api/quick-picks.types';
 import { DeleteIconButton } from '../../../../../components/DeleteIconButton';
+import { useChartData } from '../../hooks/useChartData';
 import { useChartDataArrayValue } from '../../hooks/useChartDataArrayValue';
 import { useGetAppointmentAccessibility } from '../../hooks/useGetAppointmentAccessibility';
-import { ExtractObjectType, useGetAllergiesSearch } from '../../stores/appointment/appointment.queries';
+import {
+  ExtractObjectType,
+  useGetAllergiesSearch,
+  useTriggerErxPatientSync,
+} from '../../stores/appointment/appointment.queries';
 import {
   ChartDataState,
   useAppointmentData,
-  useChartData,
   useDeleteChartData,
   useSaveChartData,
 } from '../../stores/appointment/appointment.store';
@@ -39,10 +45,14 @@ import { QuickPicksButton } from '../QuickPicksButton';
 
 export const KnownAllergiesProviderColumn: FC = () => {
   const { chartData, isLoading: isChartDataLoading } = useChartData();
-  const { appointment } = useAppointmentData();
+  const { appointment, patient, encounter } = useAppointmentData();
   const { isAppointmentReadOnly: isReadOnly } = useGetAppointmentAccessibility();
   const allergies = sortByRecencyAndStatus(chartData?.allergies ?? []);
   const length = allergies.length;
+
+  // Keep the eRx provider's allergy list in sync after each add/toggle (delete doesn't produce bug).
+  // Runs in the background (see useTriggerErxPatientSync).
+  const { triggerSync } = useTriggerErxPatientSync({ patient, encounter });
 
   return (
     <Box
@@ -57,7 +67,13 @@ export const KnownAllergiesProviderColumn: FC = () => {
           data-testid={dataTestIds.allergies.knownAllergiesList}
         >
           {allergies.map((value, index) => (
-            <AllergyListItem key={value.resourceId || `new${index}`} value={value} index={index} length={length} />
+            <AllergyListItem
+              key={value.resourceId || `new${index}`}
+              value={value}
+              index={index}
+              length={length}
+              onAllergyChange={triggerSync}
+            />
           ))}
         </Box>
       )}
@@ -66,7 +82,7 @@ export const KnownAllergiesProviderColumn: FC = () => {
         <Typography color="secondary.light">Missing. Patient input must be reconciled by provider</Typography>
       )}
 
-      {!isReadOnly && <AddAllergyField />}
+      {!isReadOnly && <AddAllergyField onAllergyChange={triggerSync} />}
     </Box>
   );
 };
@@ -88,7 +104,12 @@ const setUpdatedAllergy = (
   }
 };
 
-const AllergyListItem: FC<{ value: AllergyDTO; index: number; length: number }> = ({ value, index, length }) => {
+const AllergyListItem: FC<{
+  value: AllergyDTO;
+  index: number;
+  length: number;
+  onAllergyChange: () => void;
+}> = ({ value, index, length, onAllergyChange }) => {
   const [note, setNote] = useState(value.note || '');
   const areNotesEqual = note.trim() === (value.note || '');
   const { chartDataSetState } = useChartData({ refetchOnMount: false });
@@ -135,6 +156,7 @@ const AllergyListItem: FC<{ value: AllergyDTO; index: number; length: number }> 
           }
           const updatedAllergy = data.chartData.allergies?.[0];
           setUpdatedAllergy(chartDataSetState, updatedAllergy);
+          onAllergyChange();
         },
         onError: () => {
           enqueueSnackbar('An error has occurred while updating allergy status. Please try again.', {
@@ -230,6 +252,7 @@ const AllergyListItem: FC<{ value: AllergyDTO; index: number; length: number }> 
           disabled={(isLoading && areNotesEqual) || !isAlreadySaved}
           size="small"
           fullWidth
+          multiline
           label="Notes for inactive allergy"
           InputProps={{
             endAdornment: !areNotesEqual && (
@@ -246,7 +269,7 @@ const AllergyListItem: FC<{ value: AllergyDTO; index: number; length: number }> 
   );
 };
 
-const AddAllergyField: FC = () => {
+const AddAllergyField: FC<{ onAllergyChange: () => void }> = ({ onAllergyChange }) => {
   const { quickPicks: allergyQuickPicks, loading: allergyQuickPicksLoading } = useMergedAllergyQuickPicks();
   const { chartData, isChartDataLoading, setPartialChartData } = useChartData();
   const { onSubmit, isLoading } = useChartDataArrayValue('allergies');
@@ -306,6 +329,7 @@ const AddAllergyField: FC = () => {
           { invalidateQueries: false }
         );
         await onSubmit(newValue);
+        onAllergyChange();
         reset({ value: null, otherAllergyName: '' });
         setIsOtherOptionSelected(false);
       } catch {

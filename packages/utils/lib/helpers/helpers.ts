@@ -12,35 +12,44 @@ import {
   Resource,
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import { INSURANCE_PAY_OPTION, SELF_PAY_OPTION } from '../config-helpers/shared-questionnaire';
 import {
-  allLicensesForPractitioner,
-  CANDID_PLAN_TYPE_SYSTEM,
+  BILLING_RESOURCE_TAG,
   FHIR_IDENTIFIER_SYSTEM,
-  getCoding,
-  getFullName,
-  INSURANCE_CANDID_PLAN_TYPE_CODES,
-  OTTEHR_MODULE,
+  OYSTEHR_RCM_PAYER_ID_SYSTEM,
   PAYMENT_METHOD_EXTENSION_URL,
   PROVIDER_TYPE_EXTENSION_URL,
-  SERVICE_CATEGORY_SYSTEM,
   SLUG_SYSTEM,
-} from '../fhir';
-import { CONSENT_FORMS_CONFIG } from '../ottehr-config';
-import { patientScreeningQuestionsConfig } from '../ottehr-config/screening-questions';
+} from '../fhir/constants';
+import { allLicensesForPractitioner } from '../fhir/helpers';
+import { CANDID_PLAN_TYPE_SYSTEM, INSURANCE_CANDID_PLAN_TYPE_CODES } from '../fhir/insurance';
+import { OTTEHR_MODULE } from '../fhir/moduleIdentification';
+import { getFullName } from '../fhir/patient';
 import {
-  appointmentTypeLabels,
-  appointmentTypeMap,
-  CashPaymentDTO,
-  FhirAppointmentType,
-  PatchPaperworkParameters,
+  isPendingReservation,
+  parsePaymentRefundsFromNotice,
+  parsePaymentVoidFromNotice,
+  settledRefundTotalInCents,
+} from '../fhir/paymentRefunds';
+import { getPaymentNoticeSubmitterRef } from '../fhir/payments';
+import { CONSENT_FORMS_CONFIG } from '../ottehr-config/consent-forms';
+import { patientScreeningQuestionsConfig } from '../ottehr-config/screening-questions';
+import { INSURANCE_PAY_OPTION, SELF_PAY_OPTION } from '../ottehr-config/value-sets';
+import { CashPaymentDTO } from '../types/api/patient-payment-types';
+import {
   PHYSICIAN_TYPES,
   PractitionerQualificationCode,
   PROVIDER_TYPE_VALUES,
   ProviderTypeCode,
-  ScheduleOwnerFhirResource,
-} from '../types';
-import { emailRegex, phoneRegex, zipRegex } from '../validation';
+} from '../types/api/practitioner.types';
+import { ScheduleOwnerFhirResource } from '../types/api/schedules';
+import { FhirAppointmentType } from '../types/common';
+import { appointmentTypeLabels, appointmentTypeMap } from '../types/data/appointments/appointments.types';
+import {
+  CUSTOM_INSURANCE_ORG_ID_PREFIX,
+  CUSTOM_INSURANCE_ORG_ID_SYSTEM,
+} from '../types/data/billing/custom-insurance-org.types';
+import { PatchPaperworkParameters } from '../types/data/paperwork/paperwork.types';
+import { emailRegex, fullZipRegex, npiRegex, phoneRegex, zipRegex } from '../validation/regex';
 
 export function createOystehrClient(token: string, fhirAPI: string, projectAPI: string): Oystehr {
   const FHIR_API = fhirAPI.replace(/\/r4/g, '');
@@ -48,6 +57,7 @@ export function createOystehrClient(token: string, fhirAPI: string, projectAPI: 
     accessToken: token,
     fhirApiUrl: FHIR_API,
     projectApiUrl: projectAPI,
+    ignoreTags: [BILLING_RESOURCE_TAG],
   };
   console.log('creating fhir client');
   return new Oystehr(CLIENT_CONFIG);
@@ -145,11 +155,11 @@ export function getBucketAndObjectFromZ3URL(z3URL: string, projectAPI: string): 
   return { bucket, object };
 }
 
-export const isPostalCodeValid = (postalCode: string | undefined): boolean => {
+export const isPostalCodeValid = (postalCode: string | undefined, requireFullZip?: boolean): boolean => {
   if (!postalCode) {
     return false;
   }
-  return zipRegex.test(postalCode);
+  return requireFullZip ? fullZipRegex.test(postalCode) : zipRegex.test(postalCode);
 };
 
 const tenDigitRegex = /^\d{10}$/;
@@ -181,8 +191,33 @@ export const isEmailValid = (email: string | undefined): boolean => {
 };
 
 export const isNPIValid = (npi: string): boolean => {
-  const npiRegex = /^\d{10}$/;
   return npiRegex.test(npi);
+};
+
+// https://www.cms.gov/Regulations-and-Guidance/Administrative-Simplification/NationalProvIdentStand/Downloads/NPIcheckdigit.pdf
+export const isNPIValidWithChecksum = (npi: string): boolean => {
+  if (!isNPIValid(npi)) {
+    return false;
+  }
+  const digits = `80840${npi}`.split('').map(Number);
+  let sum = 0;
+  let double = false;
+  for (let i = digits.length - 1; i >= 0; i--) {
+    let digit = digits[i];
+    if (double) {
+      digit *= 2;
+      if (digit > 9) digit -= 9;
+    }
+    sum += digit;
+    double = !double;
+  }
+  return sum % 10 === 0;
+};
+
+// CLIA numbers are 2-digit state code + "D" + 7-digit lab identifier, e.g. 05D1234567.
+export const isCLIAValid = (clia: string): boolean => {
+  const cliaRegex = /^\d{2}D\d{7}$/;
+  return cliaRegex.test(clia);
 };
 
 export function formatPhoneNumberDisplay(phoneNumber?: string): string {
@@ -303,21 +338,34 @@ export function validateDefined<T>(value: T, name: string): NonNullable<T> {
   return value;
 }
 
-export function standardizePhoneNumber(phoneNumber: string | undefined): string | undefined {
-  // input format:  some arbitrary format which may or may not include (, ), -, +1
-  // output format: (XXX) XXX-XXXX
+/**
+ * Extracts the bare 10-digit national number from an arbitrarily formatted phone string
+ * (e.g. "+12021234567", "(202) 123-4567", "202-123-4567"), stripping any formatting
+ * characters and a leading US country code. Returns undefined when the input can't be
+ * parsed to a 10-digit number. Use this to normalize FHIR-sourced phone values before
+ * feeding them to inputs/validation that expect unformatted digits.
+ */
+export function getPhoneNumberDigits(phoneNumber: string | undefined): string | undefined {
   if (!phoneNumber) {
     return undefined;
   }
 
   const digits = phoneNumber.replace(/\D/g, '');
-  let phoneNumberDigits: string | undefined;
 
   if (digits.length === 10) {
-    phoneNumberDigits = digits;
-  } else if (digits.length === 11 && digits.startsWith('1')) {
-    phoneNumberDigits = digits.slice(1);
+    return digits;
   }
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return digits.slice(1);
+  }
+
+  return undefined;
+}
+
+export function standardizePhoneNumber(phoneNumber: string | undefined): string | undefined {
+  // input format:  some arbitrary format which may or may not include (, ), -, +1
+  // output format: (XXX) XXX-XXXX
+  const phoneNumberDigits = getPhoneNumberDigits(phoneNumber);
 
   if (!phoneNumberDigits) {
     return undefined;
@@ -326,8 +374,58 @@ export function standardizePhoneNumber(phoneNumber: string | undefined): string 
   return `(${phoneNumberDigits.slice(0, 3)}) ${phoneNumberDigits.slice(3, 6)}-${phoneNumberDigits.slice(6)}`;
 }
 
+/**
+ * Validates a phone number against NANP rules: a 10-digit number whose area code and exchange both
+ * begin with a digit 2-9.
+ */
+export function isValidNANPNumber(phoneNumber: string | undefined): boolean {
+  const standardized = standardizePhoneNumber(phoneNumber);
+  if (!standardized) {
+    return false;
+  }
+
+  const digits = standardized.replace(/\D/g, '');
+  const areaCodeFirstDigit = digits[0];
+  const exchangeFirstDigit = digits[3];
+
+  return (
+    areaCodeFirstDigit >= '2' && areaCodeFirstDigit <= '9' && exchangeFirstDigit >= '2' && exchangeFirstDigit <= '9'
+  );
+}
+
+/**
+ * The phone rule the current eRx provider (DoseSpot) enforces; rejects what it would refuse with
+ * "Primary Phone is not valid." Single seam — swap this body if the provider or its rules change.
+ */
+export function isValidErxPhoneNumber(phoneNumber: string | undefined): boolean {
+  return isValidNANPNumber(phoneNumber);
+}
+
 export function resourceHasMetaTag(resource: Resource, metaTag: OTTEHR_MODULE): boolean {
   return Boolean(resource.meta?.tag?.find((coding) => coding.code === metaTag));
+}
+
+/**
+ * Standardizes a phone number that may carry an extension (`x`/`ext.`/`extension`) to
+ * `(XXX) XXX-XXXX` or `(XXX) XXX-XXXX x{ext}`. Returns undefined when the base number can't be
+ * parsed to 10 digits.
+ */
+export function standardizePhoneWithExtension(phoneNumber?: string): string | undefined {
+  const trimmed = phoneNumber?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const extensionMatch = trimmed.match(/\s*(?:x|ext\.?|extension)\s*(\d+)$/i);
+  const extension = extensionMatch?.[1];
+  const base = extensionMatch ? trimmed.slice(0, extensionMatch.index).trim() : trimmed;
+
+  const standardizedBase = standardizePhoneNumber(base);
+  if (!standardizedBase) {
+    return undefined;
+  }
+
+  return extension ? `${standardizedBase} x${extension}` : standardizedBase;
 }
 
 export const formatPhoneNumberForQuestionnaire = (phone: string): string => {
@@ -336,6 +434,12 @@ export const formatPhoneNumberForQuestionnaire = (phone: string): string => {
     throw new Error('Invalid phone number');
   }
   return `(${phoneDigits.slice(0, 3)}) ${phoneDigits.slice(3, 6)}-${phoneDigits.slice(6)}`;
+};
+
+export const toTenDigitPhoneNumber = (value: string | undefined): string | undefined => {
+  const digits = value?.replace(/\D/g, '') ?? '';
+  const local = digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+  return local.length === 10 ? local : undefined;
 };
 
 export const objectToDateString = (dateObj: { year: string; month: string; day: string }): string => {
@@ -1551,11 +1655,22 @@ const cashPaymentDTOFromFhirPaymentNotice = (paymentNotice: PaymentNotice): Cash
     return undefined;
   }
 
+  // in-flight reservations stay on the notice but are not refunds to show or count
+  const refunds = parsePaymentRefundsFromNotice(paymentNotice)?.filter((refund) => !isPendingReservation(refund));
+  const voidInfo = parsePaymentVoidFromNotice(paymentNotice);
+  const voided = !!voidInfo || paymentNotice.status === 'cancelled';
+  const takenBy = getPaymentNoticeSubmitterRef(paymentNotice)?.display;
+
   return {
     paymentMethod: paymentMethod as 'cash' | 'check' | 'card-reader' | 'external-card-reader',
     amountInCents: Math.round(amount.value * 100),
     dateISO: created,
     fhirPaymentNotificationId: id,
+    ...(takenBy ? { takenBy } : {}),
+    ...(refunds?.length ? { refunds, refundedAmountInCents: settledRefundTotalInCents(refunds) } : {}),
+    ...(voided
+      ? { voided: true, voidReason: voidInfo?.reason, voidNotes: voidInfo?.notes, voidedBy: voidInfo?.voidedBy }
+      : {}),
   };
 };
 
@@ -1593,26 +1708,38 @@ export const checkResourceHasSlug = (resource: ScheduleOwnerFhirResource, slug: 
 };
 
 export const getPayerId = (org: Organization | undefined): string | undefined => {
+  const identifiers = org?.identifier?.filter((identifier) => identifier.use !== 'old');
   // First look for Oystehr payer ID by system
-  let payerId = org?.identifier?.find(
-    (identifier) => identifier.system === 'https://identifiers.fhir.oystehr.com/rcm-payer-id'
-  )?.value;
+  let payerId = identifiers?.find((identifier) => identifier.system === OYSTEHR_RCM_PAYER_ID_SYSTEM)?.value;
   if (!payerId) {
     // Second look at coding using PAYERID code
-    payerId = org?.identifier?.find(
+    payerId = identifiers?.find(
       (identifier) =>
         identifier.type?.coding?.some((coding) => coding.system === FHIR_IDENTIFIER_SYSTEM && coding.code === 'PAYERID')
     )?.value;
   }
   if (!payerId) {
     // Third look at coding using XX (Organization identifier) code
-    payerId = org?.identifier?.find(
+    payerId = identifiers?.find(
       (identifier) =>
         identifier.type?.coding?.some((coding) => coding.system === FHIR_IDENTIFIER_SYSTEM && coding.code === 'XX')
     )?.value;
   }
   return payerId;
 };
+
+export const getPayerName = (org: Organization | undefined): string | undefined => org?.name ?? org?.alias?.[0];
+
+// A custom insurance organization (a billing-app-owned Organization not in RCM's payer directory)
+// carries its user-entered "OTR-" business id under this identifier system instead of an RCM one.
+export const getCustomInsuranceOrgBusinessId = (org: Organization | undefined): string | undefined =>
+  org?.identifier?.find((identifier) => identifier.system === CUSTOM_INSURANCE_ORG_ID_SYSTEM)?.value;
+
+// Every business id starts with this prefix. A "payer id" search/filter value shaped like one names
+// a custom insurance organization rather than an RCM payer.
+export function isCustomInsuranceOrgBusinessId(value: string): boolean {
+  return value.trim().toUpperCase().startsWith(CUSTOM_INSURANCE_ORG_ID_PREFIX);
+}
 
 export function getPayerUrl(payerId: string): string {
   const oystehr = new Oystehr({}); // get access to static helper
@@ -1626,6 +1753,52 @@ export function isPayerUrl(maybeUrl?: string): boolean {
 export function extractPayerIdFromUrl(maybeUrl?: string): string | undefined {
   if (!maybeUrl || !isPayerUrl(maybeUrl)) return undefined;
   return maybeUrl.replace('https://rcm-api.zapehr.com/v1/payer/', '');
+}
+
+// Non-insurance organizations (NIOs) are billing-app-owned FHIR resources. The clinical app never
+// stores or reads them as FHIR — a stored NIO reference uses this URL token so readers know to
+// resolve it through the billing app's zambda interface (list-non-insurance-organizations), the
+// same way payer URLs above mark payers as living in the Oystehr RCM payer list.
+export const BILLING_NIO_REFERENCE_BASE = 'https://fhir.ottehr.com/billing/non-insurance-organization';
+
+export function getNioReferenceUrl(nioId: string): string {
+  return `${BILLING_NIO_REFERENCE_BASE}/${nioId}`;
+}
+
+export function extractNioIdFromReferenceUrl(maybeUrl?: string): string | undefined {
+  if (!maybeUrl || !maybeUrl.startsWith(`${BILLING_NIO_REFERENCE_BASE}/`)) return undefined;
+  const nioId = maybeUrl.slice(BILLING_NIO_REFERENCE_BASE.length + 1);
+  // A token carries exactly one non-empty id segment; anything else is not an NIO reference.
+  if (nioId === '' || nioId.includes('/')) return undefined;
+  return nioId;
+}
+
+export function isNioReferenceUrl(maybeUrl?: string): boolean {
+  return extractNioIdFromReferenceUrl(maybeUrl) !== undefined;
+}
+
+// Custom insurance organizations are billing-app-owned FHIR resources too. The clinical app never
+// stores or reads them as FHIR directly — a stored reference uses this URL token so readers know to
+// resolve it through the billing app's zambda interface (list-custom-insurance-organizations), the
+// same door pattern as the NIO reference above.
+export const BILLING_CUSTOM_INSURANCE_ORG_REFERENCE_BASE =
+  'https://fhir.ottehr.com/billing/custom-insurance-organization';
+
+export function getCustomInsuranceOrgReferenceUrl(insuranceOrgId: string): string {
+  return `${BILLING_CUSTOM_INSURANCE_ORG_REFERENCE_BASE}/${insuranceOrgId}`;
+}
+
+export function extractCustomInsuranceOrgIdFromReferenceUrl(maybeUrl?: string): string | undefined {
+  if (!maybeUrl || !maybeUrl.startsWith(`${BILLING_CUSTOM_INSURANCE_ORG_REFERENCE_BASE}/`)) return undefined;
+  const insuranceOrgId = maybeUrl.slice(BILLING_CUSTOM_INSURANCE_ORG_REFERENCE_BASE.length + 1);
+  // A token carries exactly one non-empty id segment; anything else is not a custom insurance org
+  // reference.
+  if (insuranceOrgId === '' || insuranceOrgId.includes('/')) return undefined;
+  return insuranceOrgId;
+}
+
+export function isCustomInsuranceOrgReferenceUrl(maybeUrl?: string): boolean {
+  return extractCustomInsuranceOrgIdFromReferenceUrl(maybeUrl) !== undefined;
 }
 
 export const getNameFromScheduleResource = (scheduleResource: ScheduleOwnerFhirResource): string | undefined => {
@@ -1708,33 +1881,42 @@ export function getAppointmentType(appointment: Appointment): { type: string } {
 }
 
 export function makeAbbreviation(str: string): string {
-  return str.split(/[\s-]+/).reduce((previousValue: string, currentValue: string) => {
-    return previousValue + currentValue.charAt(0).toUpperCase();
-  }, '');
+  // Split on any non-letter run (whitespace, hyphens, parentheses, digits …) so
+  // tokens like "(renamed)" or "(30" don't leak punctuation into the result.
+  return str
+    .split(/[^a-zA-Z]+/)
+    .filter(Boolean)
+    .reduce((previousValue: string, currentValue: string) => {
+      return previousValue + currentValue.charAt(0).toUpperCase();
+    }, '');
 }
 
-export function getServiceCategoryAbbreviation(serviceCategory?: string): 'UC' | 'OM' | 'WC' | 'PO' | undefined {
-  if (!serviceCategory) return undefined;
-
-  const normalizedServiceCategory = serviceCategory
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z]/g, '');
-  const serviceCategoryMap: Record<string, 'UC' | 'OM' | 'WC' | 'PO'> = {
-    urgentcare: 'UC',
-    occupationalmedicine: 'OM',
-    workerscomp: 'WC',
-    preop: 'PO',
-  };
-
-  return serviceCategoryMap[normalizedServiceCategory];
-}
-
-export function getAppointmentServiceCategoryAbbreviation(
-  appointment?: Appointment
-): 'UC' | 'OM' | 'WC' | 'PO' | undefined {
-  const serviceCategoryCoding = getCoding(appointment?.serviceCategory, SERVICE_CATEGORY_SYSTEM);
-  return getServiceCategoryAbbreviation(serviceCategoryCoding?.code ?? serviceCategoryCoding?.display);
+/**
+ * Resolve the short abbreviation shown for a service category on the Tracking
+ * Board, the patient's visit list, and the visit-details header.
+ *
+ * Prefers the admin-defined abbreviation stored on the FHIR-backed catalog
+ * entry (the "Abbreviation/Short Name" field on the Services admin page);
+ * otherwise derives one from the category's display name or code via
+ * makeAbbreviation. This replaces the legacy hard-coded UC/OM/WC/PO map so
+ * non-system categories (Massage, Wellness, …) get an abbreviation too.
+ *
+ * @param serviceCategoryCodeOrName the category's code or display name as
+ *   stored on the appointment/encounter — callers differ on which they hold,
+ *   so both are matched against the catalog.
+ * @param fhirCategories the FHIR-backed catalog (from listServiceCategories),
+ *   matched by code or name.
+ */
+export function resolveServiceCategoryAbbreviation(
+  serviceCategoryCodeOrName: string | undefined,
+  fhirCategories?: Array<{ code: string; name: string; abbreviation?: string }>
+): string | undefined {
+  const trimmed = serviceCategoryCodeOrName?.trim();
+  if (!trimmed) return undefined;
+  const match = fhirCategories?.find((c) => c.code === trimmed || c.name === trimmed);
+  const explicit = match?.abbreviation?.trim();
+  if (explicit) return explicit;
+  return makeAbbreviation(match?.name ?? trimmed) || undefined;
 }
 
 /**
@@ -1749,9 +1931,12 @@ export function getAppointmentServiceCategoryAbbreviation(
 export function formatZipcodeForDisplay(addressOrZip: string): string {
   const regexPattern = /\b(\d{5})(\d{4})$/;
   const zipMatch = addressOrZip.match(regexPattern);
-  console.log(`This is zipMatch ${JSON.stringify(zipMatch)}`);
   if (!zipMatch) return addressOrZip;
   return addressOrZip.replace(regexPattern, `${zipMatch[1]}-${zipMatch[2]}`);
+}
+
+export function normalizeZipcode(zip: string): string {
+  return zip.replace(/[^0-9]/g, '');
 }
 
 export interface TemplateVariables {
@@ -1857,5 +2042,9 @@ export function findOrgMatchingReference(reference?: string, organizations?: Org
 export function orgIdMatchesReference(reference: string | undefined, orgId: string): boolean {
   if (!reference) return false;
   const oystehr = new Oystehr({}); // get access to static helper
-  return orgId === reference.replace('Organization/', '') || oystehr.rcm.constructPayerUrl({ id: orgId }) === reference;
+  return (
+    orgId === reference.replace('Organization/', '') ||
+    oystehr.rcm.constructPayerUrl({ id: orgId }) === reference ||
+    extractCustomInsuranceOrgIdFromReferenceUrl(reference) === orgId
+  );
 }

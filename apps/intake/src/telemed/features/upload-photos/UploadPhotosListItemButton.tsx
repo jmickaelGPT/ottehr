@@ -2,10 +2,11 @@ import PhotoLibraryOutlinedIcon from '@mui/icons-material/PhotoLibraryOutlined';
 import { otherColors } from '@theme/colors';
 import { Attachment } from 'fhir/r4b';
 import { FC, useEffect, useState } from 'react';
-import { UCGetPaperworkResponse } from 'utils';
+import { useGetPaperwork } from 'src/telemed/features/paperwork/paperwork.queries';
+import { UCGetPaperworkResponse } from 'utils/lib/types/data/paperwork/paperwork.types';
 import { create } from 'zustand';
 import { StyledListItemWithButton } from '../../../components/StyledListItemWithButton';
-import { useGetPaperwork } from '../paperwork';
+import { resolveConditionPhotoState } from './conditionPhotoState';
 
 type UploadPhotosListItemButtonProps = {
   onClick: () => void;
@@ -18,6 +19,8 @@ export const useUploadPhotosStore = create<{
   isLoading: boolean;
   isFetching: boolean;
   attachment?: Attachment;
+  documentReferenceId?: string;
+  hasConditionStep?: boolean;
 }>()(() => ({ isLoading: false, isFetching: false }));
 
 export const UploadPhotosListItemButton: FC<UploadPhotosListItemButtonProps> = ({ onClick, hideText, noDivider }) => {
@@ -25,11 +28,9 @@ export const UploadPhotosListItemButton: FC<UploadPhotosListItemButtonProps> = (
     if (!data) {
       return;
     }
-    const attachment = data?.questionnaireResponse?.item
-      ?.find((item) => item.linkId === 'patient-condition-page')
-      ?.item?.find((item) => item.linkId === 'patient-photos')?.answer?.[0]?.valueAttachment;
+    const { hasConditionStep, attachment, documentReferenceId } = resolveConditionPhotoState(data);
     setIsPhotoUploaded(!!attachment?.url);
-    useUploadPhotosStore.setState({ paperworkData: data, attachment });
+    useUploadPhotosStore.setState({ paperworkData: data, attachment, documentReferenceId, hasConditionStep });
   });
   const [isPhotoUploaded, setIsPhotoUploaded] = useState(false);
 

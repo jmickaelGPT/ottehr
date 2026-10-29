@@ -1,5 +1,7 @@
-import { INVALID_INPUT_ERROR, MISSING_REQUIRED_PARAMETERS, UpdateInHouseMedicationInput } from 'utils';
-import { ZambdaInput } from '../../../../shared';
+import { UpdateInHouseMedicationInput } from 'utils/lib/types/api/config/in-house-medications';
+import { INVALID_INPUT_ERROR, MISSING_REQUIRED_PARAMETERS } from 'utils/lib/types/errors';
+import { ZambdaInput } from '../../../../shared/types/common';
+import { safeJsonParse } from '../../../../shared/validation';
 
 export function validateRequestParameters(
   input: ZambdaInput
@@ -10,7 +12,7 @@ export function validateRequestParameters(
     throw INVALID_INPUT_ERROR('No request body provided');
   }
 
-  const { medicationID, status, name, ndc, medispanID, medispanIDForInteractions } = JSON.parse(input.body);
+  const { medicationID, status, name, ndc, medispanID, medispanIDForInteractions } = safeJsonParse(input.body);
 
   if (!medicationID) {
     throw MISSING_REQUIRED_PARAMETERS(['medicationID']);

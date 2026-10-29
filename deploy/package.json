@@ -1,6 +1,6 @@
 {
   "name": "deploy",
-  "version": "1.36.35",
+  "version": "1.45.20",
   "description": "Scripts for generating HCL and interacting with Terraform",
   "scripts": {
     "build": "tsc --noEmit",
@@ -12,20 +12,24 @@
     "apply-e2e": "node ./run-apply.cjs e2e",
     "apply-e2e2": "node ./run-apply.cjs e2e2",
     "apply-e2e3": "node ./run-apply.cjs e2e3",
+    "apply-e2e5": "./apply.sh e2e5",
+    "apply-e2e4": "./apply.sh e2e4",
     "apply-development": "node ./run-apply.cjs development",
     "apply-testing": "node ./run-apply.cjs testing",
     "apply-staging": "node ./run-apply.cjs staging",
     "apply-demo": "node ./run-apply.cjs demo",
     "apply-production": "node ./run-apply.cjs production",
     "terraform-init": "terraform init --backend-config=./backend.config",
+    "terraform-switch": "rm -rf .terraform && npm run terraform-init && terraform workspace select ${ENV:-local}",
     "terraform-setup": "rm -rf .terraform && npm run terraform-init && terraform workspace new e2e && terraform workspace new e2e2 && terraform workspace new e2e3 && terraform workspace new local && terraform workspace new development && terraform workspace new testing && terraform workspace new staging && terraform workspace new demo && terraform workspace new production && terraform workspace select local",
-    "fill-env-with-created-resources-data": "tsx fill-env-with-created-resources-data.ts",
+    "fill-env-with-created-resources-data": "node --preserve-symlinks -r tsx/cjs fill-env-with-created-resources-data.ts",
     "test": "vitest run",
+    "test:ci": "vitest run --passWithNoTests --reporter=dot --reporter=github-actions",
     "test:watch": "vitest"
   },
   "devDependencies": {
     "@types/node": "^24.2.1",
-    "vitest": "^3.2.4"
+    "vitest": "^4.1.11"
   },
   "dependencies": {
     "utils": "*"

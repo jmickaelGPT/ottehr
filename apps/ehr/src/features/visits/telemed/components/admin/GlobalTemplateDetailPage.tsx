@@ -20,20 +20,21 @@ import { useQuery } from '@tanstack/react-query';
 import { ReactElement } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { getTemplateDetail } from 'src/api/api';
-import { GLOBAL_TEMPLATES_URL } from 'src/App';
 import CustomBreadcrumbs from 'src/components/CustomBreadcrumbs';
 import { QUERY_STALE_TIME } from 'src/constants';
+import { GLOBAL_TEMPLATES_URL } from 'src/features/admin/adminRoutes';
 import { formatCptCodeAndModifiersForDisplay, getProcedureDisplayFields } from 'src/helpers/templates';
 import { useApiClients } from 'src/hooks/useAppClients';
 import PageContainer from 'src/layout/PageContainer';
+import { groupExamFindingsBySection } from 'utils/lib/config-helpers/exam-observations';
+import { nameLabTest } from 'utils/lib/helpers/labs/helpers';
+import { RosFindingState, RosFindingStateLabel } from 'utils/lib/ottehr-config/review-of-systems/in-person.config';
 import {
   AdminGetTemplateDetailOutput,
-  groupExamFindingsBySection,
-  RosFindingState,
-  RosFindingStateLabel,
   TemplateExamFinding,
+  TemplateRosComment,
   TemplateRosFinding,
-} from 'utils';
+} from 'utils/lib/types/data/admin-template.types';
 
 function renderMarkdown(text: string): ReactElement {
   // Convert markdown task lists and basic formatting to HTML-like rendering
@@ -159,6 +160,29 @@ function ExamFindingsTable({ findings }: { findings: TemplateExamFinding[] }): R
         </Box>
       ))}
     </Stack>
+  );
+}
+
+function RosCommentsTable({ comments }: { comments: TemplateRosComment[] }): ReactElement {
+  return (
+    <TableContainer>
+      <Table size="small" sx={{ tableLayout: 'fixed' }}>
+        <TableHead>
+          <TableRow>
+            <TableCell sx={{ fontWeight: 'bold', width: '30%' }}>System</TableCell>
+            <TableCell sx={{ fontWeight: 'bold', width: '70%' }}>Comment</TableCell>
+          </TableRow>
+        </TableHead>
+        <TableBody>
+          {comments.map(({ fieldName, systemLabel, note }) => (
+            <TableRow key={fieldName}>
+              <TableCell>{systemLabel}</TableCell>
+              <TableCell sx={{ whiteSpace: 'pre-wrap' }}>{note}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </TableContainer>
   );
 }
 
@@ -304,7 +328,14 @@ export default function GlobalTemplateDetailPage(): ReactElement {
 
           {/* Review of Systems */}
           <SectionCard title="Review of Systems (ROS)">
-            {sections.rosFindings.length ? <RosFindingsTable findings={sections.rosFindings} /> : <NotIncluded />}
+            {sections.rosFindings.length || sections.rosComments.length ? (
+              <Stack spacing={2}>
+                {sections.rosFindings.length ? <RosFindingsTable findings={sections.rosFindings} /> : null}
+                {sections.rosComments.length ? <RosCommentsTable comments={sections.rosComments} /> : null}
+              </Stack>
+            ) : (
+              <NotIncluded />
+            )}
           </SectionCard>
 
           {/* Exam Findings */}
@@ -460,6 +491,55 @@ export default function GlobalTemplateDetailPage(): ReactElement {
             )}
           </SectionCard>
 
+          {/* External Lab Orders */}
+          <SectionCard title="External Lab Orders">
+            {sections.externalLabs.length > 0 ? (
+              <Stack spacing={2}>
+                {sections.externalLabs.map((plan) => (
+                  <Box key={plan.planId} sx={{ opacity: plan.missing ? 0.6 : 1 }}>
+                    <Stack direction="row" alignItems="baseline" spacing={1}>
+                      <Typography variant="h6" sx={{ fontWeight: 'bold' }}>
+                        {nameLabTest(plan.testName, plan.testCode, plan.labName, false)}
+                      </Typography>
+                      {plan.missing ? (
+                        <Typography variant="caption" color="warning.main" fontStyle="italic">
+                          Test not found in the lab's compendium — applies will skip this order
+                        </Typography>
+                      ) : null}
+                    </Stack>
+                    {plan.diagnoses.length > 0 ? (
+                      <Typography variant="body2" sx={{ mt: 0.5 }}>
+                        <strong>Diagnoses:</strong>{' '}
+                        {plan.diagnoses.map((d) => (d.display ? `${d.code} — ${d.display}` : d.code)).join('; ')}
+                      </Typography>
+                    ) : null}
+                    {plan.cptCodes.length > 0 ? (
+                      <Typography variant="body2" sx={{ mt: 0.5 }}>
+                        <strong>CPT codes:</strong>{' '}
+                        {plan.cptCodes
+                          .map((c) => {
+                            const label = formatCptCodeAndModifiersForDisplay(c);
+                            return c.display ? `${label} — ${c.display}` : label;
+                          })
+                          .join('; ')}
+                      </Typography>
+                    ) : null}
+                    <Typography variant="body2" sx={{ mt: 0.5 }}>
+                      <strong>PSC Hold:</strong> {plan.psc ? 'Yes' : 'No'}
+                    </Typography>
+                    {plan.note ? (
+                      <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
+                        <strong>Note:</strong> {plan.note}
+                      </Typography>
+                    ) : null}
+                  </Box>
+                ))}
+              </Stack>
+            ) : (
+              <NotIncluded />
+            )}
+          </SectionCard>
+
           {/* Procedures */}
           <SectionCard title="Procedures">
             {sections.procedures.length > 0 ? (
@@ -495,6 +575,56 @@ export default function GlobalTemplateDetailPage(): ReactElement {
                         <strong>{f.label}:</strong> {f.value}
                       </Typography>
                     ))}
+                  </Box>
+                ))}
+              </Stack>
+            ) : (
+              <NotIncluded />
+            )}
+          </SectionCard>
+
+          {/* In-House Medication Orders */}
+          <SectionCard title="In-House Medication Orders">
+            {sections.inHouseMedications.length > 0 ? (
+              <Stack spacing={2}>
+                {sections.inHouseMedications.map((med) => (
+                  <Box key={med.planId}>
+                    <Typography variant="h6" sx={{ fontWeight: 'bold' }}>
+                      {med.medicationName}
+                    </Typography>
+                    {med.dose !== undefined || med.units || med.route ? (
+                      <Typography variant="body2" sx={{ mt: 0.5 }}>
+                        {[
+                          med.dose !== undefined ? String(med.dose) : null,
+                          med.units,
+                          med.route ? `via ${med.route}` : null,
+                        ]
+                          .filter(Boolean)
+                          .join(' ')}
+                      </Typography>
+                    ) : null}
+                    {med.instructions ? (
+                      <Typography variant="body2" sx={{ mt: 0.5 }}>
+                        <strong>Instructions:</strong> {med.instructions}
+                      </Typography>
+                    ) : null}
+                    {med.diagnoses.length > 0 ? (
+                      <Typography variant="body2" sx={{ mt: 0.5 }}>
+                        <strong>Diagnoses:</strong>{' '}
+                        {med.diagnoses.map((d) => (d.display ? `${d.code} — ${d.display}` : d.code)).join('; ')}
+                      </Typography>
+                    ) : null}
+                    {med.cptCodes.length > 0 ? (
+                      <Typography variant="body2" sx={{ mt: 0.5 }}>
+                        <strong>CPT codes:</strong>{' '}
+                        {med.cptCodes
+                          .map((c) => {
+                            const label = formatCptCodeAndModifiersForDisplay(c);
+                            return c.display ? `${label} — ${c.display}` : label;
+                          })
+                          .join('; ')}
+                      </Typography>
+                    ) : null}
                   </Box>
                 ))}
               </Stack>

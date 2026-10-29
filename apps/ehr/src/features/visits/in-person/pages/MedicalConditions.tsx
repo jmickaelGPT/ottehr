@@ -2,13 +2,10 @@ import { Stack, Typography } from '@mui/material';
 import { FC } from 'react';
 import { dataTestIds } from '../../../../constants/data-test-ids';
 import { Loader } from '../../shared/components/Loader';
-import { MedicalHistoryDoubleCard } from '../../shared/components/medical-history-tab';
-import { MedicalConditionsPatientColumn } from '../../shared/components/medical-history-tab/MedicalConditions/MedicalConditionsPatientColumn';
-import { MedicalConditionsProviderColumn } from '../../shared/components/medical-history-tab/MedicalConditions/MedicalConditionsProviderColumn';
 import { PageTitle } from '../../shared/components/PageTitle';
-import { useAppointmentData, useChartData } from '../../shared/stores/appointment/appointment.store';
-import { InfoAlert } from '../components/InfoAlert';
-import { MedicalConditionsNotes } from '../components/medical-conditions/MedicalConditionsNotes';
+import { useChartData } from '../../shared/hooks/useChartData';
+import { useAppointmentData } from '../../shared/stores/appointment/appointment.store';
+import { MedicalConditionsBody } from '../components/medical-conditions/MedicalConditionsBody';
 import { useInPersonNavigationContext } from '../context/InPersonNavigationContext';
 interface MedicalConditionsProps {
   appointmentID?: string;
@@ -37,15 +34,7 @@ export const MedicalConditions: FC<MedicalConditionsProps> = () => {
         label="Medical Conditions"
         showIntakeNotesButton={interactionMode === 'main'}
       />
-      <InfoAlert text="Ask: Does the patient have any significant past or ongoing medical issues?" />
-      <MedicalHistoryDoubleCard
-        label="Medical conditions"
-        patientSide={<MedicalConditionsPatientColumn />}
-        patientSideLabel="Patient provided"
-        providerSide={<MedicalConditionsProviderColumn />}
-        providerSideLabel="Healthcare staff input"
-      />
-      <MedicalConditionsNotes />
+      <MedicalConditionsBody />
     </Stack>
   );
 };

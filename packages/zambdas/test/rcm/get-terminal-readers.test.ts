@@ -1,71 +1,85 @@
 import type { APIGatewayProxyResult } from 'aws-lambda';
 import { describe, expect, it, vi } from 'vitest';
-import { validateRequestParameters } from '../../src/rcm/payments/get-terminal-readers/validateRequestParameters';
+import { GetTerminalReadersBodySchema } from '../../src/rcm/payments/get-terminal-readers/index';
 import type { ZambdaInput } from '../../src/shared/types/common';
+import { validateWithSchema } from '../../src/shared/validation';
 
 // ---------------------------------------------------------------------------
 // validateRequestParameters
 // ---------------------------------------------------------------------------
 
 function makeInput(body: Record<string, unknown> | null): ZambdaInput {
-  return { headers: null, body: body ? JSON.stringify(body) : (null as unknown as string), secrets: null };
+  return { headers: null, body: body ? JSON.stringify(body) : (null as unknown as string), secrets: {} };
 }
 
 describe('get-terminal-readers validateRequestParameters', () => {
   it('returns validated params for valid input', () => {
-    const result = validateRequestParameters(
+    const result = validateWithSchema(
+      GetTerminalReadersBodySchema,
       makeInput({ stripeAccountId: 'acct_123abc', terminalLocationId: 'tml_456def' })
     );
     expect(result).toMatchObject({
       stripeAccountId: 'acct_123abc',
       terminalLocationId: 'tml_456def',
     });
-    expect(result.secrets).toBeNull();
+    expect(result.secrets).toEqual({});
   });
 
   it('throws when stripeAccountId is missing', () => {
-    expect(() => validateRequestParameters(makeInput({ terminalLocationId: 'tml_456def' }))).toThrow(
-      'The following required parameters were missing: stripeAccountId'
-    );
+    expect(() =>
+      validateWithSchema(GetTerminalReadersBodySchema, makeInput({ terminalLocationId: 'tml_456def' }))
+    ).toThrow('Validation error: Required at "stripeAccountId"');
   });
 
   it('throws when stripeAccountId is empty string', () => {
     expect(() =>
-      validateRequestParameters(makeInput({ stripeAccountId: '', terminalLocationId: 'tml_456def' }))
-    ).toThrow('The following required parameters were missing: stripeAccountId');
+      validateWithSchema(
+        GetTerminalReadersBodySchema,
+        makeInput({ stripeAccountId: '', terminalLocationId: 'tml_456def' })
+      )
+    ).toThrow('Validation error: String must contain at least 1 character(s) at "stripeAccountId"');
   });
 
   it('throws when stripeAccountId is not a string', () => {
     expect(() =>
-      validateRequestParameters(makeInput({ stripeAccountId: 123, terminalLocationId: 'tml_456def' }))
-    ).toThrow('The following required parameters were missing: stripeAccountId');
+      validateWithSchema(
+        GetTerminalReadersBodySchema,
+        makeInput({ stripeAccountId: 123, terminalLocationId: 'tml_456def' })
+      )
+    ).toThrow('Validation error: Expected string, received number at "stripeAccountId"');
   });
 
   it('throws when terminalLocationId is missing', () => {
-    expect(() => validateRequestParameters(makeInput({ stripeAccountId: 'acct_123abc' }))).toThrow(
-      'The following required parameters were missing: terminalLocationId'
-    );
+    expect(() =>
+      validateWithSchema(GetTerminalReadersBodySchema, makeInput({ stripeAccountId: 'acct_123abc' }))
+    ).toThrow(/terminalLocationId/);
   });
 
   it('throws when terminalLocationId is empty string', () => {
     expect(() =>
-      validateRequestParameters(makeInput({ stripeAccountId: 'acct_123abc', terminalLocationId: '' }))
-    ).toThrow('The following required parameters were missing: terminalLocationId');
+      validateWithSchema(
+        GetTerminalReadersBodySchema,
+        makeInput({ stripeAccountId: 'acct_123abc', terminalLocationId: '' })
+      )
+    ).toThrow('Validation error: String must contain at least 1 character(s) at "terminalLocationId"');
   });
 
   it('throws when terminalLocationId is not a string', () => {
     expect(() =>
-      validateRequestParameters(makeInput({ stripeAccountId: 'acct_123abc', terminalLocationId: 42 }))
-    ).toThrow('The following required parameters were missing: terminalLocationId');
+      validateWithSchema(
+        GetTerminalReadersBodySchema,
+        makeInput({ stripeAccountId: 'acct_123abc', terminalLocationId: 42 })
+      )
+    ).toThrow('Validation error: Expected string, received number at "terminalLocationId"');
   });
 
-  it('parses a pre-parsed body object', () => {
+  it('parses a stringified body', () => {
     const input: ZambdaInput = {
       headers: null,
-      body: { stripeAccountId: 'acct_abc', terminalLocationId: 'tml_def' } as unknown as string,
-      secrets: null,
+      body: JSON.stringify({ stripeAccountId: 'acct_abc', terminalLocationId: 'tml_def' }),
+      secrets: {},
     };
-    const result = validateRequestParameters(input);
+    const result = validateWithSchema(GetTerminalReadersBodySchema, input);
     expect(result.stripeAccountId).toBe('acct_abc');
     expect(result.terminalLocationId).toBe('tml_def');
   });
@@ -83,15 +97,20 @@ const mockStripeClient = {
   },
 };
 
-vi.mock('../../src/shared', async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  return {
-    ...actual,
-    checkOrCreateM2MClientToken: vi.fn().mockResolvedValue('mock-token'),
-    createOystehrClient: vi.fn(),
-    wrapHandler: (_name: string, fn: (...args: unknown[]) => unknown) => fn,
-  };
-});
+vi.mock('../../src/shared/auth', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  checkOrCreateM2MClientToken: vi.fn().mockResolvedValue('mock-token'),
+}));
+
+vi.mock('../../src/shared/helpers', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  createClinicalOystehrClient: vi.fn(),
+}));
+
+vi.mock('../../src/shared/sentry', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  wrapHandler: (_name: string, fn: (...args: unknown[]) => unknown) => fn,
+}));
 
 vi.mock('../../src/shared/stripeIntegration', () => ({
   getStripeClient: vi.fn(() => mockStripeClient),

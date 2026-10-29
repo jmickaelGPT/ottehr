@@ -1,11 +1,12 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { FormFieldItemRecord } from 'config-types';
+import { FormFieldItemRecord } from 'config-types/config/form-fields';
 import React from 'react';
 import { FormProvider, useForm } from 'react-hook-form';
-import { FormGroupPharmacyCollection } from 'src/components/form';
-import { PATIENT_RECORD_CONFIG, PHARMACY_COLLECTION_LINK_IDS } from 'utils';
+import { FormGroupPharmacyCollection } from 'src/components/form/FormGroupPharmacyCollection';
+import { PATIENT_RECORD_CONFIG } from 'utils/lib/ottehr-config/patient-record';
+import { PHARMACY_COLLECTION_LINK_IDS } from 'utils/lib/types/data/search-places';
 import { describe, expect, it, vi } from 'vitest';
 import { SectionSaveButton } from './SectionSaveButton';
 
@@ -59,7 +60,7 @@ const TestHarness = ({ onFormReady }: TestHarnessProps): JSX.Element => {
     return (
       <FormProvider {...methods}>
         <FormGroupPharmacyCollection />
-        <SectionSaveButton fieldKeys={FIELD_KEYS} requiredFieldKeys={[]} patientId="patient-123" />
+        <SectionSaveButton fieldKeys={FIELD_KEYS} patientId="patient-123" />
       </FormProvider>
     );
   };

@@ -3,34 +3,28 @@ import { APIGatewayProxyResult } from 'aws-lambda';
 import { Appointment, Encounter, Patient, Task, TaskInput } from 'fhir/r4b';
 import { DateTime } from 'luxon';
 import { phone } from 'phone';
+import { getTaskResource } from 'utils/lib/fhir/helpers';
+import { getFullestAvailableName, getPatientContactEmail, getPhoneNumberForIndividual } from 'utils/lib/fhir/patient';
 import {
   convertOutreachTextToHtml,
-  FEATURE_FLAGS_CONFIG,
-  getFullestAvailableName,
-  getPatientContactEmail,
-  getPhoneNumberForIndividual,
-  getSecret,
-  getTaskResource,
   isEmailValid,
   maskEmail,
   maskPhoneNumber,
-  Secrets,
-  SecretsKeys,
-  TaskIndicator,
-} from 'utils';
+  removePrefix,
+} from 'utils/lib/helpers/helpers';
+import { FEATURE_FLAGS_CONFIG } from 'utils/lib/ottehr-config/feature-flags';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { TaskIndicator } from 'utils/lib/types/common';
+import { resolveOutreachTaskStripeAccount } from '../../../rcm/scheduled-outreach/producers/shared/produce-outreach-tasks';
 import { NotificationMedium } from '../../../rcm/scheduled-outreach-config/helpers';
-import {
-  checkOrCreateM2MClientToken,
-  createOutreachEmailCommunication,
-  createOystehrClient,
-  fillOutreachTemplate,
-  getEmailClient,
-  resolveTemplatePlaceholders,
-  sendSmsForPatient,
-  StatementType,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createOutreachEmailCommunication, getEmailClient, sendSmsForPatient } from '../../../shared/communication';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { StatementType } from '../../../shared/statements/get-statement-details';
+import { fillOutreachTemplate, resolveTemplatePlaceholders } from '../../../shared/template-placeholders';
+import { ZambdaInput } from '../../../shared/types/common';
+import { safeJsonParse } from '../../../shared/validation';
 
 let m2mToken: string;
 
@@ -40,7 +34,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   if (!input.body) throw new Error('No request body provided');
   if (!input.secrets) throw new Error('Secrets are not defined');
 
-  const task: Task = JSON.parse(input.body);
+  const task: Task = safeJsonParse(input.body);
 
   if (task.resourceType !== 'Task') {
     throw new Error(`Expected Task resource but got ${task.resourceType}`);
@@ -52,7 +46,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   }
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, input.secrets);
-  const oystehr = createOystehrClient(m2mToken, input.secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, input.secrets);
 
   // Mark as in-progress with optimistic locking to guard against duplicate
   // subscription deliveries racing to execute the same task. If another
@@ -83,13 +77,16 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     // Fetch the Patient once for the whole task. All mediums validate against and send to the same
     // snapshot, avoiding redundant FHIR reads and validate-vs-send inconsistencies. Missing reference
     // or a failed fetch is a system/data error (not an invalid contact), so we throw and fail the task.
-    const patientId = patientRef?.replace('Patient/', '');
-    if (!patientId) throw new Error('Task has no patient reference');
+    if (!patientRef) throw new Error('Task has no patient reference');
+    const patientId = patientRef.startsWith('Patient/') ? removePrefix('Patient/', patientRef) : undefined;
+    if (!patientId || patientId.includes('/')) {
+      throw new Error(`Task patient reference "${patientRef}" is not a literal "Patient/<id>" reference`);
+    }
     let patient: Patient;
     try {
       patient = await oystehr.fhir.get<Patient>({ resourceType: 'Patient', id: patientId });
-    } catch {
-      throw new Error(`Failed to fetch patient ${patientId} for notification`);
+    } catch (err) {
+      throw new Error(`Failed to fetch patient ${patientId} for notification: ${describeFhirError(err)}`);
     }
 
     console.log(`Executing send-notification for patient ${patientRef}, mediums: ${mediums.join(', ')}`);
@@ -256,6 +253,13 @@ function extractInputValue(task: Task, key: string): string | undefined {
   return task.input?.find((i) => i.type?.text === key)?.valueString;
 }
 
+function describeFhirError(err: unknown): string {
+  if (err instanceof Oystehr.OystehrFHIRError) {
+    return `${err.code} ${err.message}`;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
 // ── Contact validation ─────────────────────────────────────────────────────
 
 function validatePatientPhone(patient: Patient): { valid: boolean; reason?: string } {
@@ -298,6 +302,7 @@ async function sendOutreachSms(
   const placeholderInput = await resolveTemplatePlaceholders({
     patient,
     encounterRef: task.focus?.reference,
+    stripeAccount: await resolveOutreachTaskStripeAccount(task, oystehr),
     oystehr,
     secrets,
   });
@@ -331,6 +336,7 @@ async function sendOutreachEmail(
   const placeholderInput = await resolveTemplatePlaceholders({
     patient,
     encounterRef: task.focus?.reference,
+    stripeAccount: await resolveOutreachTaskStripeAccount(task, oystehr),
     oystehr,
     secrets,
   });

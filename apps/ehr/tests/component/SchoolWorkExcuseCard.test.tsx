@@ -23,15 +23,18 @@ const mockChartDataSetState = vi.fn();
 let mockChartData: Pick<GetChartDataResponse, 'schoolWorkNotes'> = {};
 
 vi.mock('../../src/features/visits/shared/stores/appointment/appointment.store', () => ({
-  useChartData: () => ({
-    chartData: mockChartData,
-    setPartialChartData: mockSetPartialChartData,
-    chartDataSetState: mockChartDataSetState,
-  }),
   useSaveChartData: vi.fn(),
   useDeleteChartData: vi.fn(),
   useAppointmentData: () => ({
     questionnaireResponse: {},
+  }),
+}));
+
+vi.mock('../../src/features/visits/shared/hooks/useChartData', () => ({
+  useChartData: () => ({
+    chartData: mockChartData,
+    setPartialChartData: mockSetPartialChartData,
+    chartDataSetState: mockChartDataSetState,
   }),
 }));
 
@@ -57,7 +60,8 @@ vi.mock('../../src/hooks/useLocationSupportPhones', () => ({
 }));
 
 import { SchoolWorkExcuseCard } from 'src/features/visits/shared/components/SchoolWorkExcuseCard';
-import { GetChartDataResponse, SchoolWorkNoteExcuseDocFileDTO } from 'utils';
+import { SchoolWorkNoteExcuseDocFileDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
+import { GetChartDataResponse } from 'utils/lib/types/api/chart-data/get-chart-data.types';
 import {
   useDeleteChartData,
   useSaveChartData,

@@ -1,54 +1,109 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { Claim, ClaimResponse, Patient, PaymentReconciliation } from 'fhir/r4b';
-import { EraDetailResponse, FHIR_RESOURCE_NOT_FOUND } from 'utils';
-import { checkOrCreateM2MClientToken, wrapHandler, ZambdaInput } from '../../shared';
-import { createBillingClient, ERA_CHECK_SYSTEM, ERA_ID_SYSTEM, fhirName, findRef, resolvePayersByRef } from '../shared';
-import { GetEraDetailParams, validateRequestParameters } from './validateRequestParameters';
+import {
+  Claim,
+  ClaimResponse,
+  Coverage,
+  DocumentReference,
+  Organization,
+  Patient,
+  PaymentReconciliation,
+  Practitioner,
+} from 'fhir/r4b';
+import { RAW_X12_EXTENSION_URL } from 'utils/lib/fhir/constants';
+import { codeableConcept, getExtension, getNPI, getTaxID } from 'utils/lib/fhir/helpers';
+import { removePrefix } from 'utils/lib/helpers/helpers';
+import { CODE_SYSTEM_CLAIM_TYPE, CODE_SYSTEM_PROCESS_PRIORITY } from 'utils/lib/helpers/rcm/constants';
+import { ERA_SOURCE } from 'utils/lib/types/data/billing/billing.constants';
+import { GetEraDetailInputSchema } from 'utils/lib/types/data/billing/billing.schemas';
+import { EraAttachment, EraDetailResponse, EraPayee } from 'utils/lib/types/data/billing/billing.types';
+import { FHIR_RESOURCE_NOT_FOUND } from 'utils/lib/types/errors';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { assertDefined } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { ValidatedZambdaInput, validateWithSchema } from '../../shared/validation';
+import {
+  countEraClaims,
+  extractReportedCharge,
+  fetchClaimResponsesByPaymentReconciliations,
+  fetchEraProcessingProvenances,
+  fetchResourcesGrouped,
+  isMatchedToClaim,
+  sortClaimResponsesByRecency,
+  summarizeClaimPayments,
+} from '../claim-amounts';
+import { buildEraClaimRemit, eraContainedMemberId, eraPatientAccountNumber, resolveEraPayee } from '../era-remits';
+import { manualEraEntryFromFhir } from '../manual-era';
+import {
+  createBillingClient,
+  createEraReadClient,
+  fhirName,
+  findById,
+  findRef,
+  getEraCheckNumber,
+  getEraSource,
+  resolvePayersByRef,
+  sortClaimInsurance,
+} from '../shared';
+
+type GetEraDetailParams = ValidatedZambdaInput<typeof GetEraDetailInputSchema>;
 
 let m2mToken: string;
 const ZAMBDA_NAME = 'get-billing-era-detail';
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  const params = validateRequestParameters(input);
+  const params = validateWithSchema(GetEraDetailInputSchema, input);
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, params.secrets);
   const oystehr = createBillingClient(m2mToken, params.secrets);
+  const eraReadClient = createEraReadClient(m2mToken, params.secrets);
 
-  const response = await performEffect(oystehr, params);
+  const response = await performEffect(oystehr, eraReadClient, params);
   return { statusCode: 200, body: JSON.stringify(response) };
 });
 
-async function performEffect(oystehr: Oystehr, params: GetEraDetailParams): Promise<EraDetailResponse> {
-  const bundle = await oystehr.fhir.search<PaymentReconciliation>({
+export async function performEffect(
+  oystehr: Oystehr,
+  eraReadClient: Oystehr,
+  params: GetEraDetailParams
+): Promise<EraDetailResponse> {
+  const bundle = await eraReadClient.fhir.search<PaymentReconciliation>({
     resourceType: 'PaymentReconciliation',
     params: [{ name: '_id', value: params.eraId }],
   });
   const pr = bundle.unbundle().find((r) => r.id === params.eraId);
   if (!pr) throw FHIR_RESOURCE_NOT_FOUND('PaymentReconciliation');
 
-  const payersByRef = await resolvePayersByRef(oystehr, [pr.paymentIssuer?.reference]);
-  const payerOrg = pr.paymentIssuer?.reference ? payersByRef.get(pr.paymentIssuer.reference) : undefined;
+  // ClaimResponses linked to this ERA via its era-processing Provenance
+  const claimResponses: ClaimResponse[] =
+    (await fetchClaimResponsesByPaymentReconciliations(eraReadClient, [pr])).get(params.eraId) ?? [];
 
-  // Find ClaimResponses linked via ERA identifier
-  const eraIdValue = pr.identifier?.find((id) => id.system === ERA_ID_SYSTEM)?.value;
-  let claimResponses: ClaimResponse[] = [];
-  if (eraIdValue) {
-    const crResult = await oystehr.fhir.search<ClaimResponse>({
-      resourceType: 'ClaimResponse',
-      params: [{ name: 'identifier', value: `${ERA_ID_SYSTEM}|${eraIdValue}` }],
-    });
-    claimResponses = crResult.unbundle();
+  // process-era PaymentReconciliations carry no paymentIssuer; fall back to the payer on the
+  // ClaimResponses
+  const payersByRef = await resolvePayersByRef(oystehr, [
+    pr.paymentIssuer?.reference,
+    ...claimResponses.map((cr) => cr.insurer?.reference),
+  ]);
+  const payerRef =
+    pr.paymentIssuer?.reference ?? claimResponses.find((cr) => cr.insurer?.reference)?.insurer?.reference;
+  const payerOrg = payerRef ? payersByRef.get(payerRef) : undefined;
+
+  // Group matched responses by claim id; an ERA can adjudicate the same claim more than once
+  // (reversal + correction), and unmatched responses only carry a contained '#request' claim so
+  // they are excluded here and surface only in the counts below.
+  const responsesByClaimId = new Map<string, ClaimResponse[]>();
+  for (const claimResponse of claimResponses) {
+    if (!isMatchedToClaim(claimResponse)) continue;
+    const claimId = claimResponse.request?.reference?.replace('Claim/', '');
+    if (!claimId) continue;
+    const list = responsesByClaimId.get(claimId) ?? [];
+    list.push(claimResponse);
+    responsesByClaimId.set(claimId, list);
   }
+  const uniqueClaimIds = [...responsesByClaimId.keys()];
 
-  // Fetch referenced claims + patients
-  const claimIds = [
-    ...claimResponses.map((cr) => cr.request?.reference?.replace('Claim/', '')).filter(Boolean),
-    ...(pr.detail ?? []).map((d) => d.request?.reference?.replace('Claim/', '')).filter(Boolean),
-  ];
-  const uniqueClaimIds = [...new Set(claimIds)] as string[];
-
-  let claims: Claim[] = [];
-  let patients: Patient[] = [];
+  const claims: Claim[] = [];
+  const patients: Patient[] = [];
   if (uniqueClaimIds.length > 0) {
     const claimResult = await oystehr.fhir.search<Claim | Patient>({
       resourceType: 'Claim',
@@ -58,50 +113,186 @@ async function performEffect(oystehr: Oystehr, params: GetEraDetailParams): Prom
       ],
     });
     const claimResources = claimResult.unbundle();
-    claims = claimResources.filter((r): r is Claim => r.resourceType === 'Claim');
-    patients = claimResources.filter((r): r is Patient => r.resourceType === 'Patient');
+    claims.push(...claimResources.filter((r): r is Claim => r.resourceType === 'Claim'));
+    patients.push(...claimResources.filter((r): r is Patient => r.resourceType === 'Patient'));
   }
 
-  const claimItems = claims.map((c) => {
-    const cr = claimResponses.find((r) => r.request?.reference === `Claim/${c.id}`);
-    const patient = findRef<Patient>(patients, c.patient?.reference);
+  const unmatchedResponses = claimResponses.filter((claimResponse) => !isMatchedToClaim(claimResponse));
 
-    let paid = 0;
-    let allowed = 0;
-    if (cr?.total) {
-      paid = cr.total.find((t) => t.category?.coding?.[0]?.code === 'paid')?.amount?.value ?? 0;
-      allowed = cr.total.find((t) => t.category?.coding?.[0]?.code === 'allowed')?.amount?.value ?? 0;
-    }
+  const referencedPatientsById = await fetchResourcesGrouped<Patient>({
+    oystehr,
+    resourceType: 'Patient',
+    ids: unmatchedResponses
+      .map((claimResponse) => removePrefix('Patient/', claimResponse.patient?.reference ?? ''))
+      .filter((id): id is string => !!id),
+    buildParam: (batch) => [
+      {
+        name: '_id',
+        value: batch.join(','),
+      },
+    ],
+    groupKeyOf: (patient) => patient.id,
+  });
+  const referencedPatients = [...referencedPatientsById.values()].flat();
+
+  unmatchedResponses.forEach((claimResponse) => {
+    const claim = claimResponse.contained?.find((resource) => resource.resourceType === 'Claim') ?? {
+      resourceType: 'Claim',
+      created: '',
+      insurance: [],
+      patient: { display: 'Unknown' },
+      priority: codeableConcept('normal', CODE_SYSTEM_PROCESS_PRIORITY, 'Normal'),
+      provider: { display: 'Unknown' },
+      status: 'active',
+      type: codeableConcept('unknown', CODE_SYSTEM_CLAIM_TYPE, 'Unknown'),
+      use: 'claim',
+    };
+    const patient: Patient = claimResponse.contained?.find((resource) => resource.resourceType === 'Patient') ?? {
+      resourceType: 'Patient',
+    };
+    patient.birthDate ??= findRef<Patient>(referencedPatients, claimResponse.patient?.reference)?.birthDate;
+
+    const id = 'unmatched-' + claimResponse.id;
+    claim.id = id;
+    patient.id = id;
+    claim.patient.reference = 'Patient/' + id;
+    responsesByClaimId.set(id, [claimResponse]);
+
+    claims.push(claim);
+    patients.push(patient);
+  });
+
+  // Focal coverage per claim -> member id, the same field the claim detail screen shows.
+  // Self-pay stubs use logical references (no Coverage/<id>), so they drop out here.
+  const coverageIdByClaimId = new Map<string, string>();
+  for (const claim of claims) {
+    const coverageRef = [...sortClaimInsurance(claim)]
+      .sort((a, b) => (b.focal ? 1 : 0) - (a.focal ? 1 : 0))
+      .map((entry) => entry.coverage?.reference)
+      .find((ref): ref is string => !!ref && ref.startsWith('Coverage/'));
+    if (claim.id && coverageRef) coverageIdByClaimId.set(claim.id, coverageRef.replace('Coverage/', ''));
+  }
+  const coverages: Coverage[] = [];
+  const coverageIds = [...new Set(coverageIdByClaimId.values())];
+  if (coverageIds.length > 0) {
+    const coverageResult = await oystehr.fhir.search<Coverage>({
+      resourceType: 'Coverage',
+      params: [{ name: '_id', value: coverageIds.join(',') }],
+    });
+    coverages.push(...coverageResult.unbundle());
+  }
+
+  const claimItems = claims.map((claim) => {
+    const claimResponses = responsesByClaimId.get(claim.id ?? '') ?? [];
+    const patient = findRef<Patient>(patients, claim.patient?.reference);
+    const matched = !claim.id?.startsWith('unmatched');
+
+    const orderedResponses = sortClaimResponsesByRecency(claimResponses);
+    // our own claim total for matched rows; an unmatched row's contained claim carries no total,
+    // so fall back to the charge the payer reported (CLP03 / line charges) on the latest remit
+    const billed =
+      claim.total?.value ?? orderedResponses.map(extractReportedCharge).findLast((charge) => charge != null) ?? 0;
+    // This calculation does not include patient payments or write offs since it only pertains to the data on the ERA
+    const payments = summarizeClaimPayments(claimResponses, billed);
+
+    const coverageId = coverageIdByClaimId.get(claim.id ?? '');
+    const coverage = coverageId ? coverages.find((candidate) => candidate.id === coverageId) : undefined;
+    // the NM109 the payer echoed, carried on the unmatched remit's contained resources
+    const containedMemberId = orderedResponses.map(eraContainedMemberId).find(Boolean);
 
     return {
-      claimId: c.id ?? '',
+      claimId: claim.id ?? '',
       patientName: fhirName(patient),
-      dos: c.item?.[0]?.servicedPeriod?.start ?? c.created ?? '',
-      billed: c.total?.value ?? 0,
-      allowed,
-      paid,
-      posted: paid,
-      status: cr?.outcome ?? '',
+      patientDob: patient?.birthDate ?? '',
+      dos: claim.item?.[0]?.servicedPeriod?.start ?? claim.item?.[0]?.servicedDate ?? claim.created ?? '',
+      billed,
+      allowed: payments.allowed,
+      paid: payments.insurancePaid,
+      posted: payments.insurancePaid,
+      patientResp: payments.patientResp,
+      patientAccountNumber: eraPatientAccountNumber(claimResponses, claim, matched),
+      memberId: coverage?.subscriberId ?? containedMemberId ?? '',
+      matched,
+      claimResponseIds: orderedResponses
+        .map((claimResponse) => claimResponse.id)
+        .filter((id): id is string => id != null),
+      remits: orderedResponses.map((claimResponse) => buildEraClaimRemit(claimResponse, claim)),
     };
   });
 
-  const checkNumber = pr.identifier?.find((id) => id.system === ERA_CHECK_SYSTEM)?.value ?? '';
-  const claimCount = pr.detail?.length ?? 0;
-  const matchedCount = pr.detail?.filter((d) => d.request?.reference).length ?? 0;
+  const checkNumber = getEraCheckNumber(pr) ?? '';
+  const counts = countEraClaims(claimResponses);
+  const source = getEraSource(pr);
+  const manual = source === ERA_SOURCE.manual;
+  const [payee, attachments, provenance] = await Promise.all([
+    // a manual remit names its billing provider; converters only replicate the payee onto unmatched remits
+    requestorPayee(oystehr, pr).then((fromRequestor) => fromRequestor ?? resolveEraPayee(claimResponses)),
+    fetchEraAttachments(oystehr, params.eraId),
+    // its author keyed a manual remit in
+    manual
+      ? fetchEraProcessingProvenances(oystehr, [`PaymentReconciliation/${params.eraId}`]).then(([first]) => first)
+      : undefined,
+  ]);
 
   return {
-    id: pr.id ?? '',
-    eraId: eraIdValue ?? '',
+    id: params.eraId,
+    source,
+    // every ERA has these: the server versions each write, and FHIR requires the rest
+    versionId: assertDefined(pr.meta?.versionId, `PaymentReconciliation/${params.eraId} version`),
     checkNumber,
-    checkDate: pr.paymentDate ?? '',
-    checkAmount: pr.paymentAmount?.value ?? 0,
+    checkDate: pr.paymentDate,
+    createdDate: pr.created,
+    checkAmount: assertDefined(pr.paymentAmount.value, `PaymentReconciliation/${params.eraId} payment amount`),
+    payee,
     payerName: payerOrg?.name ?? pr.paymentIssuer?.display ?? '',
     payerFhirId: payerOrg?.id ?? '',
-    status: pr.outcome ?? pr.status ?? '',
-    paymentMethod: pr.paymentIdentifier ? (pr.paymentIdentifier.system?.includes('check') ? 'CHK' : 'EFT') : '',
-    totalClaims: claimCount,
-    matchedClaims: matchedCount,
-    unmatchedClaims: claimCount - matchedCount,
+    // BPR04 (ACH/CHK/NON) is not preserved by either converter: the trace number's system is
+    // always the era-check-number system whether the payer sent a check or an EFT, so anything
+    // derived from it would be a coin flip. Only a typed payment identifier is a real signal.
+    paymentMethod: pr.paymentIdentifier?.type?.coding?.[0]?.code ?? '',
+    totalClaims: counts.total,
+    matchedClaims: counts.matched,
+    unmatchedClaims: counts.unmatched,
+    x12: getExtension(pr, RAW_X12_EXTENSION_URL)?.valueString ?? '',
     claims: claimItems,
+    attachments,
+    ...(manual ? { manualEntry: manualEraEntryFromFhir(pr, claimResponses, provenance) } : {}),
   };
+}
+
+async function requestorPayee(oystehr: Oystehr, pr: PaymentReconciliation): Promise<EraPayee | null> {
+  const [resourceType, id] = pr.requestor?.reference?.split('/') ?? [];
+  if ((resourceType !== 'Organization' && resourceType !== 'Practitioner') || !id) return null;
+  const provider = await findById<Organization | Practitioner>(oystehr, resourceType, id);
+  const name = pr.requestor?.display ?? '';
+  if (!provider) return name ? { name, npi: '', taxId: '' } : null;
+  return {
+    name: (provider.resourceType === 'Organization' ? provider.name : fhirName(provider)) || name,
+    npi: getNPI(provider) ?? '',
+    taxId: getTaxID(provider) ?? '',
+  };
+}
+
+async function fetchEraAttachments(oystehr: Oystehr, eraId: string): Promise<EraAttachment[]> {
+  const bundle = await oystehr.fhir.search<DocumentReference>({
+    resourceType: 'DocumentReference',
+    params: [{ name: 'related', value: `PaymentReconciliation/${eraId}` }],
+  });
+  return (
+    bundle
+      .unbundle()
+      .filter((resource): resource is DocumentReference => resource.resourceType === 'DocumentReference')
+      // adding an attachment always writes these
+      .map((documentReference) => {
+        const attachment = documentReference.content[0]?.attachment;
+        const field = (name: string): string => `DocumentReference/${documentReference.id} ${name}`;
+        return {
+          id: assertDefined(documentReference.id, 'DocumentReference id'),
+          fileName: assertDefined(attachment?.title, field('title')),
+          contentType: assertDefined(attachment?.contentType, field('content type')),
+          dateAdded: assertDefined(documentReference.date, field('date')),
+        };
+      })
+      .sort((a, b) => a.dateAdded.localeCompare(b.dateAdded))
+  );
 }

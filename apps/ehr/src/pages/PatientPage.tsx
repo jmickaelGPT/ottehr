@@ -1,13 +1,41 @@
+import { progressNoteIcon } from '@ehrTheme/icons';
+import ContactPageOutlinedIcon from '@mui/icons-material/ContactPageOutlined';
+import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined';
+import DownloadIcon from '@mui/icons-material/Download';
+import FaxOutlinedIcon from '@mui/icons-material/FaxOutlined';
+import HistoryEduOutlinedIcon from '@mui/icons-material/HistoryEduOutlined';
+import HistoryOutlinedIcon from '@mui/icons-material/HistoryOutlined';
+import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined';
 import MergeIcon from '@mui/icons-material/MergeType';
+import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined';
 import { TabContext, TabList, TabPanel } from '@mui/lab';
-import { Alert, Box, Button, CircularProgress, Paper, Skeleton, Stack, Tab, Tooltip, Typography } from '@mui/material';
+import {
+  Alert,
+  Box,
+  Button,
+  CircularProgress,
+  ListItemIcon,
+  ListItemText,
+  Menu,
+  MenuItem,
+  Paper,
+  Skeleton,
+  Stack,
+  Tab,
+  Tooltip,
+  Typography,
+} from '@mui/material';
 import { useQueryClient } from '@tanstack/react-query';
 import { enqueueSnackbar } from 'notistack';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { AccountSettingsDialog } from 'src/components/dialogs/AccountSettingsDialog';
 import { PatientInHouseLabsTab } from 'src/components/PatientInHouseLabsTab';
 import { PatientRadiologyTab } from 'src/components/PatientRadiologyTab';
+import { useSendFax } from 'src/features/fax/hooks/useSendFax';
+import { FaxVisitOption } from 'src/features/fax/model/types';
+import { SendFaxDialog } from 'src/features/fax/ui/SendFaxDialog';
+import { PatientNotesButton } from 'src/features/patient-notes/components/PatientNotesButton';
 import { ROUTER_PATH } from 'src/features/visits/in-person/routing/routesInPerson';
 import { PatientAvatar } from 'src/features/visits/shared/components/patient/info/Avatar';
 import Contacts from 'src/features/visits/shared/components/patient/info/Contacts';
@@ -15,15 +43,27 @@ import { FullNameDisplay } from 'src/features/visits/shared/components/patient/i
 import { IdentifiersRow } from 'src/features/visits/shared/components/patient/info/IdentifiersRow';
 import Summary from 'src/features/visits/shared/components/patient/info/Summary';
 import { PatientFollowupEncountersGrid } from 'src/features/visits/shared/components/patient/PatientFollowupEncountersGrid';
+import { formatVisitDateTimeWithZone } from 'src/helpers/formatDateTime';
+import { getLegacyDataUrl } from 'src/helpers/legacyData';
+import { useDownloadMedicalRecord } from 'src/hooks/useDownloadMedicalRecord';
 import useEvolveUser from 'src/hooks/useEvolveUser';
 import { useGetActiveMergeTask } from 'src/hooks/useGetPatient';
-import { getFirstName, getLastName, GetMergePatientsTaskResponse, MergePatientsResponse, RoleType } from 'utils';
+import { formatPatientTabTitle } from 'src/shared/utils/patientTabTitle';
+import { otherColors } from 'src/themes/ottehr/colors';
+import {
+  getFirstName,
+  getFullestAvailableName,
+  getLastName,
+  getMergedIntoPatientReference,
+} from 'utils/lib/fhir/patient';
+import { GetMergePatientsTaskResponse, MergePatientsResponse } from 'utils/lib/types/api/patient-account';
+import { RoleType } from 'utils/lib/types/api/user.types';
 import CustomBreadcrumbs from '../components/CustomBreadcrumbs';
+import GoToButton from '../components/GoToButton';
 import { PatientEncountersGrid } from '../components/PatientEncountersGrid';
 import { PatientLabsTab } from '../components/PatientLabsTab';
 import { PatientMergedBanner } from '../components/PatientMergedBanner';
 import { PatientsMergeDifference } from '../components/patients-merge/PatientsMergeDifference';
-import { RoundedButton } from '../components/RoundedButton';
 import { dataTestIds } from '../constants/data-test-ids';
 import { FEATURE_FLAGS } from '../constants/feature-flags';
 import { useApiClients } from '../hooks/useAppClients';
@@ -34,6 +74,7 @@ import PageContainer from '../layout/PageContainer';
 export default function PatientPage(): JSX.Element {
   const { id } = useParams();
   const location = useLocation();
+  const navigate = useNavigate();
   const defaultTab = location.state?.defaultTab;
   const isLegacyPatientFollowupsEnabled = FEATURE_FLAGS.LEGACY_PATIENT_FOLLOWUPS_ENABLED;
   const [tab, setTab] = useState(
@@ -41,18 +82,23 @@ export default function PatientPage(): JSX.Element {
   );
   const [showAccountSettingsDialog, setShowAccountSettingsDialog] = useState(false);
   const [mergePatientIds, setMergePatientIds] = useState<[string, string] | null>(null);
+  const [medicalRecordMenuAnchor, setMedicalRecordMenuAnchor] = useState<HTMLElement | null>(null);
+  // Which of the patient-record fax entry points is open; the source it sends is derived from it.
+  const [faxDialog, setFaxDialog] = useState<'patient-docs' | 'medical-record' | null>(null);
 
   const currentUser = useEvolveUser();
   const isAdmin = currentUser?.hasRole([RoleType.Administrator]) ?? false;
 
   const { loading, patient, duplicatePatients } = useGetPatient(id);
 
+  const { downloadMedicalRecord, isDownloading: isDownloadingMedicalRecord } = useDownloadMedicalRecord(id);
+
   const queryClient = useQueryClient();
   const { data: mergeTaskData, refetch: refetchMergeTask } = useGetActiveMergeTask(id);
   const activeMergeTask = mergeTaskData?.task ?? null;
   const mergeFailed = activeMergeTask?.status === 'failed';
   // This patient is a merged-away record (it was absorbed into another patient).
-  const isMergedPatient = patient?.active === false && patient?.link?.some((l) => l.type === 'replaced-by');
+  const isMergedPatient = !!patient && !!getMergedIntoPatientReference(patient);
   // Once this patient is a merged-away record the merge is done, so don't keep
   // showing the in-progress banner even if the task poll lags behind.
   const mergeInProgress = !!activeMergeTask && !mergeFailed && !isMergedPatient;
@@ -161,12 +207,50 @@ export default function PatientPage(): JSX.Element {
 
   const { data: visitHistory } = useGetPatientVisitHistory(patient?.id);
 
-  const appointments = visitHistory?.visits || [];
+  const appointments = useMemo(() => visitHistory?.visits ?? [], [visitHistory?.visits]);
   const latestAppointment = appointments?.[0];
+
+  const faxableVisits: FaxVisitOption[] = useMemo(
+    () =>
+      appointments.map((appointment) => ({
+        appointmentId: appointment.appointmentId,
+        label: appointment.dateTime
+          ? formatVisitDateTimeWithZone(appointment.dateTime, appointment.timezone)
+          : appointment.appointmentId,
+      })),
+    [appointments]
+  );
+
+  const faxSource = useMemo(() => {
+    if (!id || !faxDialog) return undefined;
+    return faxDialog === 'medical-record'
+      ? ({ type: 'medical-record', patientId: id } as const)
+      : ({ type: 'visits', patientId: id, appointmentIds: faxableVisits.map((v) => v.appointmentId) } as const);
+  }, [faxDialog, faxableVisits, id]);
+
+  const faxController = useSendFax(faxSource);
+  const { open: openFaxDialog, isOpen: isFaxDialogOpen } = faxController;
+
+  // The controller owns the dialog's open state; clearing which entry point opened it keeps the
+  // source in step when the user closes it.
+  useEffect(() => {
+    if (!isFaxDialogOpen) setFaxDialog(null);
+  }, [isFaxDialogOpen]);
+
+  const openFaxFor = (target: 'patient-docs' | 'medical-record'): void => {
+    if (target === 'patient-docs' && !faxableVisits.length) {
+      enqueueSnackbar('This patient has no visits to fax.', { variant: 'info' });
+      return;
+    }
+    setFaxDialog(target);
+    openFaxDialog();
+  };
+
+  const tabTitle = (patient && formatPatientTabTitle(getFullestAvailableName(patient))) ?? 'Patient Profile';
 
   return (
     <>
-      <PageContainer tabTitle="Patient Profile">
+      <PageContainer tabTitle={tabTitle}>
         <Stack spacing={2}>
           <CustomBreadcrumbs
             chain={[
@@ -201,44 +285,140 @@ export default function PatientPage(): JSX.Element {
 
             <Box sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
               <IdentifiersRow patient={patient} loading={loading} />
-              <FullNameDisplay patient={patient} loading={loading} />
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <FullNameDisplay patient={patient} loading={loading} />
+                <PatientNotesButton patientId={patient?.id} />
+              </Box>
               <Summary patient={patient} loading={loading} />
               <Contacts patient={patient} loading={loading} />
-
-              {!isMergedPatient && (
-                <Box sx={{ display: 'flex', gap: 1 }}>
-                  <RoundedButton
-                    to={`/patient/${id}/info`}
-                    data-testid={dataTestIds.patientRecordPage.seeAllPatientInfoButton}
-                  >
-                    View Patient Profile
-                  </RoundedButton>
-                </Box>
-              )}
             </Box>
 
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+            <Box
+              sx={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(4, 1fr)',
+                gap: 1,
+                alignSelf: 'flex-start',
+              }}
+            >
               {latestAppointment && (
-                <RoundedButton
-                  target="_blank"
-                  sx={{ width: '100%' }}
-                  to={`/in-person/${latestAppointment.appointmentId}/${ROUTER_PATH.REVIEW_AND_SIGN}`}
+                <GoToButton
+                  text="Progress Note"
+                  backgroundColor={otherColors.lightBlue}
+                  onClick={() =>
+                    window.open(
+                      `/in-person/${latestAppointment.appointmentId}/${ROUTER_PATH.REVIEW_AND_SIGN}`,
+                      '_blank',
+                      'noopener,noreferrer'
+                    )
+                  }
                 >
-                  Recent Progress Note
-                </RoundedButton>
+                  <img src={progressNoteIcon} alt="" />
+                </GoToButton>
               )}
               {!isMergedPatient && (
                 <>
-                  <RoundedButton sx={{ width: '100%' }} to={`/patient/${id}/docs`}>
-                    Review Docs
-                  </RoundedButton>
-                  <RoundedButton sx={{ width: '100%' }} onClick={() => setShowAccountSettingsDialog(true)}>
-                    Account Settings
-                  </RoundedButton>
+                  <GoToButton
+                    text="Patient Profile"
+                    backgroundColor={otherColors.lightBlue}
+                    dataTestId={dataTestIds.patientRecordPage.seeAllPatientInfoButton}
+                    onClick={() => navigate(`/patient/${id}/info`)}
+                  >
+                    <ContactPageOutlinedIcon />
+                  </GoToButton>
+                  <GoToButton
+                    text="Account Settings"
+                    backgroundColor={otherColors.lightBlue}
+                    onClick={() => setShowAccountSettingsDialog(true)}
+                  >
+                    <SettingsOutlinedIcon />
+                  </GoToButton>
+                  {FEATURE_FLAGS.LEGACY_DATA_ENABLED && patient && (
+                    <GoToButton
+                      text="Legacy Data"
+                      backgroundColor={otherColors.lightBlue}
+                      dataTestId={dataTestIds.patientRecordPage.legacyDataButton}
+                      to={getLegacyDataUrl(patient)}
+                    >
+                      <HistoryOutlinedIcon />
+                    </GoToButton>
+                  )}
+                  {/* Review Docs opens the second row of the grid, as laid out in the design. */}
+                  <Box sx={{ gridColumnStart: 1 }}>
+                    <GoToButton
+                      text="Review Docs"
+                      backgroundColor={otherColors.lightBlue}
+                      onClick={() => navigate(`/patient/${id}/docs`)}
+                    >
+                      <DescriptionOutlinedIcon />
+                    </GoToButton>
+                  </Box>
+                  <GoToButton
+                    text="Fax Patient Docs"
+                    backgroundColor={otherColors.lightBlue}
+                    dataTestId={dataTestIds.patientRecordPage.faxPatientDocsButton}
+                    onClick={() => openFaxFor('patient-docs')}
+                  >
+                    <FaxOutlinedIcon />
+                  </GoToButton>
+                  <GoToButton
+                    text="Medical Record"
+                    backgroundColor={otherColors.lightBlue}
+                    dataTestId={dataTestIds.patientRecordPage.medicalRecordButton}
+                    loading={isDownloadingMedicalRecord}
+                    onClick={(event) => setMedicalRecordMenuAnchor(event.currentTarget)}
+                  >
+                    <Inventory2OutlinedIcon />
+                  </GoToButton>
+                  <GoToButton
+                    text="Action Logs"
+                    backgroundColor={otherColors.lightBlue}
+                    onClick={() => navigate(`/patient/${id}/action-logs`)}
+                  >
+                    <HistoryEduOutlinedIcon />
+                  </GoToButton>
                 </>
               )}
             </Box>
           </Paper>
+
+          <Menu
+            anchorEl={medicalRecordMenuAnchor}
+            open={Boolean(medicalRecordMenuAnchor)}
+            onClose={() => setMedicalRecordMenuAnchor(null)}
+          >
+            <MenuItem
+              data-testid={dataTestIds.patientRecordPage.downloadMedicalRecordArchiveMenuItem}
+              disabled={isDownloadingMedicalRecord}
+              onClick={() => {
+                setMedicalRecordMenuAnchor(null);
+                void downloadMedicalRecord();
+              }}
+            >
+              <ListItemIcon>
+                <DownloadIcon fontSize="small" color="primary" />
+              </ListItemIcon>
+              <ListItemText>Download Archive</ListItemText>
+            </MenuItem>
+            <MenuItem
+              data-testid={dataTestIds.patientRecordPage.faxMedicalRecordMenuItem}
+              onClick={() => {
+                setMedicalRecordMenuAnchor(null);
+                openFaxFor('medical-record');
+              }}
+            >
+              <ListItemIcon>
+                <FaxOutlinedIcon fontSize="small" color="primary" />
+              </ListItemIcon>
+              <ListItemText>Send as Fax</ListItemText>
+            </MenuItem>
+          </Menu>
+
+          <SendFaxDialog
+            controller={faxController}
+            title={faxDialog === 'medical-record' ? 'Fax Medical Record' : 'Fax Patient Docs'}
+            visits={faxDialog === 'patient-docs' ? faxableVisits : undefined}
+          />
 
           <PatientMergedBanner patient={patient} />
 

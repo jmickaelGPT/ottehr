@@ -6,7 +6,11 @@ import { DateTime } from 'luxon';
 import React, { useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useGetAppointmentAccessibility } from 'src/features/visits/shared/hooks/useGetAppointmentAccessibility';
-import { ExtendedMedicationDataForResponse, searchRouteByCode } from 'utils';
+import { searchRouteByCode } from 'utils/lib/fhir/medication-administration';
+import {
+  ExtendedMedicationDataForResponse,
+  inHouseMedicationsMedicationApplianceRoutes,
+} from 'utils/lib/types/api/medication-administration.types';
 import { dataTestIds } from '../../../../../../constants/data-test-ids';
 import { getEditOrderUrl, getInHouseMedicationDetailsUrl } from '../../../routing/helpers';
 import { MedicationStatusChip } from '../statuses/MedicationStatusChip';
@@ -17,6 +21,8 @@ import { MedicationInteractionsAlertButton } from './MedicationInteractionsAlert
 interface MarTableRowProps {
   medication: ExtendedMedicationDataForResponse;
   columnStyles: Record<string, React.CSSProperties>;
+  onPendingMedicationClick?: (medicationId: string) => void;
+  onEditOrder?: (medicationId: string) => void;
 }
 
 const DATE_FORMAT = 'MM/dd/yyyy hh:mm a';
@@ -27,7 +33,12 @@ const StyledTouchRipple = styled(TouchRipple)(({ theme }) => ({
   },
 }));
 
-export const MarTableRow: React.FC<MarTableRowProps> = ({ medication, columnStyles }) => {
+export const MarTableRow: React.FC<MarTableRowProps> = ({
+  medication,
+  columnStyles,
+  onPendingMedicationClick,
+  onEditOrder,
+}) => {
   const navigate = useNavigate();
   const { id: appointmentId } = useParams();
   const rippleRef = React.useRef(null);
@@ -41,6 +52,7 @@ export const MarTableRow: React.FC<MarTableRowProps> = ({ medication, columnStyl
   });
 
   const isPending = medication.status === 'pending';
+  const isCancelled = medication.status === 'cancelled';
   const isCompleted =
     medication.status === 'administered' ||
     medication.status === 'administered-partly' ||
@@ -48,10 +60,18 @@ export const MarTableRow: React.FC<MarTableRowProps> = ({ medication, columnStyl
 
   const handleRowClick = (): void => {
     if (isPending) {
+      if (onPendingMedicationClick) {
+        onPendingMedicationClick(medication.id);
+        return;
+      }
       requestAnimationFrame(() => {
         navigate(`${getInHouseMedicationDetailsUrl(appointmentId!)}?scrollTo=${medication.id}`);
       });
     } else if (isCompleted) {
+      if (onEditOrder) {
+        onEditOrder(medication.id);
+        return;
+      }
       requestAnimationFrame(() => {
         navigate(getEditOrderUrl(appointmentId!, medication.id));
       });
@@ -69,6 +89,8 @@ export const MarTableRow: React.FC<MarTableRowProps> = ({ medication, columnStyl
   }, [medication.dateTimeCreated]);
 
   const formatGivenDateTime = useMemo(() => {
+    if (isCancelled) return '-';
+
     // Try new format first: effectiveDateTime (ISO format)
     if (medication.effectiveDateTime) {
       const date = DateTime.fromISO(medication.effectiveDateTime);
@@ -82,7 +104,7 @@ export const MarTableRow: React.FC<MarTableRowProps> = ({ medication, columnStyl
     }
 
     return '-';
-  }, [medication.effectiveDateTime, medication.dateGiven, medication.timeGiven]);
+  }, [isCancelled, medication.effectiveDateTime, medication.dateGiven, medication.timeGiven]);
 
   return (
     <TableRow
@@ -113,7 +135,7 @@ export const MarTableRow: React.FC<MarTableRowProps> = ({ medication, columnStyl
         {medication.dose || ''} {medication.units || ''}
       </TableCell>
       <TableCell data-testid={dataTestIds.inHouseMedicationsPage.marTable.routeCell} sx={columnStyles.route}>
-        {searchRouteByCode(medication.route)?.display || '-'}
+        {searchRouteByCode(medication.route, inHouseMedicationsMedicationApplianceRoutes)?.display || '-'}
       </TableCell>
       <TableCell sx={columnStyles.orderDateTime}>{formatOrderDateTime}</TableCell>
       <TableCell
@@ -129,7 +151,7 @@ export const MarTableRow: React.FC<MarTableRowProps> = ({ medication, columnStyl
             data-testid={dataTestIds.inHouseMedicationsPage.marTable.givenByCell}
             sx={columnStyles.orderDateTime}
           >
-            {medication.administeredProvider || ''}
+            {isCancelled ? '' : medication.administeredProvider || ''}
           </TableCell>
         </>
       )}
@@ -142,7 +164,7 @@ export const MarTableRow: React.FC<MarTableRowProps> = ({ medication, columnStyl
       <TableCell data-testid={dataTestIds.inHouseMedicationsPage.marTable.statusCell} sx={columnStyles.status}>
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <MedicationStatusChip medication={medication} />
-          {!isReadOnly && <MedicationActions medication={medication} />}
+          {!isReadOnly && <MedicationActions medication={medication} onEditOrder={onEditOrder} />}
         </Box>
       </TableCell>
       <StyledTouchRipple ref={rippleRef} center={false} />

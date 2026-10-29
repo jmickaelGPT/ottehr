@@ -1,0 +1,170 @@
+import { Send } from '@mui/icons-material';
+import { Alert, Button, Snackbar, TextField } from '@mui/material';
+import { Box } from '@mui/system';
+import { Questionnaire, QuestionnaireResponse } from 'fhir/r4b';
+import { FC, useEffect, useRef, useState } from 'react';
+import { useParams } from 'react-router-dom';
+import { usePaperworkContext } from '../context';
+import { AiChatHistory } from './AiChatHistory';
+
+const ERROR_MESSAGE = 'Something went wrong. Please reload the page to try again.';
+
+interface AIInterviewProps {
+  value?: boolean;
+  onChange: (event: { target: { value: boolean } }) => void;
+}
+
+const AIInterview: FC<AIInterviewProps> = ({ value: medicalHistoryInterviewComplete, onChange }): JSX.Element => {
+  const { paperworkComponentHelpers } = usePaperworkContext();
+  const { aIInterviewStart, aIInterviewHandleAnswer } = paperworkComponentHelpers;
+
+  const { id: appointmentId } = useParams();
+  const { setContinueLabel } = usePaperworkContext();
+  const [loading, setLoading] = useState<boolean>(false);
+  const [aiInterviewQuestionnaireResponse, setAiInterviewQuestionnaireResponse] = useState<
+    QuestionnaireResponse | undefined
+  >(undefined);
+  const [answer, setAnswer] = useState<string>('');
+  const [unprocessedUserAnswer, setUnprocessedUserAnswer] = useState<string | undefined>(undefined);
+  const [errorOpen, setErrorOpen] = useState<boolean>(false);
+  const startedRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    const startInterview = async (appointmentId: string): Promise<void> => {
+      if (!aIInterviewStart) return;
+      startedRef.current = true;
+      setLoading(true);
+      try {
+        setAiInterviewQuestionnaireResponse(await aIInterviewStart({ appointmentId }));
+      } catch (error) {
+        console.error('Failed to start the AI interview', error);
+        setErrorOpen(true);
+      } finally {
+        setLoading(false);
+      }
+    };
+    if (aiInterviewQuestionnaireResponse == null && appointmentId != null && !startedRef.current) {
+      void startInterview(appointmentId);
+    }
+  }, [aiInterviewQuestionnaireResponse, setAiInterviewQuestionnaireResponse, aIInterviewStart, appointmentId]);
+
+  useEffect(() => {
+    if (!setContinueLabel) {
+      return;
+    }
+    if (aiInterviewQuestionnaireResponse?.status === 'completed') {
+      setContinueLabel(undefined);
+    } else {
+      setContinueLabel('Skip');
+    }
+  }, [aiInterviewQuestionnaireResponse?.status, setContinueLabel]);
+
+  useEffect(() => {
+    if (aiInterviewQuestionnaireResponse?.status === 'completed' && !medicalHistoryInterviewComplete) {
+      onChange({ target: { value: true } });
+    }
+  }, [onChange, aiInterviewQuestionnaireResponse?.status, medicalHistoryInterviewComplete, setContinueLabel]);
+
+  const onSend = async (): Promise<void> => {
+    const trimmedAnswer = answer.trim();
+    if (trimmedAnswer.length === 0) {
+      setAnswer('');
+      return;
+    }
+    if (!aIInterviewHandleAnswer || aiInterviewQuestionnaireResponse == null) return;
+    setUnprocessedUserAnswer(trimmedAnswer);
+    setAnswer('');
+    setLoading(true);
+    try {
+      setAiInterviewQuestionnaireResponse(
+        await aIInterviewHandleAnswer({
+          questionnaireResponseId: aiInterviewQuestionnaireResponse.id ?? '',
+          linkId: getLastQuestionLinkId(aiInterviewQuestionnaireResponse),
+          answer: trimmedAnswer,
+        })
+      );
+    } catch (error) {
+      console.error('Failed to submit the AI interview answer', error);
+      setAnswer(trimmedAnswer);
+      setErrorOpen(true);
+    } finally {
+      setUnprocessedUserAnswer(undefined);
+      setLoading(false);
+    }
+  };
+
+  const userInputEnabled =
+    !loading && aiInterviewQuestionnaireResponse != null && aiInterviewQuestionnaireResponse.status !== 'completed';
+
+  return (
+    <>
+      <Box style={{ overflowY: 'auto', height: '540px' }}>
+        <AiChatHistory
+          questionnaireResponse={aiInterviewQuestionnaireResponse}
+          aiLoading={loading}
+          unprocessedUserAnswer={unprocessedUserAnswer}
+          scrollToBottomOnUpdate={true}
+        />
+      </Box>
+      <Snackbar
+        anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
+        open={errorOpen}
+        autoHideDuration={6000}
+        onClose={() => setErrorOpen(false)}
+      >
+        <Alert onClose={() => setErrorOpen(false)} severity="error" variant="filled">
+          {ERROR_MESSAGE}
+        </Alert>
+      </Snackbar>
+      {aiInterviewQuestionnaireResponse?.status !== 'completed' && (
+        <Box
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+          }}
+        >
+          <TextField
+            style={{ width: '100%' }}
+            placeholder="Your message..."
+            value={answer}
+            onChange={(e) => setAnswer(e.target.value)}
+            onKeyUp={async (event) => {
+              if (event.key === 'Enter' && userInputEnabled) {
+                await onSend();
+                event.preventDefault();
+              }
+            }}
+            autoComplete="off"
+          />
+          <Button
+            disabled={!userInputEnabled}
+            onClick={async (event) => {
+              await onSend();
+              event.preventDefault();
+            }}
+            size="large"
+            type="submit"
+            color="secondary"
+            variant="contained"
+            startIcon={<Send />}
+            style={{ height: '38px', marginLeft: '16px', fontWeight: 500 }}
+          >
+            Send
+          </Button>
+        </Box>
+      )}
+    </>
+  );
+};
+
+function getLastQuestionLinkId(questionnaireResponse: QuestionnaireResponse): string {
+  const questionLinkIds = (questionnaireResponse.contained?.[0] as Questionnaire).item
+    ?.sort((itemA, itemB) => parseInt(itemA.linkId) - parseInt(itemB.linkId))
+    ?.map((item) => item.linkId);
+  if (questionLinkIds == null || questionLinkIds.length === 0) {
+    return '';
+  }
+  return questionLinkIds[questionLinkIds.length - 1];
+}
+
+export default AIInterview;

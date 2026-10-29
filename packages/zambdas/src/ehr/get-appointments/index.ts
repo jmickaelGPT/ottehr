@@ -1,5 +1,5 @@
-import Oystehr from '@oystehr/sdk';
-import { captureException } from '@sentry/aws-serverless';
+import Oystehr, { Bundle } from '@oystehr/sdk';
+import { captureException } from '@sentry/node-core/light';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import {
   Appointment,
@@ -13,61 +13,66 @@ import {
   Practitioner,
   Provenance,
   QuestionnaireResponse,
-  QuestionnaireResponseItem,
   RelatedPerson,
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
+import { appointmentAttendanceTypeAppointment, appointmentTypeForAppointment } from 'utils/lib/fhir/appointments';
+import { chunkThings, getChatContainsUnreadMessages, ZAP_SMS_MEDIUM_CODE } from 'utils/lib/fhir/chat';
 import {
-  appointmentAttendanceTypeAppointment,
-  AppointmentRelatedResources,
-  appointmentTypeForAppointment,
-  CONSENT_FORMS_CONFIG,
-  flattenItems,
-  GetAppointmentsZambdaInput,
-  getAttendingPractitionerId,
-  getAttestedConsentFromEncounter,
-  getChatContainsUnreadMessages,
-  getCoding,
-  getMiddleName,
-  getPatientFirstName,
-  getPatientLastName,
-  getSMSNumberForIndividual,
-  getVisitStatusHistory,
-  InPersonAppointmentInformation,
-  INSURANCE_CARD_CODE,
-  isAnnotationFollowupEncounter,
-  isInPersonAppointment,
-  isNonPaperworkQuestionnaireResponse,
-  isPatientDemographicsComplete,
-  isTruthy,
-  PHOTO_ID_CARD_CODE,
   PRIVATE_EXTENSION_BASE_URL,
   ROOM_EXTENSION_URL,
-  Secrets,
   SERVICE_CATEGORY_SYSTEM,
-  SMSModel,
-  SMSRecipient,
-  ZAP_SMS_MEDIUM_CODE,
-} from 'utils';
+  TIMEZONE_EXTENSION_URL,
+} from 'utils/lib/fhir/constants';
+import { isAnnotationFollowupEncounter } from 'utils/lib/fhir/encounter';
+import { getCoding } from 'utils/lib/fhir/helpers';
+import { isInPersonAppointment } from 'utils/lib/fhir/moduleIdentification';
 import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  getTrackingBoardVisitStatus,
-  sortAppointments,
-  wrapHandler,
-  ZambdaInput,
-} from '../../shared';
+  getMiddleName,
+  getPatientFirstName,
+  getPatientFriendlyId,
+  getPatientLastName,
+  getSMSNumberForIndividual,
+} from 'utils/lib/fhir/patient';
+import { getAttendingPractitionerId } from 'utils/lib/fhir/practitioners';
+import { isResponseSizeExceededError } from 'utils/lib/fhir/responseSize';
+import { isNonPaperworkQuestionnaireResponse } from 'utils/lib/helpers/paperwork/paperwork';
+import { getOptionalSecret, getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { GetAppointmentsZambdaInput, GetAppointmentsZambdaOutput } from 'utils/lib/types/api/get-appointments.types';
+import { SMSModel, SMSRecipient } from 'utils/lib/types/api/messaging.types';
+import {
+  AppointmentRelatedResources,
+  InPersonAppointmentInformation,
+} from 'utils/lib/types/data/appointments/appointments.types';
+import { INSURANCE_CARD_CODE, PHOTO_ID_CARD_CODE } from 'utils/lib/types/data/paperwork/paperwork.constants';
+import { APPOINTMENT_SEARCH_TOO_BROAD_ERROR } from 'utils/lib/types/errors';
+import { isTruthy } from 'utils/lib/types/utils';
+import { getVisitStatusHistory } from 'utils/lib/utils/visitUtils';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { getPaperworkCompleteness } from '../../shared/paperwork-completeness';
+import { getTrackingBoardVisitStatus, sortAppointments } from '../../shared/queueingUtils';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { getVitalsEngineConfig } from '../../shared/vitals-alert-config';
 import { getPersonPhone } from '../patient-account/get-login-phone-numbers';
 import {
   getAppointmentQueryInput,
+  getTimezone,
   getTimezoneResourceIdFromAppointment,
-  makeEncounterSearchParams,
-  makeResourceCacheKey,
   mergeResources,
   parseAttenderProviderType,
   parseEncounterParticipants,
   timezoneMap,
 } from './helpers';
+import {
+  buildTrackingBoardExtras,
+  emptyTrackingBoardExtras,
+  fetchTrackingBoardResources,
+  selectTrackingBoardEncounterIds,
+  selectVitalsPatientsByEncounterId,
+  TrackingBoardResources,
+} from './tracking-board';
 import { validateRequestParameters } from './validateRequestParameters';
 
 export interface GetAppointmentsZambdaInputValidated extends GetAppointmentsZambdaInput {
@@ -75,8 +80,73 @@ export interface GetAppointmentsZambdaInputValidated extends GetAppointmentsZamb
   secrets: Secrets | null;
 }
 
+const getNextPartitionKey = (appointment: InPersonAppointmentInformation, bucket: string): string => {
+  const locationTimezone = appointment.location?.extension?.find(
+    (extension) => extension.url === TIMEZONE_EXTENSION_URL
+  )?.valueString;
+  // makeAppointmentInformation already zones appointment.start to the appointment's own timezone, so
+  // preserving its embedded offset (setZone: true) keeps locationless provider/group rows on their
+  // real local day. An explicit location timezone, when present, takes precedence.
+  const startDateTime = DateTime.fromISO(appointment.start, { setZone: true });
+  const zonedStart = locationTimezone ? startDateTime.setZone(locationTimezone) : startDateTime;
+  const localDate = zonedStart.toISODate() ?? 'unknown-day';
+  // `group` is a display name rather than an id, but it is only a fallback key when no location id
+  // is present; a name collision here is harmless (it would only over-share the "next" flag).
+  const locationKey = appointment.location?.id ?? appointment.group ?? 'unknown-location';
+
+  return [bucket, locationKey, localDate].join(':');
+};
+
+// Mutates `next` in place: these appointment objects are freshly built by makeAppointmentInformation
+// and not shared anywhere, so cloning each one would only add allocations.
+export const assignNextFlagsByPartition = (
+  appointments: InPersonAppointmentInformation[],
+  bucket: string
+): InPersonAppointmentInformation[] => {
+  const seenPartitions = new Set<string>();
+
+  return appointments.map((appointment) => {
+    const partitionKey = getNextPartitionKey(appointment, bucket);
+    appointment.next = !seenPartitions.has(partitionKey);
+    seenPartitions.add(partitionKey);
+
+    return appointment;
+  });
+};
+
 const isUserRelatedPerson = (rp: RelatedPerson): boolean =>
   getCoding(rp.relationship, `${PRIVATE_EXTENSION_BASE_URL}/relationship`)?.code === 'user-relatedperson';
+
+// Provenances for the whole board are fetched with a comma-separated `target` OR list. The chunk
+// size only bounds how large a single response can get; it is not a URL-length limit, since the SDK
+// issues searches as POST bodies.
+const PROVENANCE_SEARCH_CHUNK_SIZE = 100;
+
+/** Visit type and service category are appointment-level filters, so they need nothing beyond the Appointment itself. */
+const filterAppointmentsForBoard = (
+  appointments: Appointment[],
+  visitType: string[],
+  serviceCategories: string[] | undefined
+): Appointment[] => {
+  let filtered = appointments;
+
+  if (visitType?.length > 0) {
+    filtered = filtered.filter((appointment) => {
+      return visitType.includes(
+        (isInPersonAppointment(appointment) ? 'in-person-' : 'virtual-') + appointmentTypeForAppointment(appointment)
+      );
+    });
+  }
+
+  if (serviceCategories != null && serviceCategories.length > 0) {
+    filtered = filtered.filter((appointment) => {
+      const appointmentServiceCategory = getCoding(appointment?.serviceCategory, SERVICE_CATEGORY_SYSTEM)?.code;
+      return appointmentServiceCategory && serviceCategories.includes(appointmentServiceCategory);
+    });
+  }
+
+  return filtered;
+};
 
 let m2mToken: string;
 
@@ -92,7 +162,8 @@ export const index = wrapHandler('get-appointments', async (input: ZambdaInput):
   // The approach: use date with timezone from client and convert it to a range of date-time in Zulu (UTC)
   const {
     visitType,
-    searchDate,
+    searchDateFrom,
+    searchDateTo,
     timezone,
     locationIds,
     providerIds,
@@ -105,7 +176,7 @@ export const index = wrapHandler('get-appointments', async (input: ZambdaInput):
   console.debug('validateRequestParameters success');
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   console.time('get_active_encounters + get_appointment_data');
 
@@ -130,39 +201,28 @@ export const index = wrapHandler('get-appointments', async (input: ZambdaInput):
     return resources;
   })();
 
+  // Resolving each requested Location/Practitioner's timezone only populates the module-scope
+  // `timezoneMap` that makeAppointmentInformation reads when formatting appointment start times —
+  // the appointment search itself uses the caller-supplied timezone. So these lookups must not gate
+  // the search. Started here and awaited just before the results are formatted, they cost a round
+  // trip on a cold invocation only, and that round trip now overlaps the appointment search instead
+  // of preceding it. (On a warm invocation the map is already populated and nothing is fetched.)
+  const timezonesResolved = Promise.all(
+    requestedTimezoneRelatedResources.map((resource) =>
+      getTimezone({ oystehr, resourceType: resource.resourceType, resourceId: resource.resourceId })
+    )
+  );
+
   const { appointmentResources, appointmentsToGroupMap } = await (async () => {
-    // prepare search options
-    const searchOptions = await Promise.all(
-      requestedTimezoneRelatedResources.map(async (resource) => {
-        const cacheKey = makeResourceCacheKey({
-          resourceId: resource.resourceId,
-          resourceType: resource.resourceType,
-        });
-
-        const searchParams = await makeEncounterSearchParams({
-          resourceId: resource.resourceId,
-          resourceType: resource.resourceType,
-          cacheKey,
-          oystehr,
-        });
-
-        return {
-          resourceId: resource.resourceId,
-          resourceType: resource.resourceType,
-          searchParams,
-          cacheKey,
-        };
-      })
-    );
-
     // request appointments
     const resourceResults = await Promise.all(
-      searchOptions.map(async (options) => {
+      requestedTimezoneRelatedResources.map(async (options) => {
         const appointmentRequestInput = await getAppointmentQueryInput({
           oystehr,
           resourceId: options.resourceId,
           resourceType: options.resourceType,
-          searchDate,
+          searchDateFrom,
+          searchDateTo,
           timezone,
         });
 
@@ -173,11 +233,19 @@ export const index = wrapHandler('get-appointments', async (input: ZambdaInput):
 
         const { group } = appointmentRequestInput;
 
-        const appointmentResponse = await oystehr.fhir.search<AppointmentRelatedResources>(appointmentRequest);
+        let appointmentBundle;
+        try {
+          appointmentBundle = await oystehr.fhir.searchAndGetAllPages<AppointmentRelatedResources>(appointmentRequest);
+        } catch (error) {
+          if (isResponseSizeExceededError(error)) {
+            throw APPOINTMENT_SEARCH_TOO_BROAD_ERROR;
+          }
+          throw error;
+        }
 
-        const appointments = appointmentResponse
-          .unbundle()
-          .filter((resource) => !isNonPaperworkQuestionnaireResponse(resource));
+        const appointments = (appointmentBundle.entry?.map((entry) => entry.resource).filter(isTruthy) ?? []).filter(
+          (resource) => !isNonPaperworkQuestionnaireResponse(resource)
+        );
 
         return { appointments, group };
       })
@@ -210,12 +278,13 @@ export const index = wrapHandler('get-appointments', async (input: ZambdaInput):
   let cancelled: InPersonAppointmentInformation[] = [];
 
   if (appointmentResources?.length == 0) {
-    const response = {
+    const response: GetAppointmentsZambdaOutput = {
       message: 'Successfully retrieved all appointments',
       preBooked,
       inOffice,
       completed,
       cancelled,
+      ...emptyTrackingBoardExtras(),
     };
 
     return {
@@ -255,7 +324,7 @@ export const index = wrapHandler('get-appointments', async (input: ZambdaInput):
       if (patientId) patientIds.push(`Patient/${patientId}`);
     } else if (resource.resourceType === 'Patient' && resource.id) {
       patientIdMap[resource.id] = resource as Patient;
-    } else if (resource.resourceType === 'Encounter' && !isAnnotationFollowupEncounter(resource as Encounter)) {
+    } else if (resource.resourceType === 'Encounter' && !isAnnotationFollowupEncounter(resource)) {
       const asEnc = resource as Encounter;
       const apptRef = asEnc.appointment?.[0].reference;
       if (apptRef) {
@@ -330,42 +399,49 @@ export const index = wrapHandler('get-appointments', async (input: ZambdaInput):
 
   console.timeEnd('parse_search_results');
 
-  // Fallback: the main search's `_revinclude:iterate: RelatedPerson:patient` can silently
-  // miss RPs, so narrow direct query for the matched patients.
-  // Must run before the Communications search so any newly surfaced phones make it into
-  // the `sender:RelatedPerson.telecom` filter.
-  console.time('related_persons_fallback');
-  if (patientIds.length > 0) {
-    const rpBundle = await oystehr.fhir.search<RelatedPerson>({
-      resourceType: 'RelatedPerson',
-      params: [
-        { name: 'patient', value: patientIds.join(',') },
-        { name: 'relationship', value: 'user-relatedperson' },
-      ],
-    });
-    rpBundle.unbundle().forEach((rp) => {
-      if (!rp.id || !isUserRelatedPerson(rp)) return;
-      const rpRef = `RelatedPerson/${rp.id}`;
-      if (rpIdToResourceMap[rpRef]) return;
+  // The queues only need the appointment and its encounter, so they are built here, ahead of the related-resource
+  // searches, and reused when the response is assembled below.
+  const appointments = filterAppointmentsForBoard(allAppointments, visitType, serviceCategories);
+  const appointmentQueues = appointments.length > 0 ? sortAppointments(appointments, apptRefToEncounterMap) : undefined;
 
-      rpIdToResourceMap[rpRef] = rp;
+  // Tracking board Step B: order icons and vitals badges are keyed on the encounters in these queues, so their
+  // batch goes out now and overlaps the related-resource searches instead of waiting behind them.
+  const trackingBoardEncounterIds = appointmentQueues
+    ? selectTrackingBoardEncounterIds(appointmentQueues, apptRefToEncounterMap)
+    : [];
+  const patientsByEncounterId = selectVitalsPatientsByEncounterId({
+    appointments,
+    apptRefToEncounterMap,
+    patientIdMap,
+  });
+  const vitalsAlertConfigPromise = trackingBoardEncounterIds.length > 0 ? getVitalsEngineConfig(oystehr) : undefined;
+  const trackingBoardResourcesPromise: Promise<TrackingBoardResources> = fetchTrackingBoardResources({
+    oystehr,
+    encounterIds: trackingBoardEncounterIds,
+    // Optional: it only shortens `next` links, and a missing secret must not fail the page (see the catch below).
+    fhirApiUrl: getOptionalSecret(SecretsKeys.FHIR_API, secrets),
+  }).catch((error) => {
+    // The board can render without its icons; log and fall back to empty maps rather than fail the page.
+    console.error('tracking board orders/vitals fetch failed', error);
+    captureException(error);
+    return { resources: [], failedUrls: ['*'] };
+  });
 
-      const patientRef = rp.patient?.reference;
-      if (patientRef) {
-        (patientToRPMap[patientRef] ??= []).push(rp);
-      }
+  console.time('related_resources');
 
-      const pn = getSMSNumberForIndividual(rp);
-      if (pn) {
-        rpPhoneNumbers.add(pn);
-        (phoneNumberToRpMap[pn] ??= new Set<string>()).add(rpRef);
-        (rpToPhoneNumbersMap[rpRef] ??= new Set<string>()).add(pn);
-      }
-    });
-  }
-  console.timeEnd('related_persons_fallback');
+  const patientIdsForSearch = patientIds.join(',');
 
-  console.time('get_all_doc_refs + get_all_communications + practitioners + signatures');
+  const relatedPersonFallbackPromise =
+    patientIds.length > 0
+      ? oystehr.fhir.search<RelatedPerson>({
+          resourceType: 'RelatedPerson',
+          params: [
+            { name: 'patient', value: patientIdsForSearch },
+            { name: 'relationship', value: 'user-relatedperson' },
+          ],
+        })
+      : Promise.resolve(undefined);
+
   const docRefPromise =
     patientIds.length > 0
       ? oystehr?.fhir.search<DocumentReference>({
@@ -373,24 +449,7 @@ export const index = wrapHandler('get-appointments', async (input: ZambdaInput):
           params: [
             { name: 'status', value: 'current' },
             { name: 'type', value: `${INSURANCE_CARD_CODE},${PHOTO_ID_CARD_CODE}` },
-            { name: 'related', value: patientIds.join(',') },
-          ],
-        })
-      : Promise.resolve(undefined);
-  const uniqueNumbers = Array.from(rpPhoneNumbers);
-
-  let allDocRefs: DocumentReference[] | undefined = undefined;
-  let communications: (Communication | RelatedPerson)[] | undefined = undefined;
-  let encounterSignatures: Provenance[] | undefined = undefined;
-
-  const communicationsPromise =
-    uniqueNumbers.length > 0
-      ? oystehr.fhir.search<Communication | RelatedPerson>({
-          resourceType: 'Communication',
-          params: [
-            { name: 'medium', value: `${ZAP_SMS_MEDIUM_CODE}` },
-            { name: 'sender:RelatedPerson.telecom', value: uniqueNumbers.join(',') },
-            { name: '_include', value: 'Communication:sender' },
+            { name: 'related', value: patientIdsForSearch },
           ],
         })
       : Promise.resolve(undefined);
@@ -408,33 +467,16 @@ export const index = wrapHandler('get-appointments', async (input: ZambdaInput):
     .map((enc) => enc.id)
     .filter(isTruthy);
 
-  const provenancePromises = encounterIds.map((encId) =>
+  const provenancePromises = chunkThings(encounterIds, PROVENANCE_SEARCH_CHUNK_SIZE).map((encounterIdChunk) =>
     oystehr.fhir.search<Provenance>({
       resourceType: 'Provenance',
       params: [
-        { name: 'target', value: `Encounter/${encId}` },
+        { name: 'target', value: encounterIdChunk.map((encId) => `Encounter/${encId}`).join(',') },
         { name: 'agent-role', value: 'verifier' },
+        { name: '_count', value: `${PROVENANCE_SEARCH_CHUNK_SIZE}` },
       ],
     })
   );
-
-  const [docRefBundle, communicationBundle, participantsBundle, ...encounterSignaturesBundle] = await Promise.all([
-    docRefPromise,
-    communicationsPromise,
-    participantsPromise,
-    ...provenancePromises,
-  ]);
-
-  allDocRefs = docRefBundle?.unbundle() ?? [];
-  communications = communicationBundle?.unbundle();
-  const practitioners = participantsBundle?.unbundle() as Practitioner[];
-  practitioners?.forEach((pr) => {
-    practitionerIdToResourceMap[`Practitioner/${pr.id}`] = pr;
-  });
-
-  encounterSignatures = encounterSignaturesBundle.flatMap((bundle) => bundle?.unbundle() ?? []);
-
-  console.timeEnd('get_all_doc_refs + get_all_communications + practitioners + signatures');
 
   // For follow-up appointments, the parent encounter is typically not in the current search results.
   // Batch-fetch any parent encounters that are referenced via partOf but missing from apptRefToEncounterMap.
@@ -447,23 +489,103 @@ export const index = wrapHandler('get-appointments', async (input: ZambdaInput):
     ),
   ];
 
-  const parentEncounterToApptIdMap: Record<string, string> = {};
-  if (missingParentEncounterRefs.length > 0) {
-    const ids = missingParentEncounterRefs.map((ref) => ref.replace('Encounter/', '')).join(',');
-    const parentEncounters =
-      (
-        await oystehr.fhir.search<Encounter>({
+  const parentEncountersPromise =
+    missingParentEncounterRefs.length > 0
+      ? oystehr.fhir.search<Encounter>({
           resourceType: 'Encounter',
-          params: [{ name: '_id', value: ids }],
+          params: [
+            { name: '_id', value: missingParentEncounterRefs.map((ref) => ref.replace('Encounter/', '')).join(',') },
+          ],
         })
-      )?.unbundle() ?? [];
-    parentEncounters.forEach((enc) => {
-      const apptRef = enc.appointment?.[0]?.reference;
-      if (enc.id && apptRef) {
-        parentEncounterToApptIdMap[`Encounter/${enc.id}`] = apptRef.replace('Appointment/', '');
-      }
-    });
-  }
+      : Promise.resolve(undefined);
+
+  const searchCommunications = (phoneNumbers: string[]): Promise<Bundle<Communication | RelatedPerson> | undefined> =>
+    phoneNumbers.length > 0
+      ? oystehr.fhir.search<Communication | RelatedPerson>({
+          resourceType: 'Communication',
+          params: [
+            { name: 'medium', value: `${ZAP_SMS_MEDIUM_CODE}` },
+            { name: 'sender:RelatedPerson.telecom', value: phoneNumbers.join(',') },
+            { name: '_include', value: 'Communication:sender' },
+          ],
+        })
+      : Promise.resolve(undefined);
+
+  // Snapshot the numbers the main search already gave us; the speculative Communication search uses
+  // exactly these, so the fallback's contribution can be diffed against it below.
+  const phonesBeforeFallback = new Set(rpPhoneNumbers);
+  const communicationsPromise = searchCommunications(Array.from(phonesBeforeFallback));
+
+  const [
+    relatedPersonFallbackBundle,
+    docRefBundle,
+    participantsBundle,
+    parentEncountersBundle,
+    speculativeCommunicationBundle,
+    ...encounterSignaturesBundle
+  ] = await Promise.all([
+    relatedPersonFallbackPromise,
+    docRefPromise,
+    participantsPromise,
+    parentEncountersPromise,
+    communicationsPromise,
+    ...provenancePromises,
+  ]);
+
+  const registerRelatedPerson = (rp: RelatedPerson): void => {
+    if (!rp.id || !isUserRelatedPerson(rp)) return;
+    const rpRef = `RelatedPerson/${rp.id}`;
+    if (rpIdToResourceMap[rpRef]) return;
+
+    rpIdToResourceMap[rpRef] = rp;
+
+    const patientRef = rp.patient?.reference;
+    if (patientRef) {
+      (patientToRPMap[patientRef] ??= []).push(rp);
+    }
+
+    const pn = getSMSNumberForIndividual(rp);
+    if (pn) {
+      rpPhoneNumbers.add(pn);
+      (phoneNumberToRpMap[pn] ??= new Set<string>()).add(rpRef);
+      (rpToPhoneNumbersMap[rpRef] ??= new Set<string>()).add(pn);
+    }
+  };
+
+  relatedPersonFallbackBundle?.unbundle().forEach(registerRelatedPerson);
+
+  // Only the numbers the fallback added need a follow-up search; normally there are none and this
+  // resolves without a round trip.
+  const phonesMissedBySpeculativeSearch = Array.from(rpPhoneNumbers).filter(
+    (phone) => !phonesBeforeFallback.has(phone)
+  );
+  const supplementalCommunicationBundle = await searchCommunications(phonesMissedBySpeculativeSearch);
+
+  const allDocRefs: DocumentReference[] = docRefBundle?.unbundle() ?? [];
+  const communications: (Communication | RelatedPerson)[] | undefined =
+    speculativeCommunicationBundle || supplementalCommunicationBundle
+      ? mergeResources([
+          ...(speculativeCommunicationBundle?.unbundle() ?? []),
+          ...(supplementalCommunicationBundle?.unbundle() ?? []),
+        ])
+      : undefined;
+
+  const practitioners = participantsBundle?.unbundle() as Practitioner[];
+  practitioners?.forEach((pr) => {
+    practitionerIdToResourceMap[`Practitioner/${pr.id}`] = pr;
+  });
+
+  const encounterSignatures: Provenance[] = encounterSignaturesBundle.flatMap((bundle) => bundle?.unbundle() ?? []);
+
+  const parentEncounterToApptIdMap: Record<string, string> = {};
+  (parentEncountersBundle?.unbundle() ?? []).forEach((enc) => {
+    const apptRef = enc.appointment?.[0]?.reference;
+    if (enc.id && apptRef) {
+      parentEncounterToApptIdMap[`Encounter/${enc.id}`] = apptRef.replace('Appointment/', '');
+    }
+  });
+
+  console.timeEnd('related_resources');
 
   // because the related person tied to the user's account has been excluded from the graph of persons
   // connected to patient resources, while the Zap sms creates communications with sender reference based on
@@ -503,26 +625,13 @@ export const index = wrapHandler('get-appointments', async (input: ZambdaInput):
     });
   }
 
+  // makeAppointmentInformation reads timezoneMap, so the prefetch started before the appointment
+  // search has to be settled by now.
+  await timezonesResolved;
+
   console.time('structure_appointment_data');
-  let appointments: Appointment[] = allAppointments;
 
-  if (visitType?.length > 0) {
-    appointments = appointments?.filter((appointment) => {
-      return visitType?.includes(
-        (isInPersonAppointment(appointment) ? 'in-person-' : 'virtual-') + appointmentTypeForAppointment(appointment)
-      );
-    });
-  }
-
-  if (serviceCategories != null && serviceCategories?.length > 0) {
-    appointments = appointments?.filter((appointment) => {
-      const appointmentServiceCategory = getCoding(appointment?.serviceCategory, SERVICE_CATEGORY_SYSTEM)?.code;
-      return appointmentServiceCategory && serviceCategories?.includes(appointmentServiceCategory);
-    });
-  }
-
-  if (appointments.length > 0) {
-    const appointmentQueues = sortAppointments(appointments, apptRefToEncounterMap);
+  if (appointmentQueues) {
     const baseMapInput: Omit<AppointmentInformationInputs, 'appointment'> = {
       encounterRefToQRMap,
       patientRefToQRMap,
@@ -542,81 +651,60 @@ export const index = wrapHandler('get-appointments', async (input: ZambdaInput):
       parentEncounterToApptIdMap,
     };
 
-    preBooked = appointmentQueues.prebooked
-      .map((appointment) => {
-        return makeAppointmentInformation(oystehr, {
-          appointment,
-          ...baseMapInput,
-          group: appointmentsToGroupMap.get(appointment.id ?? ''),
-        });
-      })
-      .filter(isTruthy);
+    const buildAppointments = (queue: Appointment[]): InPersonAppointmentInformation[] =>
+      queue
+        .map((appointment) =>
+          makeAppointmentInformation(oystehr, {
+            appointment,
+            ...baseMapInput,
+            group: appointmentsToGroupMap.get(appointment.id ?? ''),
+          })
+        )
+        .filter(isTruthy);
+
+    preBooked = buildAppointments(appointmentQueues.prebooked);
+
     inOffice = [
-      ...appointmentQueues.inOffice.waitingRoom.arrived.map((appointment, idx) => {
-        return makeAppointmentInformation(oystehr, {
-          appointment,
-          ...baseMapInput,
-          next: idx === 0,
-          group: appointmentsToGroupMap.get(appointment.id ?? ''),
-        });
-      }),
-      ...appointmentQueues.inOffice.waitingRoom.ready.map((appointment, idx) => {
-        return makeAppointmentInformation(oystehr, {
-          appointment,
-          ...baseMapInput,
-          next: idx === 0,
-          group: appointmentsToGroupMap.get(appointment.id ?? ''),
-        });
-      }),
-      ...appointmentQueues.inOffice.inExam.intake.map((appointment) => {
-        return makeAppointmentInformation(oystehr, {
-          appointment,
-          ...baseMapInput,
-          group: appointmentsToGroupMap.get(appointment.id ?? ''),
-        });
-      }),
-      ...appointmentQueues.inOffice.inExam['ready for provider'].map((appointment, idx) => {
-        return makeAppointmentInformation(oystehr, {
-          appointment,
-          ...baseMapInput,
-          next: idx === 0,
-          group: appointmentsToGroupMap.get(appointment.id ?? ''),
-        });
-      }),
-      ...appointmentQueues.inOffice.inExam.provider.map((appointment) => {
-        return makeAppointmentInformation(oystehr, {
-          appointment,
-          ...baseMapInput,
-          group: appointmentsToGroupMap.get(appointment.id ?? ''),
-        });
-      }),
-    ].filter(isTruthy);
-    completed = appointmentQueues.checkedOut
-      .map((appointment) => {
-        return makeAppointmentInformation(oystehr, {
-          appointment,
-          ...baseMapInput,
-          group: appointmentsToGroupMap.get(appointment.id ?? ''),
-        });
-      })
-      .filter(isTruthy);
-    cancelled = appointmentQueues.canceled
-      .map((appointment) => {
-        return makeAppointmentInformation(oystehr, {
-          appointment,
-          ...baseMapInput,
-          group: appointmentsToGroupMap.get(appointment.id ?? ''),
-        });
-      })
-      .filter(isTruthy);
+      ...assignNextFlagsByPartition(buildAppointments(appointmentQueues.inOffice.waitingRoom.arrived), 'arrived'),
+      ...assignNextFlagsByPartition(buildAppointments(appointmentQueues.inOffice.waitingRoom.ready), 'ready'),
+      ...buildAppointments(appointmentQueues.inOffice.inExam.intake),
+      ...assignNextFlagsByPartition(
+        buildAppointments(appointmentQueues.inOffice.inExam['ready for provider']),
+        'ready-for-provider'
+      ),
+      ...buildAppointments(appointmentQueues.inOffice.inExam.provider),
+    ];
+
+    completed = buildAppointments(appointmentQueues.checkedOut);
+    cancelled = buildAppointments(appointmentQueues.canceled);
   }
 
-  const response = {
+  // Step C: the batch has had the whole related-resource round trip to land; mapping is local work.
+  let trackingBoardExtras = emptyTrackingBoardExtras();
+  try {
+    trackingBoardExtras = buildTrackingBoardExtras({
+      fetched: await trackingBoardResourcesPromise,
+      encounterIds: trackingBoardEncounterIds,
+      encounters: Object.values(apptRefToEncounterMap),
+      appointments,
+      practitioners: Object.values(practitionerIdToResourceMap),
+      patientsByEncounterId,
+      vitalsAlertConfig: await vitalsAlertConfigPromise,
+      environment: getSecret(SecretsKeys.ENVIRONMENT, secrets),
+    });
+  } catch (error) {
+    console.error('tracking board orders/vitals mapping failed', error);
+    captureException(error);
+    trackingBoardExtras = { ...emptyTrackingBoardExtras(), ordersAndVitalsIncomplete: true };
+  }
+
+  const response: GetAppointmentsZambdaOutput = {
     message: 'Successfully retrieved all appointments',
     preBooked,
     inOffice,
     completed,
     cancelled,
+    ...trackingBoardExtras,
   };
   console.timeEnd('structure_appointment_data');
 
@@ -724,33 +812,12 @@ const makeAppointmentInformation = (
     console.log(`no patient ref found for appointment ${appointment.id}`);
   }
 
-  const flattenedItems = flattenItems(questionnaireResponse?.item ?? []);
-  const consentComplete =
-    CONSENT_FORMS_CONFIG.forms.every(
-      (form) =>
-        flattenedItems.find((item: { linkId: string }) => item.linkId === form.id)?.answer?.[0]?.valueBoolean === true
-    ) &&
-    flattenedItems.find((item: { linkId: string }) => item.linkId === 'signature') &&
-    flattenedItems.find((item: { linkId: string }) => item.linkId === 'full-name') &&
-    flattenedItems.find((item: { linkId: string }) => item.linkId === 'consent-form-signer-relationship');
-  const docRefComplete = (type: string, frontTitle: string): boolean => {
-    const docFound = allDocRefs.filter(
-      (document) =>
-        document.context?.related?.find((related) => related.reference === `Patient/${patient?.id}`) &&
-        document.type?.text === type
-    );
-    return !!docFound.find((doc) => doc.content.find((content) => content.attachment.title === frontTitle));
-  };
-  const idCard = docRefComplete('Photo ID cards', 'photo-id-front');
-  const insuranceCard = docRefComplete('Insurance cards', 'insurance-card-front');
+  const paperwork = getPaperworkCompleteness({ patient, encounter, questionnaireResponse, docRefs: allDocRefs });
   const cancellationReason = appointment.cancelationReason?.coding?.[0].code;
   const status = getTrackingBoardVisitStatus(appointment, encounter, supervisorApprovalEnabled);
 
   const waitingMinutesString = appointment.meta?.tag?.find((tag) => tag.system === 'waiting-minutes-estimate')?.code;
   const waitingMinutes = waitingMinutesString ? parseInt(waitingMinutesString) : undefined;
-
-  const ovrpInterest = flattenedItems.find((response: QuestionnaireResponseItem) => response.linkId === 'ovrp-interest')
-    ?.answer?.[0]?.valueString;
 
   const practitionerId = getAttendingPractitionerId(encounter);
   const practitioner = practitionerIdToResourceMap[`Practitioner/${practitionerId}`];
@@ -758,13 +825,6 @@ const makeAppointmentInformation = (
   if (practitioner && practitioner.name) {
     provider = oystehr.fhir.formatHumanName(practitioner.name[0]);
   }
-
-  // if the QR has been updated at least once, this tag will not be present
-  const demographicsByPaperworkSubmission = !!questionnaireResponse?.authored;
-
-  const demographicsByPatientResource = isPatientDemographicsComplete(patient);
-  const consentByPaperworkSignatures = !!consentComplete;
-  const consentByStaffAttestation = !!(encounter && getAttestedConsentFromEncounter(encounter));
 
   const participants = parseEncounterParticipants(encounter, practitionerIdToResourceMap);
   const attenderProviderType = parseAttenderProviderType(encounter, practitionerIdToResourceMap);
@@ -787,6 +847,7 @@ const makeAppointmentInformation = (
       firstName: getPatientFirstName(patient),
       lastName: getPatientLastName(patient),
       middleName: getMiddleName(patient),
+      friendlyId: getPatientFriendlyId(patient) || undefined,
       // suffix: patient?.name?.[0].suffix?.[0],
       sex: patient.gender,
       dateOfBirth: patient?.birthDate || 'Unknown',
@@ -805,19 +866,25 @@ const makeAppointmentInformation = (
     group: group ? group.name : undefined,
     room: room,
     paperwork: {
-      demographics: demographicsByPaperworkSubmission || demographicsByPatientResource,
-      photoID: idCard,
-      insuranceCard: insuranceCard,
-      consent: consentByPaperworkSignatures || consentByStaffAttestation,
-      ovrpInterest: Boolean(ovrpInterest && ovrpInterest.startsWith('Yes')),
+      demographics: paperwork.demographics,
+      photoID: paperwork.photoID,
+      insuranceCard: paperwork.insuranceCard,
+      consent: paperwork.consent,
+      ovrpInterest: paperwork.ovrpInterest,
     },
     participants,
     next,
-    visitStatusHistory: getVisitStatusHistory(encounter),
+    visitStatusHistory: getVisitStatusHistory(encounter, appointment),
     waitingMinutes,
-    serviceCategory: appointment.serviceCategory
-      ?.flatMap((codeableConcept) => codeableConcept.coding ?? [])
-      ?.find((coding) => coding.system === SERVICE_CATEGORY_SYSTEM)?.display,
+    // Prefer the human-readable display, but fall back to the code: FHIR-backed
+    // (non-system) categories are stamped on the slot with only system+code and
+    // no display, so without this the abbreviation resolver gets nothing.
+    serviceCategory: (() => {
+      const coding = appointment.serviceCategory
+        ?.flatMap((codeableConcept) => codeableConcept.coding ?? [])
+        ?.find((c) => c.system === SERVICE_CATEGORY_SYSTEM);
+      return coding?.display ?? coding?.code;
+    })(),
     location: locationIdToResourceMap[encounter.location?.[0]?.location?.reference ?? ''],
     isFollowUp: !!encounter.partOf,
     parentEncounterId: encounter.partOf?.reference?.replace('Encounter/', ''),

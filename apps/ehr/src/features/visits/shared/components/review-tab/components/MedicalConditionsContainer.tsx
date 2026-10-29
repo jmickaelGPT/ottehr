@@ -1,23 +1,26 @@
 import { Box, Typography, useTheme } from '@mui/material';
 import { FC } from 'react';
 import { dataTestIds } from 'src/constants/data-test-ids';
-import { NoteDTO } from 'utils';
+import {
+  SectionHeading,
+  useNoteSectionTitleInCardHeader,
+} from 'src/features/visits/shared/components/NoteSectionHeading';
+import { NoteDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
 import { AssessmentTitle } from '../../../../../../components/AssessmentTitle';
-import { useChartData } from '../../../stores/appointment/appointment.store';
+import { useVisitNote } from '../../../hooks/useVisitNote';
 
 export const MedicalConditionsContainer: FC<{ notes?: NoteDTO[] }> = ({ notes }) => {
-  const { chartData } = useChartData();
+  const titleInCardHeader = useNoteSectionTitleInCardHeader();
+  const { data: note } = useVisitNote();
   const theme = useTheme();
-  const conditions = chartData?.conditions?.filter((condition) => condition.current === true);
+  const conditions = note?.history.conditions?.filter((condition) => condition.current === true);
 
   return (
     <Box
       sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, width: '100%' }}
       data-testid={dataTestIds.progressNotePage.medicalConditionsContainer}
     >
-      <Typography variant="h5" color="primary.dark">
-        Medical conditions
-      </Typography>
+      {!titleInCardHeader && <SectionHeading>Medical conditions</SectionHeading>}
       {conditions?.length ? (
         conditions?.map((condition) => (
           <Typography key={condition.resourceId}>

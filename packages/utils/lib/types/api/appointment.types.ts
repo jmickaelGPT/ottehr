@@ -1,7 +1,7 @@
 import { Appointment, Encounter, Period, Slot } from 'fhir/r4b';
 import { z } from 'zod';
-import { AvailableLocationInformation, ServiceMode } from '../../types';
-import { SlotListItem } from '../../utils';
+import { SlotListItem } from '../../utils/scheduleUtils';
+import { AvailableLocationInformation, ServiceMode } from '../common';
 
 export const AppointmentTypeOptions = ['walk-in', 'pre-booked', 'post-telemed'] as const;
 export type AppointmentType = (typeof AppointmentTypeOptions)[number];
@@ -122,6 +122,7 @@ export interface UpdateAppointmentZambdaOutput {
 export interface WalkinAvailabilityCheckParams {
   scheduleId?: string;
   locationName?: string;
+  serviceMode?: ServiceMode;
 }
 
 export interface WalkinAvailabilityCheckResult {
@@ -134,6 +135,7 @@ export interface WalkinAvailabilityCheckResult {
   scheduleId: string;
   serviceMode?: ServiceMode;
 }
+
 export interface PatientAppointmentDTO {
   id: string;
   patientID: string;

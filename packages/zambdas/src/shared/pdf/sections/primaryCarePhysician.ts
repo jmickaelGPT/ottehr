@@ -1,4 +1,7 @@
-import { getFullName, PATIENT_RECORD_CONFIG, PRACTICE_NAME_URL, standardizePhoneNumber } from 'utils';
+import { getFullName } from 'utils/lib/fhir/patient';
+import { standardizePhoneNumber } from 'utils/lib/helpers/helpers';
+import { PATIENT_RECORD_CONFIG } from 'utils/lib/ottehr-config/patient-record';
+import { PRACTICE_NAME_URL } from 'utils/lib/types/constants';
 import { createConfiguredSection, DataComposer } from '../pdf-common';
 import { PdfSection, PrimaryCarePhysician, PrimaryCarePhysicianInput } from '../types';
 
@@ -26,6 +29,9 @@ export const composePrimaryCarePhysicianData: DataComposer<PrimaryCarePhysicianI
     standardizePhoneNumber(
       physician?.telecom?.find((c) => c.system === 'phone' && c.period?.end === undefined)?.value
     ) ?? '';
+  const pcpFax =
+    standardizePhoneNumber(physician?.telecom?.find((c) => c.system === 'fax' && c.period?.end === undefined)?.value) ??
+    '';
 
   return {
     hasPcp,
@@ -33,6 +39,7 @@ export const composePrimaryCarePhysicianData: DataComposer<PrimaryCarePhysicianI
     pcpPracticeName,
     pcpAddress,
     pcpPhone,
+    pcpFax,
   };
 };
 
@@ -94,6 +101,18 @@ export const createPrimaryCarePhysicianSection = <TData extends { pcp?: PrimaryC
         client.drawLabelValueRow(
           'PCP phone number',
           details.pcpPhone,
+          styles.textStyles.regular,
+          styles.textStyles.regular,
+          {
+            drawDivider: true,
+            dividerMargin: 8,
+          }
+        );
+      }
+      if (shouldShow('pcp-fax')) {
+        client.drawLabelValueRow(
+          'PCP fax number',
+          details.pcpFax,
           styles.textStyles.regular,
           styles.textStyles.regular,
           {

@@ -5,7 +5,7 @@ import { FC, ReactElement, ReactNode, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { home } from 'src/themes/ottehr';
-import { BRANDING_CONFIG } from 'utils';
+import { BRANDING_CONFIG } from 'utils/lib/ottehr-config/branding';
 import { dataTestIds } from '../helpers/data-test-ids';
 
 export interface ContainerProps {
@@ -132,6 +132,7 @@ export const CustomContainer: FC<ContainerProps> = ({
               component="img"
               sx={{
                 margin: 1,
+                pl: { xs: 2, md: 0 },
                 height: BRANDING_CONFIG.intake.appBar.logoHeight,
                 width: 'auto',
                 alignSelf: 'center',
@@ -215,7 +216,7 @@ export const CustomContainer: FC<ContainerProps> = ({
                       <Grid item xs={12} md={gridWidths.title}>
                         <Typography
                           sx={{
-                            width: { xs: '100%', md: isFirstPage ? '350px' : '100%' },
+                            width: { xs: '100%', md: isFirstPage && img ? '350px' : '100%' },
                           }}
                           variant={isFirstPage ? 'h1' : 'h2'}
                           color="primary.main"

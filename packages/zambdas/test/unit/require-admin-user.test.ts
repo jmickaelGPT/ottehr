@@ -1,10 +1,13 @@
-import { Role, User } from '@oystehr/sdk';
-import { NOT_AUTHORIZED, RoleType, Secrets, SecretsKeys, userMe } from 'utils';
+import Oystehr, { Role, User } from '@oystehr/sdk';
+import { userMe } from 'utils/lib/auth/user-me.helper';
+import { Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { RoleType } from 'utils/lib/types/api/user.types';
+import { NOT_AUTHORIZED } from 'utils/lib/types/errors';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { requireAdminUser, requireUserWithRole } from '../../src/shared';
+import { getUser, requireAdminTierUser, requireAdminUser, requireUserWithRole } from '../../src/shared/auth';
 
-vi.mock('utils', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('utils')>();
+vi.mock('utils/lib/auth/user-me.helper', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('utils/lib/auth/user-me.helper')>();
   return {
     ...actual,
     userMe: vi.fn(),
@@ -72,6 +75,27 @@ describe('requireAdminUser', () => {
   });
 });
 
+describe('requireAdminTierUser', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  // Pins the role set rather than the mechanism. The set is a decision — it has to match the roles the
+  // admin navigation admits, or an endpoint refuses users the UI invites in — and nothing else fails if
+  // it drifts.
+  it('admits every role the administration area is offered to', async () => {
+    for (const role of [adminRole, managerRole, customerSupportRole]) {
+      vi.mocked(userMe).mockResolvedValue(buildUser([role]));
+      await expect(requireAdminTierUser('token', secrets)).resolves.toBeUndefined();
+    }
+  });
+
+  it('refuses a purely clinical caller', async () => {
+    vi.mocked(userMe).mockResolvedValue(buildUser([staffRole]));
+    await expect(requireAdminTierUser('token', secrets)).rejects.toEqual(NOT_AUTHORIZED);
+  });
+});
+
 describe('requireUserWithRole', () => {
   const allowedRoles = [RoleType.Administrator, RoleType.Manager, RoleType.CustomerSupport];
 
@@ -84,9 +108,10 @@ describe('requireUserWithRole', () => {
     ['Manager', managerRole],
     ['Customer Support', customerSupportRole],
   ])('resolves when the caller has the %s role', async (_label, role) => {
-    vi.mocked(userMe).mockResolvedValue(buildUser([role]));
+    const user = buildUser([role]);
+    vi.mocked(userMe).mockResolvedValue(user);
 
-    await expect(requireUserWithRole('user-token', secrets, allowedRoles)).resolves.toBeUndefined();
+    await expect(requireUserWithRole('user-token', secrets, allowedRoles)).resolves.toEqual(user);
   });
 
   it('throws NOT_AUTHORIZED when the caller has none of the allowed roles', async () => {
@@ -99,5 +124,32 @@ describe('requireUserWithRole', () => {
     vi.mocked(userMe).mockResolvedValue(buildUser([]));
 
     await expect(requireUserWithRole('user-token', secrets, allowedRoles)).rejects.toEqual(NOT_AUTHORIZED);
+  });
+});
+
+describe('getUser', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns the user when userMe resolves', async () => {
+    const user = buildUser([staffRole]);
+    vi.mocked(userMe).mockResolvedValue(user);
+
+    await expect(getUser('user-token', secrets)).resolves.toEqual(user);
+    expect(userMe).toHaveBeenCalledWith('user-token', secrets);
+  });
+
+  it.each([401, 403])('throws NOT_AUTHORIZED when userMe throws an OystehrSdkError %i', async (code) => {
+    vi.mocked(userMe).mockRejectedValue(new Oystehr.OystehrSdkError({ message: 'explicit deny', code }));
+
+    await expect(getUser('user-token', secrets)).rejects.toEqual(NOT_AUTHORIZED);
+  });
+
+  it('rethrows non-auth errors untouched', async () => {
+    const error = new Oystehr.OystehrSdkError({ message: 'boom', code: 500 });
+    vi.mocked(userMe).mockRejectedValue(error);
+
+    await expect(getUser('user-token', secrets)).rejects.toBe(error);
   });
 });

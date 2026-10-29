@@ -10,8 +10,9 @@ import {
   RelatedPerson,
 } from 'fhir/r4b';
 import { DateTime } from 'luxon';
-import { chunkThings, NEVER_DELETE, resourceBelongsToRunTag } from 'utils';
+import { chunkThings } from 'utils/lib/fhir/chat';
 import { getAllFhirSearchPages } from 'utils/lib/fhir/getAllFhirSearchPages';
+import { NEVER_DELETE, resourceBelongsToRunTag } from 'utils/lib/utils/e2eCleanup';
 
 const CHUNK_SIZE = 50;
 // in this script, deleting RelatedPersons is expected
@@ -209,16 +210,7 @@ const getPatientAndResourcesById = async (
   try {
     allResources = await getAllFhirSearchPages(fhirSearchParams, oystehr, 10);
   } catch (error: unknown) {
-    console.log(`Error fetching resources: ${error}`, JSON.stringify(error));
-    if (error instanceof Oystehr.OystehrSdkError && error.code === 4130) {
-      // if it fails because of the 6Mb limit, try splitting the request into more pages
-      try {
-        allResources = await getAllFhirSearchPages(fhirSearchParams, oystehr, 5);
-      } catch (error: unknown) {
-        console.log(`Error fetching resources: ${error}`, JSON.stringify(error));
-        return [];
-      }
-    }
+    console.log(`Error fetching resources, skipping patient ${patientId}: ${error}`, JSON.stringify(error));
     return [];
   }
 

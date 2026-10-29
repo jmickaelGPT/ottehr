@@ -1,5 +1,5 @@
 import { SxProps, Theme } from '@mui/material';
-import { AllChartValues, NOTE_TYPE, NoteDTO, SearchParams } from 'utils';
+import { NOTE_TYPE, NoteDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
 
 export interface CustomizableNotesConfig {
   separateEncounterNotes?: boolean; // notes from another encounters should be shown by "show more" button
@@ -15,10 +15,9 @@ export interface GenericNotesConfig extends CustomizableNotesConfig {
   locales: NoteLocales;
 }
 
+/** Which note type a list shows; the server decides how a type is searched (see get-chart-section). */
 export interface NoteApiConfig {
-  fieldName: Extract<keyof AllChartValues, 'notes'>;
   type: NOTE_TYPE;
-  searchParams: SearchParams;
 }
 
 export interface NoteLocales {

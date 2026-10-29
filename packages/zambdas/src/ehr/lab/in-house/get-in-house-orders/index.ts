@@ -1,13 +1,17 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { compareDates, EMPTY_PAGINATION, getSecret, SecretsKeys } from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../../shared';
+import { getSecret, SecretsKeys } from 'utils/lib/secrets';
+import { EMPTY_PAGINATION } from 'utils/lib/types/data/labs/labs.constants';
+import { compareDates } from 'utils/lib/utils/dateUtils';
+import { checkOrCreateM2MClientToken } from '../../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../../shared/helpers';
+import { wrapHandler } from '../../../../shared/sentry';
+import { ZambdaInput } from '../../../../shared/types/common';
 import { getInHouseResources, mapResourcesToInHouseOrderDTOs } from './helpers';
 import { validateRequestParameters } from './validateRequestParameters';
 
 let m2mToken: string;
 
 export const index = wrapHandler('get-in-house-orders', async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`Input: ${JSON.stringify(input)}`);
   console.group('validateRequestParameters');
 
   let validatedParameters;
@@ -32,7 +36,7 @@ export const index = wrapHandler('get-in-house-orders', async (input: ZambdaInpu
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
   const userToken = input.headers.Authorization.replace('Bearer ', '');
 
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   const {
     serviceRequests,

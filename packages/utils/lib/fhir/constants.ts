@@ -10,16 +10,20 @@ import {
   PractitionerRole,
   Schedule,
 } from 'fhir/r4b';
-import type { AppointmentType, CanonicalUrl } from '../types';
+import type { AppointmentType } from '../types/api/appointment.types';
+import type { CanonicalUrl } from '../types/common';
 import { ServiceMode, ServiceVisitType } from '../types/common';
 import {
   DISCHARGE_SUMMARY_CODE,
   EXPORTED_QUESTIONNAIRE_CODE,
+  FAX_PACKET_CODE,
   INSURANCE_CARD_CODE,
+  MEDICAL_RECORD_EXPORT_CODE,
   PATIENT_EDUCATION_DOC_TYPE_CODE,
   PATIENT_PHOTO_CODE,
   PHOTO_ID_CARD_CODE,
   PRIVACY_POLICY_CODE,
+  RADIOLOGY_REPORT_CODE,
   RECEIPT_CODE,
   SCHOOL_WORK_NOTE_CODE,
   SCHOOL_WORK_NOTE_TEMPLATE_CODE,
@@ -31,6 +35,7 @@ import { ottehrCodeSystemUrl, ottehrExtensionUrl, ottehrIdentifierSystem } from 
 // nota bene: some legacy resources could be using 'http' instead of 'https' here, and there are still some string vals out there with http
 export const PRIVATE_EXTENSION_BASE_URL = 'https://fhir.zapehr.com/r4/StructureDefinitions';
 export const PUBLIC_EXTENSION_BASE_URL = 'https://extensions.fhir.zapehr.com';
+export const OYSTEHR_EXTENSION_BASE_URL = 'https://extensions.fhir.oystehr.com';
 export const FHIR_ZAPEHR_URL = 'https://fhir.zapehr.com';
 const TERMINOLOGY_BASE_URL = 'http://terminology.hl7.org/CodeSystem';
 
@@ -46,15 +51,26 @@ export const FHIR_BASE_URL = 'https://fhir.ottehr.com';
 export const OTTEHR_CODE_SYSTEM_BASE_URL = 'https://fhir.ottehr.com/CodeSystem';
 
 export const FHIR_IDENTIFIER_NPI = 'http://hl7.org/fhir/sid/us-npi';
+// https://terminology.hl7.org/en/NamingSystem-CLIA.html
+export const FHIR_IDENTIFIER_CLIA = 'http://terminology.hl7.org/NamingSystem/CLIA';
 export const FHIR_IDENTIFIER_SYSTEM = 'http://terminology.hl7.org/CodeSystem/v2-0203';
+export const FHIR_IDENTIFIER_CODE_NPI = 'NPI';
 export const FHIR_IDENTIFIER_CODE_TAX_EMPLOYER = 'NE';
 export const FHIR_IDENTIFIER_CODE_TAX_SS = 'SS';
+export const FHIR_IDENTIFIER_CODE_TAXONOMY = 'ZZ';
+export const FHIR_IDENTIFIER_CODE_STATE_LICENSE = 'SL';
+export const OYSTEHR_RCM_PAYER_ID_SYSTEM = 'https://identifiers.fhir.oystehr.com/rcm-payer-id';
 export const FRIENDLY_PATIENT_ID_SYSTEM_BASE = 'https://identifiers.fhir.oystehr.com/friendly-patient-id';
 export const FHIR_AI_CHAT_CONSENT_CATEGORY_CODE = 'ai-chat';
 export const FHIR_HL7_ORG_VALUE_SET_BASE_URL = 'http://hl7.org/fhir/ValueSet';
 
 export const PARTICIPATION_CODE_SYSTEM = 'http://terminology.hl7.org/CodeSystem/v3-ParticipationType';
 export const ACCOUNT_TYPE_CODE_SYSTEM = 'http://terminology.hl7.org/CodeSystem/account-type';
+
+export const RAW_X12_EXTENSION_URL = 'https://extensions.fhir.oystehr.com/rcm-raw-x12';
+export const RAW_RESPONSE_EXTENSION_URL = `${OYSTEHR_EXTENSION_BASE_URL}/raw-response`;
+export const RAW_REQUEST_EXTENSION_URL = `${OYSTEHR_EXTENSION_BASE_URL}/raw-request`;
+export const CLAIM_STATUS_RESPONSE_EVENT_SYSTEM = 'https://identifiers.fhir.oystehr.com/rcm-claim-response-event-id';
 
 export const FHIR_EXTENSION = {
   Appointment: {
@@ -115,6 +131,11 @@ export const FHIR_EXTENSION = {
   ContactPoint: {
     erxTelecom: {
       url: 'https://extensions.fhir.oystehr.com/contact-point/telecom-phone-erx',
+    },
+  },
+  MedicationRequest: {
+    isRenewal: {
+      url: 'https://extensions.fhir.oystehr.com/medication-request/is-renewal',
     },
   },
   InsurancePlan: {
@@ -195,6 +216,19 @@ export const FHIR_EXTENSION = {
     procedureDetails: {
       url: `${PRIVATE_EXTENSION_BASE_URL}/procedure-details`,
     },
+    structuredFacts: { url: `${PRIVATE_EXTENSION_BASE_URL}/procedure-structured-facts` },
+    lengthCm: {
+      url: `${PRIVATE_EXTENSION_BASE_URL}/length-cm`,
+    },
+    repairDepth: {
+      url: `${PRIVATE_EXTENSION_BASE_URL}/repair-depth`,
+    },
+    infusionStartTime: {
+      url: `${PRIVATE_EXTENSION_BASE_URL}/infusion-start-time`,
+    },
+    infusionStopTime: {
+      url: `${PRIVATE_EXTENSION_BASE_URL}/infusion-stop-time`,
+    },
     specimenSent: {
       url: `${PRIVATE_EXTENSION_BASE_URL}/specimen-sent`,
     },
@@ -215,6 +249,15 @@ export const FHIR_EXTENSION = {
     },
     consentObtained: {
       url: `${PRIVATE_EXTENSION_BASE_URL}/consent-obtained`,
+    },
+    externalRadiologyOrder: {
+      url: `${PRIVATE_EXTENSION_BASE_URL}/external-radiology-order`,
+    },
+    radiologyTimeWindow: {
+      url: `${PRIVATE_EXTENSION_BASE_URL}/radiology-time-window`,
+    },
+    radiologySafetyFlag: {
+      url: `${PRIVATE_EXTENSION_BASE_URL}/radiology-safety-flag`,
     },
   },
   RelatedPerson: {
@@ -256,6 +299,20 @@ export const SLUG_SYSTEM = `${FHIR_BASE_URL}/r4/slug`;
 export const SLUG_REGEX = /^[a-zA-Z0-9-]+$/;
 export const SLUG_VALIDATION_MESSAGE = 'must be a URL-safe slug (letters, digits, hyphens)';
 export const isValidSlug = (slug: string): boolean => SLUG_REGEX.test(slug);
+
+/**
+ * Derive a URL-safe slug from a human-entered name. Any run of characters that
+ * isn't a letter/digit collapses to a single hyphen, and leading/trailing
+ * hyphens are trimmed — so the result always satisfies {@link isValidSlug}
+ * (or is empty when the name has no URL-safe characters at all, e.g. a purely
+ * non-Latin name). Case is preserved to match the existing slug convention
+ * (e.g. "NewYork-NY"). Callers must handle the empty-string case (invalid).
+ */
+export const slugFromName = (name: string): string =>
+  name
+    .trim()
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 
 /**
  * Optional admin-editable display name for a PractitionerRole-actored schedule.
@@ -317,6 +374,12 @@ export const APPOINTMENT_LOCKED_META_TAG_SYSTEM = 'appointment-locked-status';
 export const APPOINTMENT_LOCKED_META_TAG = {
   system: APPOINTMENT_LOCKED_META_TAG_SYSTEM,
   code: 'APPOINTMENT_LOCKED',
+};
+
+export const ENCOUNTER_LOCKED_META_TAG_SYSTEM = 'encounter-locked-status';
+export const ENCOUNTER_LOCKED_META_TAG = {
+  system: ENCOUNTER_LOCKED_META_TAG_SYSTEM,
+  code: 'ENCOUNTER_LOCKED',
 };
 
 export const FHIR_ENCOUNTER_ERX_PATIENT_SYNC_SYSTEM = 'encounter-erx-sync-status';
@@ -442,6 +505,59 @@ export const SERVICE_CATEGORY_SYSTEM = ottehrCodeSystemUrl('service-category');
 /** Extension URL for the JSON-blob runtime config on service-category resources. */
 export const SERVICE_CATEGORY_CONFIG_EXTENSION_URL = ottehrExtensionUrl('service-category-config');
 
+/** meta.tag identifying a Questionnaire as practice-managed (admin-authored custom form). */
+export const PRACTICE_MANAGED_QUESTIONNAIRE_TAG = {
+  system: ottehrCodeSystemUrl('questionnaire-type'),
+  code: 'practice-managed',
+};
+
+/** meta.tag identifying a paperwork flow Questionnaire. */
+export const PAPERWORK_FLOW_TAG = {
+  system: `${PRIVATE_EXTENSION_BASE_URL}/flow-type`,
+  code: 'paperwork-flow',
+};
+
+/**
+ * meta.tag system stamped on a paperwork flow Questionnaire for each service it's applied to that
+ * doesn't (yet) exist as a HealthcareService resource — code is the service id. Lets a flow target a
+ * service before its catalog entry is created, without a HealthcareService to stamp.
+ */
+export const SYSTEM_MANAGED_SERVICE_TAG_SYSTEM = ottehrCodeSystemUrl('system-managed-service');
+
+/**
+ * Extension on a paperwork flow Questionnaire recording a visit mode it targets (valueCode
+ * 'in-person' | 'virtual'), repeated once per targeted mode.
+ */
+export const PAPERWORK_FLOW_MODE_EXTENSION_URL = `${PRIVATE_EXTENSION_BASE_URL}/paperwork-flow-mode`;
+
+/**
+ * Extensions stamped on a service-category HealthcareService pointing at the paperwork flow
+ * Questionnaire to present for a given visit mode (valueCanonical `url|version`). At most one of each
+ * per HealthcareService; a booking resolves the extension matching its visit mode.
+ */
+export const PAPERWORK_FLOW_INPERSON_EXTENSION_URL = `${PRIVATE_EXTENSION_BASE_URL}/paperwork-flow-questionnaire-inperson`;
+export const PAPERWORK_FLOW_VIRTUAL_EXTENSION_URL = `${PRIVATE_EXTENSION_BASE_URL}/paperwork-flow-questionnaire-virtual`;
+
+/** meta.tag identifying how a one off QR was triggered */
+export const QR_DISTRIBUTION_TAG = {
+  system: ottehrCodeSystemUrl('qr-distribution'),
+  code: 'practitioner', // right now only triggered by users sending from visit details but this could be expanded in the future
+};
+
+/**
+ * meta.tag identifying a QuestionnaireResponse as the patient's intake paperwork response — the one
+ * created at booking, whether it points at the default intake Questionnaire or a paperwork flow.
+ * Readers use this (in addition to the legacy intake-paperwork canonical-URL match) to recognize
+ * flow-backed paperwork QRs, whose canonical is the flow's url and does not contain the intake URLs.
+ */
+export const INTAKE_PAPERWORK_QR_TAG = {
+  system: ottehrCodeSystemUrl('questionnaire-response-type'),
+  code: 'intake-paperwork',
+};
+
+/** meta.tag system for who sent triggered QR send, code is expected to be practitioner reference and display is expected to be a human readable name */
+export const QR_SENT_BY_SYSTEM = ottehrCodeSystemUrl('qr-practitioner-distribution-by');
+
 // ── Service-category characteristic systems (one per dimension) ─────────────
 
 /** Service-mode characteristic for a service-category HealthcareService. Codes match the ServiceMode enum. */
@@ -538,6 +654,118 @@ export const GroupAllLocationsCoding = {
   },
 };
 
+// ── Form templates ──────────────────────────────────────────────────────────
+
+/**
+ * Broad classification for admin-authored fillable PDF form templates.
+ *
+ * Set membership lives on `DocumentReference.category` (0..*) rather than `type` (0..1) so the single
+ * `type` slot stays free for the document's actual kind.
+ */
+export const DOCUMENT_CATEGORY_SYSTEM = ottehrCodeSystemUrl('document-category');
+
+/**
+ * Every code this system defines, in one place.
+ *
+ * Each code is used twice below — once in the `Coding` written to a resource and once in the `system|code`
+ * string used to search for it — so naming it here is what stops the two drifting apart.
+ */
+export const DOCUMENT_CATEGORY_CODES = {
+  formTemplate: 'form-template',
+  formInstance: 'form-instance',
+} as const;
+
+/**
+ * Typed as `Coding` deliberately: this object is written straight into a FHIR resource, and the server
+ * rejects any property that is not part of the datatype. Keeping the search-parameter string separate
+ * (below) means a convenience field cannot accidentally ride along into a resource.
+ */
+export const FORM_TEMPLATE_CATEGORY_CODING: Coding = {
+  system: DOCUMENT_CATEGORY_SYSTEM,
+  code: DOCUMENT_CATEGORY_CODES.formTemplate,
+  display: 'Form Template',
+};
+
+/** `system|code` form, for `category=` searches. Never written to a resource. */
+export const FORM_TEMPLATE_CATEGORY_SEARCH_PARAM = `${DOCUMENT_CATEGORY_SYSTEM}|${DOCUMENT_CATEGORY_CODES.formTemplate}`;
+
+/**
+ * Marks a document that should stay out of the patient's document list while it is still `preliminary`.
+ *
+ * A meta tag rather than a rule about categories, so the documents explorer does not have to know which
+ * kinds of document have drafts worth hiding. A workflow that produces working copies opts in by tagging
+ * them; everything else is unaffected, and the explorer's filter never changes.
+ *
+ * The status is still what does the hiding. `preliminary` alone is not enough to justify it — an unreviewed
+ * lab result carries that status and a clinician is waiting on it — so the tag says only "this particular
+ * document is not worth reading until it is finished".
+ */
+export const HIDE_WHILE_PRELIMINARY_TAG: Coding = {
+  system: ottehrCodeSystemUrl('document-visibility'),
+  code: 'hide-while-preliminary',
+  display: 'Hide while preliminary',
+};
+
+/**
+ * A prefilled copy of a template, produced for one encounter.
+ *
+ * Distinct from the template category so a chart listing cannot pick up templates, and a template listing
+ * cannot pick up instances — they live in different buckets and mean different things.
+ */
+export const FORM_INSTANCE_CATEGORY_CODING: Coding = {
+  system: DOCUMENT_CATEGORY_SYSTEM,
+  code: DOCUMENT_CATEGORY_CODES.formInstance,
+  display: 'Filled Form',
+};
+
+/** `system|code` form, for `category=` searches. Never written to a resource. */
+export const FORM_INSTANCE_CATEGORY_SEARCH_PARAM = `${DOCUMENT_CATEGORY_SYSTEM}|${DOCUMENT_CATEGORY_CODES.formInstance}`;
+
+/**
+ * Whether a template's PDF has fillable fields, recorded as a second `category` coding.
+ *
+ * This lives in `category` rather than alongside the field inventory in an extension because listings
+ * need it and extensions do not survive an `_elements` projection — FHIR selects whole elements, so
+ * asking for the fillability flag would drag every template's full field inventory back with it. Being
+ * 0..*, `category` accommodates this without displacing the set-membership coding, and it stays
+ * searchable if a listing ever wants to filter on it.
+ */
+export const FORM_TEMPLATE_FILLABILITY_SYSTEM = ottehrCodeSystemUrl('form-template-fillability');
+export const FormTemplateFillability = {
+  fillable: 'fillable',
+  printable: 'printable',
+} as const;
+
+/** Stable per-template business key, so a template survives having its PDF replaced. */
+export const FORM_TEMPLATE_IDENTIFIER_SYSTEM = ottehrIdentifierSystem('form-template');
+
+/**
+ * Field inventory extracted from the template PDF, stored as JSON.
+ *
+ * A cache, not a source of truth — it is always re-derivable from the file. It lives in an extension so
+ * list queries can leave it behind via `_elements`; a 200-field form is not something a listing should
+ * carry.
+ */
+export const FORM_TEMPLATE_FIELD_INVENTORY_EXTENSION_URL = ottehrExtensionUrl('form-template-field-inventory');
+
+/** Classification from the last analysis of the template PDF, so the UI can explain what a template supports. */
+export const FORM_TEMPLATE_ANALYSIS_EXTENSION_URL = ottehrExtensionUrl('form-template-analysis');
+
+/**
+ * Admin-authored bindings from chart context to the template's PDF fields, stored as JSON.
+ *
+ * Unlike the inventory this is not re-derivable — it is the authored artifact the whole feature exists
+ * to produce, so it is never rewritten except by an explicit save.
+ */
+export const FORM_TEMPLATE_MAPPING_EXTENSION_URL = ottehrExtensionUrl('form-template-mapping');
+
+/**
+ * Where an imported template's PDF was fetched from.
+ *
+ * Provenance only — the stored copy is the template. Kept so an admin can see where a form came from, and
+ * so a future check for a newer published version has somewhere to look.
+ */
+
 export const BUCKET_NAMES = {
   VISIT_NOTES: 'visit-notes',
   CONSENT_FORMS: 'consent-forms',
@@ -554,8 +782,16 @@ export const BUCKET_NAMES = {
   STATEMENTS: 'statements',
   PATIENT_EDUCATION: 'patient-education',
   PATIENT_EDUCATION_ADMIN: 'patient-education-admin',
+  /** Admin-authored fillable PDF form templates. Org-level: no patient path segment. */
+  FORM_TEMPLATES: 'pdf-form-templates',
+  /** Prefilled copies of those templates, one per encounter. Patient-scoped, unlike the templates. */
+  FORM_INSTANCES: 'pdf-form-instances',
+  RADIOLOGY_REPORTS: 'radiology-reports',
   REPORTS: 'invoiceable-patients-reports',
+  BILLING_CLAIM_EXPORTS: 'billing-claim-exports',
   CUSTOM_FOLDERS: 'patient-docs-custom-folders',
+  MEDICAL_RECORD_EXPORTS: 'medical-record-exports',
+  FAXES: 'faxes',
 } as const;
 
 export type BucketName = (typeof BUCKET_NAMES)[keyof typeof BUCKET_NAMES];
@@ -641,8 +877,27 @@ export const FOLDERS_CONFIG: ListConfig[] = [
     display: 'Patient Education',
     documentTypeCode: PATIENT_EDUCATION_DOC_TYPE_CODE,
   },
+  {
+    title: BUCKET_NAMES.RADIOLOGY_REPORTS,
+    display: 'Radiology Reports',
+    documentTypeCode: RADIOLOGY_REPORT_CODE,
+  },
+  {
+    title: BUCKET_NAMES.MEDICAL_RECORD_EXPORTS,
+    display: 'Medical Records',
+    documentTypeCode: MEDICAL_RECORD_EXPORT_CODE,
+  },
+  {
+    title: BUCKET_NAMES.FAXES,
+    display: 'Faxes',
+    documentTypeCode: FAX_PACKET_CODE,
+  },
 ];
 
+// Relationships deliberately absent here fall back to 'other' at the call sites. 'Employee' is one:
+// the HL7 subscriber-relationship CodeSystem has no employee code, and mapping it here would give
+// 'other' two keys, making the reverse lookup in the billing rules engine order-dependent. The
+// coding's `display` carries the original label either way.
 export const SUBSCRIBER_RELATIONSHIP_CODE_MAP: Record<string, string> = {
   Child: 'child',
   Parent: 'parent',
@@ -652,6 +907,29 @@ export const SUBSCRIBER_RELATIONSHIP_CODE_MAP: Record<string, string> = {
   Self: 'self',
   'Injured Party': 'injured',
 };
+
+// Canonical set of subscriber/policy-holder relationships to the patient, shared across the
+// clinical EHR and billing app so the values stay aligned. Keep in step with
+// `relationshipToInsuredOptions` in ottehr-config/value-sets, which drives the paperwork dropdown.
+export const SUBSCRIBER_RELATIONSHIPS = [
+  'Self',
+  'Child',
+  'Parent',
+  'Spouse',
+  'Common Law Spouse',
+  'Injured Party',
+  'Employee',
+  'Other',
+] as const;
+export type SubscriberRelationship = (typeof SUBSCRIBER_RELATIONSHIPS)[number];
+
+// CodeSystem for Coverage.relationship (the subscriber's relationship to the beneficiary).
+export const SUBSCRIBER_RELATIONSHIP_SYSTEM = 'http://terminology.hl7.org/CodeSystem/subscriber-relationship';
+// System used on RelatedPerson.relationship coding for coverage subscribers / policy holders.
+export const RELATED_PERSON_RELATIONSHIP_SYSTEM = 'http://hl7.org/fhir/ValueSet/relatedperson-relationshiptype';
+
+export const BIRTH_SEXES = ['Male', 'Female', 'Intersex'] as const;
+export type BirthSex = (typeof BIRTH_SEXES)[number];
 
 // this is required by US Core
 // https://build.fhir.org/ig/HL7/US-Core/StructureDefinition-us-core-coverage-definitions.html#key_Coverage.identifier:memberid.type
@@ -706,6 +984,7 @@ export const OTTEHR_QUESTIONNAIRE_EXTENSION_KEYS = {
   dataType: `${PRIVATE_EXTENSION_BASE_URL}/data-type`,
   disabledDisplay: `${PRIVATE_EXTENSION_BASE_URL}/disabled-display`,
   groupType: `${PRIVATE_EXTENSION_BASE_URL}/group-type`,
+  hideControlLabel: `${PRIVATE_EXTENSION_BASE_URL}/hide-control-label`,
   infoText: `${PRIVATE_EXTENSION_BASE_URL}/information-text`,
   inputWidth: `${PRIVATE_EXTENSION_BASE_URL}/input-width`,
   minRows: `${PRIVATE_EXTENSION_BASE_URL}/text-min-rows`,
@@ -921,13 +1200,21 @@ export const PERFORMER_TYPE_SYSTEM = PROCEDURES_TERMINOLOGY_BASE_URL + '/perform
 export const BODY_SITE_SYSTEM = PROCEDURES_TERMINOLOGY_BASE_URL + '/body-site';
 
 export const PAYMENT_METHOD_EXTENSION_URL = PUBLIC_EXTENSION_BASE_URL + '/payment-method';
+// stamped on the original PaymentNotice when Stripe reports refunds against the payment,
+// so refund state can be read from FHIR without going back to Stripe
+export const PAYMENT_REFUNDS_EXTENSION_URL = PUBLIC_EXTENSION_BASE_URL + '/payment-refunds';
+// stamped on a PaymentNotice when a non-processor payment (cash/check/external reader) is voided
+export const PAYMENT_VOID_EXTENSION_URL = PUBLIC_EXTENSION_BASE_URL + '/payment-void';
 
 export const PREFERRED_PHARMACY_EXTENSION_URL = ottehrExtensionUrl('preferred-pharmacy');
 export const PREFERRED_PHARMACY_MANUAL_ENTRY_URL = ottehrExtensionUrl('pharmacy-manual-entry'); // added when the pharmacy was added manually via text fields
 export const PREFERRED_PHARMACY_PLACES_ID_URL = ottehrExtensionUrl('pharmacy-places-id'); // added when the pharmacy was selected with places search
+
 // docs.oystehr.com/oystehr/services/erx/patient-sync/#preferred-pharmacy
 export const PREFERRED_PHARMACY_ERX_ID_FOR_SYNC_URL =
   'https://extensions.fhir.oystehr.com/patient/erx-preferred-pharmacy-id';
+
+export const PRESCRIPTION_ERX_PHARMACY_ID_URL = 'https://extensions.fhir.oystehr.com/prescription/erx-pharmacy-id';
 
 export const ENCOUNTER_PAYMENT_VARIANT_EXTENSION_URL = ottehrExtensionUrl('payment-variant');
 
@@ -952,6 +1239,7 @@ export enum RcmTaskCode {
   sendInvoiceToPatient = 'send-invoice-to-patient',
   sendInvoiceOutputInvoiceId = 'send-invoice-output-invoice-Id',
   sendInvoiceOutputError = 'send-invoice-output-error',
+  stripeInvoiceStatus = 'send-invoice-output-stripe-status',
 }
 export const RcmTaskCodings: { [key: string]: CodeableConcept } = {
   sendInvoiceToPatient: {
@@ -978,10 +1266,24 @@ export const RcmTaskCodings: { [key: string]: CodeableConcept } = {
       },
     ],
   },
+  stripeInvoiceStatus: {
+    coding: [
+      {
+        system: RCM_TASK_SYSTEM,
+        code: RcmTaskCode.stripeInvoiceStatus,
+      },
+    ],
+  },
 };
 
 export const DOCUMENT_REFERENCE_SUMMARY_FROM_AUDIO = 'Summary of visit from audio recording';
 export const DOCUMENT_REFERENCE_SUMMARY_FROM_CHAT = 'Summary of visit from chat';
+
+export const AMBIENT_SCRIBE_RECORDING_PENDING_CODING = {
+  system: `${OTTEHR_CODE_SYSTEM_BASE_URL}/document-type`,
+  code: 'ambient-scribe-recording-pending',
+  display: 'Ambient scribe recording pending transcription',
+};
 
 export const EMPLOYER_ORG_IDENTIFIER_SYSTEM = ottehrIdentifierSystem('organization-type');
 
@@ -992,8 +1294,6 @@ export const GLOBAL_TEMPLATE_IN_PERSON_CODE_SYSTEM = `${OTTEHR_CODE_SYSTEM_BASE_
 
 /** Builds the full meta.tag system URL from a chart data field name (e.g. 'chief-complaint' → full URL). */
 export const chartDataTagSystem = (fieldName: string): string => `${PRIVATE_EXTENSION_BASE_URL}/${fieldName}`;
-
-export const ICD_10_CODE_SYSTEM = 'http://hl7.org/fhir/sid/icd-10';
 
 export const VIDEO_CHAT_WAITING_ROOM_NOTIFICATION_TASK_TYPE = ottehrCodeSystemUrl('task-type');
 export const VIDEO_CHAT_WAITING_ROOM_NOTIFICATION_TASK_CODE = 'video-chat-waiting-room-notification';
@@ -1014,6 +1314,42 @@ export const FAX_SENT_PROVENANCE_ACTIVITY_CODING: Coding = {
   system: PROVENANCE_FAX_SYSTEM,
 };
 
+/** Identifier system Oystehr stamps on the Communication resources it creates for outbound faxes. */
+export const OYSTEHR_FAX_COMMUNICATION_IDENTIFIER_SYSTEM = 'https://identifiers.oystehr.com/fax';
+/** Extension on those Communications whose CodeableConcept code Oystehr updates as the fax progresses. */
+export const OYSTEHR_OUTBOUND_FAX_STATUS_EXTENSION_URL = 'https://extensions.fhir.oystehr.com/outbound-fax-status';
+export const OYSTEHR_OUTBOUND_FAX_STATUS_CODES = {
+  delivered: 'DELIVERED',
+  stopped: 'STOPPED',
+} as const;
+
+export const OUTBOUND_DELIVERY_TASK_SYSTEM = ottehrCodeSystemUrl('outbound-delivery');
+export const OUTBOUND_DELIVERY_TASK_CODES = {
+  fax: 'fax',
+  email: 'email',
+} as const;
+export const OUTBOUND_DELIVERY_INPUT_SYSTEM = ottehrCodeSystemUrl('outbound-delivery-input');
+export const OUTBOUND_DELIVERY_INPUT_CODES = {
+  recipientAddress: 'recipient-address',
+  recipientName: 'recipient-name',
+  recipientOrganization: 'recipient-organization',
+  recipientPhone: 'recipient-phone',
+  documentReference: 'document-reference',
+  senderId: 'sender-id',
+  senderDisplay: 'sender-display',
+  senderOrganization: 'sender-organization',
+  faxPacketPageCount: 'fax-packet-page-count',
+  faxPacketParts: 'fax-packet-parts',
+} as const;
+export const OUTBOUND_DELIVERY_OUTPUT_SYSTEM = ottehrCodeSystemUrl('outbound-delivery-output');
+export const OUTBOUND_DELIVERY_OUTPUT_CODES = {
+  communication: 'communication',
+  error: 'error',
+} as const;
+export const OUTBOUND_DELIVERY_SOURCE_IDENTIFIER_SYSTEM = ottehrIdentifierSystem('outbound-delivery-source');
+export const OUTBOUND_DELIVERY_RETRY_IDENTIFIER_SYSTEM = ottehrIdentifierSystem('outbound-delivery-retry');
+export const OUTBOUND_DELIVERY_CLAIM_IDENTIFIER_SYSTEM = ottehrIdentifierSystem('outbound-delivery-claim');
+
 export const EMPLOYEE_ID_SYSTEM = ottehrIdentifierSystem('employee-id');
 
 export const CHARGE_MASTER_DESIGNATION_EXTENSION_URL = ottehrExtensionUrl('charge-master-designation');
@@ -1023,6 +1359,7 @@ export type FeeScheduleDesignation = 'case-rate';
 export const CASE_RATE_CODE = 'case-rate';
 
 export const CPT_MODIFIER_EXTENSION_URL = ottehrExtensionUrl('cpt-modifier');
+export const CPT_BILLABLE_UNITS_EXTENSION_URL = ottehrExtensionUrl('cpt-billable-units');
 export const CPT_CODE_SYSTEM = 'http://www.ama-assn.org/go/cpt';
 
 export const EXAM_MIGRATION_VERSION_URL = `${PRIVATE_EXTENSION_BASE_URL}/exam-migration-version`;
@@ -1034,3 +1371,10 @@ export const EXAM_MIGRATION_VERSION_URL = `${PRIVATE_EXTENSION_BASE_URL}/exam-mi
 export const CURRENT_EXAM_MIGRATION_VERSION = 2;
 export const INCOMPATIBLE_EXAM_VERSION_MESSAGE =
   "This chart's exam version is incompatible with the current exam configuration, please consult the visit PDF.";
+
+export const BILLING_RESOURCE_TAG = {
+  system: 'https://fhir.ottehr.com/billing/resource-type',
+  code: 'billing-resource',
+};
+
+export const CHARGE_ITEM_DEFINITION_DEFAULT_SYSTEM = 'https://fhir.ottehr.com/billing/charge-item-definition-default';

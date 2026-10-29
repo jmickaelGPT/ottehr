@@ -1,29 +1,23 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { ActivityDefinition } from 'fhir/r4b';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
 import {
-  AdminListInHouseLabsOutput,
-  getSecret,
   IN_HOUSE_LAB_LATEST_TAG_DEFINITION,
   IN_HOUSE_TAG_DEFINITION,
-  InHouseLabsAdminListItem,
-  Secrets,
-  SecretsKeys,
-} from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  topLevelCatch,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../../shared';
+} from 'utils/lib/types/data/in-house/in-house.constants';
+import { AdminListInHouseLabsOutput, InHouseLabsAdminListItem } from 'utils/lib/types/data/in-house/in-house.types';
+import { checkOrCreateM2MClientToken } from '../../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../../shared/helpers';
+import { topLevelCatch } from '../../../../shared/lambda';
+import { wrapHandler } from '../../../../shared/sentry';
+import { ZambdaInput } from '../../../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 let m2mToken: string;
 const ZAMBDA_NAME = 'admin-list-in-house-labs';
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`admin-list-in-house-labs started, input: ${JSON.stringify(input)}`);
   try {
     const validatedParameters: { secrets: Secrets | null; userToken: string } = validateRequestParameters(input);
 
@@ -32,7 +26,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     console.log('validateRequestParameters success');
 
     m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-    const oystehr = createOystehrClient(m2mToken, secrets);
+    const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
     const response: AdminListInHouseLabsOutput = { labs: await getAdminInHouseLabItemList(oystehr) };
 

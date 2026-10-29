@@ -1,5 +1,14 @@
-import { isValidUUID, NOT_AUTHORIZED, PaymentMethodSetupParameters, Secrets } from 'utils';
-import { ZambdaInput } from '../../../shared';
+import { Secrets } from 'utils/lib/secrets';
+import { PaymentMethodSetupParameters } from 'utils/lib/types/data/payment/payment-method-types';
+import { MISSING_REQUEST_BODY, NOT_AUTHORIZED } from 'utils/lib/types/errors';
+import { z } from 'zod';
+import { ZambdaInput } from '../../../shared/types/common';
+import { safeJsonParse, safeValidate } from '../../../shared/validation';
+
+const PaymentMethodSetupBodySchema = z.object({
+  beneficiaryPatientId: z.string().uuid(),
+  appointmentId: z.string().uuid(),
+});
 
 export function validateRequestParameters(
   input: ZambdaInput
@@ -8,27 +17,12 @@ export function validateRequestParameters(
   if (!authorization) {
     throw NOT_AUTHORIZED;
   }
+
   if (!input.body) {
-    throw new Error('No request body provided');
+    throw MISSING_REQUEST_BODY;
   }
 
-  const { beneficiaryPatientId, appointmentId } = JSON.parse(input.body);
-
-  if (!beneficiaryPatientId) {
-    throw new Error('beneficiaryPatientId is not defined');
-  }
-
-  if (!isValidUUID(beneficiaryPatientId)) {
-    throw new Error('beneficiaryPatientId is not a valid UUID');
-  }
-
-  if (!appointmentId) {
-    throw new Error('appointmentId is not defined');
-  }
-
-  if (!isValidUUID(appointmentId)) {
-    throw new Error('appointmentId is not a valid UUID');
-  }
+  const { beneficiaryPatientId, appointmentId } = safeValidate(PaymentMethodSetupBodySchema, safeJsonParse(input.body));
 
   return {
     beneficiaryPatientId,

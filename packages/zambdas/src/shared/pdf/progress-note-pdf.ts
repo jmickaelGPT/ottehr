@@ -1,76 +1,71 @@
-import { BUCKET_NAMES, Secrets } from 'utils';
-import { DataComposer, generatePdf, PdfRenderConfig, StyleFactory } from './pdf-common';
+import { BUCKET_NAMES } from 'utils/lib/fhir/constants';
+import { Secrets } from 'utils/lib/secrets';
+import { createClinicalOystehrClient } from '../helpers';
+import { DataComposer, PdfRenderConfig, renderPdf, StyleFactory, uploadPdfToStorage } from './pdf-common';
 import { rgbNormalized } from './pdf-utils';
+import { composeRadiology, createRadiologySection } from './sections/discharge-summary/radiology';
+import { composeUpcomingVisits, createUpcomingVisitsSection } from './sections/upcomingVisits';
 import {
   composeAdditionalQuestions,
-  composeAllergies,
-  composeAssessment,
-  composeChiefComplaint,
-  composeCptCodes,
-  composeEmCode,
-  composeEncounterData,
-  composeExamination,
-  composeExternalLabs,
-  composeFollowupCompleted,
-  composeHistoryOfPresentIllness,
-  composeHospitalization,
-  composeImmunizationOrders,
-  composeInHouseLabs,
-  composeInHouseMedications,
-  composeIntakeNotes,
-  composeMechanismOfInjury,
-  composeMedicalConditions,
-  composeMedicalDecision,
-  composeMedications,
-  composePatientInformation,
-  composePlanData,
-  composePrescriptions,
-  composeProcedures,
-  composeProgressNoteVisitDetails,
-  composeReviewOfSystems,
-  composeRosObservations,
-  composeSurgicalHistory,
-  composeUpcomingVisits,
-  composeVitals,
   createAdditionalQuestionsSection,
-  createAllergiesSection,
-  createAssessmentSection,
-  createChiefComplaintSection,
-  createCptCodesSection,
-  createEmCodeSection,
-  createExaminationSection,
-  createExternalLabsSection,
-  createFollowupCompletedSection,
+} from './sections/visit-note/additionalQuestions';
+import { composeAllergies, createAllergiesSection } from './sections/visit-note/allergiesInfo';
+import { composeAssessment, createAssessmentSection } from './sections/visit-note/assessment';
+import { composeChiefComplaint, createChiefComplaintSection } from './sections/visit-note/chiefComplaint';
+import { composeCptCodes, createCptCodesSection } from './sections/visit-note/cptCodes';
+import { composeEmCode, createEmCodeSection } from './sections/visit-note/emCode';
+import { composeEncounterData } from './sections/visit-note/encounterInfo';
+import { composeExamination, createExaminationSection } from './sections/visit-note/examination';
+import { composeExternalLabs, createExternalLabsSection } from './sections/visit-note/externalLabsInfo';
+import { composeFollowupCompleted, createFollowupCompletedSection } from './sections/visit-note/followupCompleted';
+import {
+  composeHistoryOfPresentIllness,
   createHistoryOfPresentIllnessSection,
-  createHospitalizationSection,
-  createImmunizationOrdersSection,
-  createInHouseLabsSection,
+} from './sections/visit-note/historyOfPresentIllness';
+import { composeHospitalization, createHospitalizationSection } from './sections/visit-note/hospitalizationInfo';
+import { composeImmunizationOrders, createImmunizationOrdersSection } from './sections/visit-note/immunization';
+import { composeInHouseLabs, createInHouseLabsSection } from './sections/visit-note/inHouseLabsInfo';
+import {
+  composeInHouseMedications,
   createInHouseMedicationsSection,
-  createIntakeNotesSection,
-  createMechanismOfInjurySection,
-  createMedicalConditionsSection,
-  createMedicalDecisionSection,
-  createMedicationsSection,
-  createPlanSection,
-  createPrescriptionsSection,
-  createProceduresSection,
+} from './sections/visit-note/inHouseMedicationsInfo';
+import { composeIntakeNotes, createIntakeNotesSection } from './sections/visit-note/intakeNotes';
+import { composeMechanismOfInjury, createMechanismOfInjurySection } from './sections/visit-note/mechanismOfInjury';
+import { composeMedicalConditions, createMedicalConditionsSection } from './sections/visit-note/medicalConditions';
+import { composeMedicalDecision, createMedicalDecisionSection } from './sections/visit-note/medicalDecision';
+import { composeMedications, createMedicationsSection } from './sections/visit-note/medicationsInfo';
+import { composePlanData, createPlanSection } from './sections/visit-note/plan';
+import { composePrescriptions, createPrescriptionsSection } from './sections/visit-note/prescriptions';
+import { composeProcedures, createProceduresSection } from './sections/visit-note/procedures';
+import {
+  composePatientInformation,
   createProgressNotePatientInfoSection,
+} from './sections/visit-note/progressNotePatientInfo';
+import {
+  composeProgressNoteVisitDetails,
   createProgressNoteVisitDetailsSection,
-  createReviewOfSystemsSection,
-  createRosObservationsSection,
-  createSurgicalHistorySection,
-  createUpcomingVisitsSection,
-  createVitalsSection,
-} from './sections';
+} from './sections/visit-note/progressNoteVisitDetails';
+import { composeReviewOfSystems, createReviewOfSystemsSection } from './sections/visit-note/reviewOfSystems';
+import { composeRosObservations, createRosObservationsSection } from './sections/visit-note/rosObservations';
+import { composeSignature, createSignatureSection } from './sections/visit-note/signature';
+import { composeSurgicalHistory, createSurgicalHistorySection } from './sections/visit-note/surgicalHistory';
+import { composeVitals, createVitalsSection } from './sections/visit-note/vitals';
+import { fetchServiceCategoryCatalog } from './service-category-catalog';
 import { AssetPaths, PdfResult, ProgressNoteData, ProgressNoteInput } from './types';
 
-const composeProgressNoteData: DataComposer<ProgressNoteInput, ProgressNoteData> = (input) => {
+export const composeProgressNoteData: DataComposer<ProgressNoteInput, ProgressNoteData> = (input) => {
   const { patient, encounter, questionnaireResponse, allChartData, appointmentPackage, upcomingFollowUps } = input;
+
+  const visit = composeProgressNoteVisitDetails({
+    allChartData,
+    appointmentPackage,
+    serviceCategories: input.serviceCategories,
+  });
 
   return {
     patient: composePatientInformation({ patient, questionnaireResponse }),
     encounter: composeEncounterData({ encounter }),
-    visit: composeProgressNoteVisitDetails({ allChartData, appointmentPackage }),
+    visit,
     chiefComplaint: composeChiefComplaint({
       allChartData,
       appointmentPackage,
@@ -113,6 +108,9 @@ const composeProgressNoteData: DataComposer<ProgressNoteInput, ProgressNoteData>
     externalLabs: composeExternalLabs({
       allChartData,
     }),
+    radiology: composeRadiology({
+      allChartData,
+    }),
     screening: composeAdditionalQuestions({
       allChartData,
     }),
@@ -149,6 +147,7 @@ const composeProgressNoteData: DataComposer<ProgressNoteInput, ProgressNoteData>
     }),
     prescriptions: composePrescriptions({
       allChartData,
+      erxPharmacies: input.erxPharmacies,
     }),
     plan: composePlanData({
       allChartData,
@@ -163,6 +162,12 @@ const composeProgressNoteData: DataComposer<ProgressNoteInput, ProgressNoteData>
     upcomingVisits: composeUpcomingVisits({ upcomingFollowUps }),
     followupCompleted: composeFollowupCompleted({
       appointmentPackage,
+    }),
+    signature: composeSignature({
+      appointmentPackage,
+      visit,
+      signatures: input.signatures,
+      signed: input.signed,
     }),
   };
 };
@@ -335,6 +340,7 @@ const progressNoteRenderConfig: PdfRenderConfig<ProgressNoteData> = {
     createImmunizationOrdersSection(),
     createInHouseLabsSection(),
     createExternalLabsSection(),
+    createRadiologySection(),
     createAdditionalQuestionsSection(),
     createIntakeNotesSection(),
     createVitalsSection(),
@@ -348,7 +354,37 @@ const progressNoteRenderConfig: PdfRenderConfig<ProgressNoteData> = {
     createPlanSection(),
     createUpcomingVisitsSection(),
     createFollowupCompletedSection(),
+    createSignatureSection(),
   ],
+};
+
+/**
+ * Single render path for the visit/progress note: resolves the service category catalog, composes the
+ * note data and renders it. Both the uploading (`createProgressNotePdf`) and the bytes-only
+ * (`createProgressNotePdfBytes`) entry points go through here so the note can never drift between the
+ * document stored on the visit and the copy merged into an outbound fax packet.
+ */
+const renderProgressNote = async (
+  input: ProgressNoteInput,
+  secrets: Secrets | null,
+  token: string
+): Promise<{ bytes: Uint8Array; data: ProgressNoteData }> => {
+  const serviceCategories = await fetchServiceCategoryCatalog(createClinicalOystehrClient(token, secrets));
+  const data = composeProgressNoteData({ ...input, serviceCategories });
+  return { bytes: await renderPdf(data, progressNoteRenderConfig, token), data };
+};
+
+/**
+ * Renders the visit/progress note and returns the raw PDF bytes without uploading anything or
+ * touching any DocumentReference. Used when the note has to be regenerated on the fly (e.g. for an
+ * outbound fax packet of an unsigned visit) and must not become the canonical visit note.
+ */
+export const createProgressNotePdfBytes = async (
+  input: ProgressNoteInput,
+  secrets: Secrets | null,
+  token: string
+): Promise<Uint8Array> => {
+  return (await renderProgressNote(input, secrets, token)).bytes;
 };
 
 export const createProgressNotePdf = async (
@@ -356,10 +392,10 @@ export const createProgressNotePdf = async (
   secrets: Secrets | null,
   token: string
 ): Promise<PdfResult> => {
-  return generatePdf(
-    input,
-    composeProgressNoteData,
-    progressNoteRenderConfig,
+  const { bytes, data } = await renderProgressNote(input, secrets, token);
+
+  const pdfInfo = await uploadPdfToStorage(
+    bytes,
     {
       patientId: input.patient.id!,
       fileName: 'VisitNote.pdf',
@@ -368,4 +404,6 @@ export const createProgressNotePdf = async (
     secrets,
     token
   );
+
+  return { pdfInfo, attached: data.attachmentDocRefs };
 };

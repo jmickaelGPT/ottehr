@@ -5,7 +5,6 @@ import {
   Button,
   CircularProgress,
   IconButton,
-  Paper,
   Table,
   TableBody,
   TableCell,
@@ -17,7 +16,8 @@ import {
 import { useIsMutating } from '@tanstack/react-query';
 import { ReactElement, useState } from 'react';
 import { dataTestIds } from 'src/constants/data-test-ids';
-import { EmCodeOption } from 'utils';
+import { AdminHeaderActionSlot } from 'src/features/admin/AdminPageHeader';
+import { EmCodeOption } from 'utils/lib/types/api/config/em-codes';
 import { useEMCodes } from '../../../shared/hooks/useEMCodes';
 import EMCodeDeleteDialog from './EMCodeDeleteDialog';
 import EMCodeDialog from './EMCodeDialog';
@@ -42,13 +42,12 @@ export default function EMCodesAdminPage(): ReactElement {
   const closeDialog = (): void => setDialog({ open: false });
 
   return (
-    <Paper sx={{ marginTop: 2, padding: 2 }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-        <Typography variant="h5">E&M Codes</Typography>
+    <Box>
+      <AdminHeaderActionSlot>
         <Button variant="contained" onClick={openAddDialog} data-testid={dataTestIds.emCodesAdminPage.addButton}>
           Add E&M Code
         </Button>
-      </Box>
+      </AdminHeaderActionSlot>
 
       {isLoading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
@@ -106,6 +105,6 @@ export default function EMCodesAdminPage(): ReactElement {
       <EMCodeDialog open={dialog.open} onClose={closeDialog} existingCode={dialog.existingCode} />
 
       <EMCodeDeleteDialog code={confirmDeleteCode} onClose={() => setConfirmDeleteCode(null)} />
-    </Paper>
+    </Box>
   );
 }

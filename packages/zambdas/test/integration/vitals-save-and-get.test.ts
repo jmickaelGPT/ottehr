@@ -1,19 +1,22 @@
 import Oystehr, { BatchInputPostRequest } from '@oystehr/sdk';
 import { randomUUID } from 'crypto';
-import { Appointment, Encounter, Observation, Patient } from 'fhir/r4b';
+import { Appointment, DocumentReference, Encounter, Observation, Patient } from 'fhir/r4b';
 import { DateTime } from 'luxon';
 import {
-  DOB_DATE_FORMAT,
-  FHIRObservationInterpretationSystem,
-  GetVitalsResponseData,
   LOINC_SYSTEM,
   VITAL_DIASTOLIC_BLOOD_PRESSURE_LOINC_CODE,
   VITAL_SYSTOLIC_BLOOD_PRESSURE_LOINC_CODE,
+} from 'utils/lib/fhir/vitals';
+import {
+  FHIRObservationInterpretationSystem,
   VitalFieldNames,
-  VitalsObservationDTO,
-} from 'utils';
+} from 'utils/lib/types/api/chart-data/chart-data.constants';
+import { VitalsObservationDTO, VitalsVisionObservationDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
+import { GetVitalsResponseData } from 'utils/lib/types/api/chart-data/get-vitals.types';
+import { DOB_DATE_FORMAT } from 'utils/lib/utils/date';
 import { assert, inject, suite } from 'vitest';
-import { getAuth0Token } from '../../src/shared';
+import { getAuth0Token } from '../../src/shared/getAuth0Token';
+import { createClinicalOystehrClient } from '../../src/shared/helpers';
 import { SECRETS } from '../data/secrets';
 import { ensureM2MPractitionerProfile } from '../helpers/configureTestM2MClient';
 import { cleanupTestScheduleResources, makeTestPatient, persistTestPatient } from '../helpers/testScheduleUtils';
@@ -174,14 +177,9 @@ describe('saving and getting vitals', () => {
       AUTH0_AUDIENCE: AUTH0_AUDIENCE,
     });
 
-    oystehr = new Oystehr({
-      accessToken: token,
-      fhirApiUrl: FHIR_API,
-      projectApiUrl: EXECUTE_ZAMBDA_URL,
-      services: {
-        zambdaApiUrl: EXECUTE_ZAMBDA_URL,
-      },
+    oystehr = createClinicalOystehrClient(token, SECRETS, {
       projectId: PROJECT_ID,
+      services: { fhirApiUrl: FHIR_API, projectApiUrl: EXECUTE_ZAMBDA_URL, zambdaApiUrl: EXECUTE_ZAMBDA_URL },
     });
 
     await ensureM2MPractitionerProfile(token);
@@ -407,7 +405,7 @@ describe('saving and getting vitals', () => {
         expect(newHistoricVitals).toEqual(originalVitals);
       });
     },
-    { timeout: DEFAULT_SUITE_TIMEOUT }
+    DEFAULT_SUITE_TIMEOUT
   );
 
   suite(
@@ -569,7 +567,7 @@ describe('saving and getting vitals', () => {
         });
       });
     },
-    { timeout: DEFAULT_SUITE_TIMEOUT }
+    DEFAULT_SUITE_TIMEOUT
   );
   suite(
     'writing vitals observations for 2-12 month old patients that do rise to alert threshold level produce vitals DTOs with alerts',
@@ -663,7 +661,7 @@ describe('saving and getting vitals', () => {
         });
       });
     },
-    { timeout: DEFAULT_SUITE_TIMEOUT }
+    DEFAULT_SUITE_TIMEOUT
   );
 
   suite(
@@ -744,7 +742,7 @@ describe('saving and getting vitals', () => {
         });
       });
     },
-    { timeout: DEFAULT_SUITE_TIMEOUT }
+    DEFAULT_SUITE_TIMEOUT
   );
 
   suite(
@@ -821,7 +819,7 @@ describe('saving and getting vitals', () => {
         });
       });
     },
-    { timeout: DEFAULT_SUITE_TIMEOUT }
+    DEFAULT_SUITE_TIMEOUT
   );
 
   suite(
@@ -905,7 +903,7 @@ describe('saving and getting vitals', () => {
         });
       });
     },
-    { timeout: DEFAULT_SUITE_TIMEOUT }
+    DEFAULT_SUITE_TIMEOUT
   );
 
   suite(
@@ -991,7 +989,7 @@ describe('saving and getting vitals', () => {
         });
       });
     },
-    { timeout: DEFAULT_SUITE_TIMEOUT }
+    DEFAULT_SUITE_TIMEOUT
   );
 
   suite(
@@ -1058,7 +1056,7 @@ describe('saving and getting vitals', () => {
         });
       });
     },
-    { timeout: DEFAULT_SUITE_TIMEOUT }
+    DEFAULT_SUITE_TIMEOUT
   );
   suite(
     'writing weight/height vitals observations alert when appropriate but not otherwise',
@@ -1524,6 +1522,160 @@ describe('saving and getting vitals', () => {
         });
       });
     },
-    { timeout: DEFAULT_SUITE_TIMEOUT }
+    DEFAULT_SUITE_TIMEOUT
+  );
+
+  suite(
+    'DOT (MCSA-5875) vision screening is saved and retrieved as its own vision entry',
+    { timeout: DEFAULT_SUITE_TIMEOUT },
+    async () => {
+      let encounterId: string;
+      let patientId: string;
+      let documentReferenceId: string;
+
+      // The "received documentation" file is a real DocumentReference. The upload-dot-vision-document
+      // zambda would normally create it from an uploaded Z3 file; here we create one directly so the
+      // save/get round-trip of the Observation.derivedFrom link can be asserted without a file upload.
+      const createReferralDocument = async (subjectPatientId: string): Promise<string> => {
+        const docRef: DocumentReference = {
+          resourceType: 'DocumentReference',
+          status: 'current',
+          subject: { reference: `Patient/${subjectPatientId}` },
+          content: [
+            {
+              attachment: {
+                contentType: 'application/pdf',
+                url: 'https://z3/dot-vision/referral.pdf',
+                title: 'eye-clinic-note.pdf',
+              },
+            },
+          ],
+        };
+        const created = await oystehr.fhir.create<DocumentReference>(docRef);
+        expect(created.id).toBeDefined();
+        assert(created.id);
+        return created.id;
+      };
+
+      const getVisionEntries = async (): Promise<VitalsVisionObservationDTO[]> => {
+        const vitals = await getVitals(encounterId);
+        expect(vitals).toBeDefined();
+        return (vitals[VitalFieldNames.VitalVision] ?? []) as VitalsVisionObservationDTO[];
+      };
+
+      const findDotEntry = (entries: VitalsVisionObservationDTO[]): VitalsVisionObservationDTO | undefined =>
+        entries.find((entry) => entry.dotVisionScreening !== undefined);
+
+      const findAcuityEntry = (entries: VitalsVisionObservationDTO[]): VitalsVisionObservationDTO | undefined =>
+        entries.find((entry) => entry.dotVisionScreening === undefined && entry.leftEyeVisionText === '20/20');
+
+      beforeAll(async () => {
+        const { encounter: maybeEncounter, patient: maybePatient } = await makeTestResources({ processId, oystehr });
+        expect(maybeEncounter?.id).toBeDefined();
+        expect(maybePatient?.id).toBeDefined();
+        assert(maybeEncounter?.id);
+        assert(maybePatient?.id);
+        encounterId = maybeEncounter.id;
+        patientId = maybePatient.id;
+
+        documentReferenceId = await createReferralDocument(patientId);
+
+        const obs: VitalsObservationDTO[] = [
+          // A standard Snellen acuity reading...
+          {
+            encounterId,
+            patientId,
+            field: VitalFieldNames.VitalVision,
+            leftEyeVisionText: '20/20',
+            rightEyeVisionText: '20/20',
+          },
+          // ...and a separate DOT physical screening entry for a monocular driver who fails color
+          // recognition, is referred to a specialist, and returns referral documentation.
+          {
+            encounterId,
+            patientId,
+            field: VitalFieldNames.VitalVision,
+            leftEyeVisionText: '',
+            rightEyeVisionText: '',
+            dotVisionScreening: {
+              horizontalFieldLeftDegrees: 95,
+              horizontalFieldRightDegrees: 120,
+              canRecognizeColors: false,
+              hasMonocularVision: true,
+              referredToSpecialist: true,
+              receivedDocumentation: true,
+              document: {
+                documentReferenceId,
+                url: 'https://z3/dot-vision/referral.pdf',
+                title: 'eye-clinic-note.pdf',
+              },
+            },
+          },
+        ];
+        await saveVital(obs, encounterId);
+      });
+
+      test.concurrent(
+        'DOT screening fields round-trip with full fidelity',
+        async () => {
+          const dotEntry = findDotEntry(await getVisionEntries());
+          expect(dotEntry).toBeDefined();
+          assert(dotEntry);
+
+          expect(dotEntry.dotVisionScreening).toEqual({
+            horizontalFieldLeftDegrees: 95,
+            horizontalFieldRightDegrees: 120,
+            canRecognizeColors: false,
+            hasMonocularVision: true,
+            referredToSpecialist: true,
+            receivedDocumentation: true,
+            // url is intentionally NOT persisted — the DocumentReference is the source of truth.
+            document: { documentReferenceId, title: 'eye-clinic-note.pdf' },
+          });
+          // A DOT entry must not surface as a Snellen acuity reading.
+          expect(dotEntry.leftEyeVisionText).toBe('');
+          expect(dotEntry.rightEyeVisionText).toBe('');
+        },
+        120000
+      );
+
+      test.concurrent(
+        'DOT screening and Snellen acuity remain separate vision history entries',
+        async () => {
+          const entries = await getVisionEntries();
+          expect(entries.length).toBe(2);
+
+          const acuityEntry = findAcuityEntry(entries);
+          expect(acuityEntry).toBeDefined();
+          expect(acuityEntry?.dotVisionScreening).toBeUndefined();
+
+          const dotEntry = findDotEntry(entries);
+          expect(dotEntry).toBeDefined();
+          expect(dotEntry?.leftEyeVisionText).toBe('');
+        },
+        120000
+      );
+
+      test.concurrent(
+        'the persisted Observation links the referral document via derivedFrom (not a component value)',
+        async () => {
+          const dotEntry = findDotEntry(await getVisionEntries());
+          expect(dotEntry?.resourceId).toBeDefined();
+          assert(dotEntry?.resourceId);
+
+          const observation = await oystehr.fhir.get<Observation>({
+            resourceType: 'Observation',
+            id: dotEntry.resourceId,
+          });
+          expect(observation.derivedFrom).toEqual([
+            expect.objectContaining({ reference: `DocumentReference/${documentReferenceId}` }),
+          ]);
+          // The document must never be embedded as a component value.
+          const componentValueStrings = (observation.component ?? []).map((c) => c.valueString).filter(Boolean);
+          expect(componentValueStrings.join(' ')).not.toContain(documentReferenceId);
+        },
+        120000
+      );
+    }
   );
 });

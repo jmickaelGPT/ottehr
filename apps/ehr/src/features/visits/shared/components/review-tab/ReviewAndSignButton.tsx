@@ -1,160 +1,27 @@
 import CheckIcon from '@mui/icons-material/Check';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import { Box, Checkbox, DialogContentText, FormControlLabel, Stack, Tooltip, Typography } from '@mui/material';
-import { DateTime } from 'luxon';
-import { FC, useMemo, useState } from 'react';
+import { FC, useState } from 'react';
 import { dataTestIds } from 'src/constants/data-test-ids';
-import { FEATURE_FLAGS } from 'src/constants/feature-flags';
-import { usePractitionerActions } from 'src/features/visits/shared/hooks/usePractitioner';
-import { usePendingSupervisorApproval } from 'src/features/visits/telemed/hooks/usePendingSupervisorApproval';
-import useEvolveUser from 'src/hooks/useEvolveUser';
-import { useProgressNoteConfig } from 'src/hooks/useProgressNoteConfig';
-import { getPatientName } from 'src/shared/utils';
-import {
-  getInPersonVisitStatus,
-  getProviderType,
-  getSupervisorApprovalStatus,
-  isPhysicianProviderType,
-  PRACTITIONER_CODINGS,
-} from 'utils';
+import { getPatientName } from 'src/shared/utils/getPatientName';
 import { ConfirmationDialog } from '../../../../../components/ConfirmationDialog';
 import { RoundedButton } from '../../../../../components/RoundedButton';
-import { useChartFields } from '../../hooks/useChartFields';
-import { useGetAppointmentAccessibility } from '../../hooks/useGetAppointmentAccessibility';
-import { useOystehrAPIClient } from '../../hooks/useOystehrAPIClient';
-import { useAppointmentData, useChartData } from '../../stores/appointment/appointment.store';
-import { useSignAppointmentMutation } from '../../stores/tracking-board/tracking-board.queries';
+import { useProgressNoteSigning } from '../../hooks/useProgressNoteSigning';
+import { useAppointmentData } from '../../stores/appointment/appointment.store';
 
 type ReviewAndSignButtonProps = {
   onSigned?: () => void;
 };
 
 export const ReviewAndSignButton: FC<ReviewAndSignButtonProps> = ({ onSigned }) => {
-  const { patient, appointment, encounter, appointmentRefetch } = useAppointmentData();
-  const { chartData } = useChartData();
-  const appointmentAccessibility = useGetAppointmentAccessibility();
-  const isFollowup = appointmentAccessibility.visitType === 'follow-up';
+  const { patient } = useAppointmentData();
+  const { completed, errorMessages, supervisorApprovalApplies, mdmRequired, inPersonStatus, isSigning, signNote } =
+    useProgressNoteSigning();
 
-  const { data: chartFields } = useChartFields({
-    requestedFields: {
-      medicalDecision: {
-        _tag: 'medical-decision',
-      },
-      chiefComplaint: {
-        _tag: 'chief-complaint',
-      },
-      historyOfPresentIllness: {
-        _tag: 'history-of-present-illness',
-      },
-      accident: {
-        _tag: 'accident',
-      },
-      inHouseLabResults: {},
-      patientInfoConfirmed: {},
-    },
-  });
-
-  const apiClient = useOystehrAPIClient();
-  const practitioner = useEvolveUser()?.profileResource;
-
-  const { mutateAsync: signAppointment, isPending: isSignLoading } = useSignAppointmentMutation();
   const [openTooltip, setOpenTooltip] = useState(false);
-
   const [requireSupervisorApproval, setRequireSupervisorApproval] = useState(true);
 
-  const { updateVisitStatusToAwaitSupervisorApproval, loading: isPendingSupervisorApproval } =
-    usePendingSupervisorApproval({
-      encounterId: encounter.id!,
-      practitionerId: practitioner?.id ?? '',
-    });
-
-  const { data: progressNoteConfig } = useProgressNoteConfig();
-  const mdmRequired = progressNoteConfig?.mdmRequired ?? true;
-
-  const primaryDiagnosis = (chartData?.diagnosis || []).find((item) => item.isPrimary);
-  const medicalDecision = chartFields?.medicalDecision?.text;
-  const hpi = chartFields?.chiefComplaint?.text;
-  const emCode = chartData?.emCode;
-  const patientInfoConfirmed = chartFields?.patientInfoConfirmed?.value;
-  const hasAccidentType = (chartFields?.accident?.type?.length ?? 0) > 0;
-  const isAutoAccident = chartFields?.accident?.type?.includes('AA') ?? false;
-  const accidentMissingDate = hasAccidentType && !chartFields?.accident?.date;
-  const accidentMissingState = isAutoAccident && !chartFields?.accident?.state;
-  const inHouseLabResultsPending = chartFields?.inHouseLabResults?.resultsPending;
-  const inHouseLabReflexTestPending = chartFields?.inHouseLabResults?.reflexTestsPending;
-
   const patientName = getPatientName(patient?.name).firstLastName;
-
-  const { isEncounterUpdatePending } = usePractitionerActions(encounter, 'end', PRACTITIONER_CODINGS.Attender);
-
-  const isLoading = isSignLoading || isEncounterUpdatePending || isPendingSupervisorApproval;
-  const inPersonStatus = useMemo(
-    () => appointment && getInPersonVisitStatus(appointment, encounter),
-    [appointment, encounter]
-  );
-  const approvalStatus = getSupervisorApprovalStatus(appointment, encounter);
-  const completed = useMemo(() => {
-    return isFollowup
-      ? encounter.status !== 'in-progress'
-      : appointmentAccessibility.isAppointmentLocked || approvalStatus === 'waiting-for-approval';
-  }, [appointmentAccessibility.isAppointmentLocked, isFollowup, encounter.status, approvalStatus]);
-
-  const errorMessage = useMemo(() => {
-    const messages: string[] = [];
-
-    if (completed || isFollowup) {
-      return messages;
-    }
-
-    if (inPersonStatus) {
-      if (inPersonStatus === 'provider') {
-        messages.push('You must discharge the patient before signing');
-      } else if (inPersonStatus !== 'discharged' && inPersonStatus !== 'completed') {
-        messages.push('The appointment must be in the status of discharged');
-      }
-    }
-
-    if (
-      !primaryDiagnosis ||
-      (mdmRequired && !medicalDecision) ||
-      !emCode ||
-      !hpi ||
-      accidentMissingDate ||
-      accidentMissingState
-    ) {
-      messages.push('You need to fill in the missing data');
-    }
-
-    if (!patientInfoConfirmed) {
-      messages.push('You need to confirm patient information');
-    }
-
-    if (inHouseLabResultsPending) {
-      messages.push('In-House lab results pending');
-    }
-
-    if (inHouseLabReflexTestPending) {
-      inHouseLabReflexTestPending.forEach((test) =>
-        messages.push(`In-House lab results have triggered a reflex test for ${test}`)
-      );
-    }
-
-    return messages;
-  }, [
-    completed,
-    inPersonStatus,
-    primaryDiagnosis,
-    medicalDecision,
-    mdmRequired,
-    hpi,
-    emCode,
-    accidentMissingDate,
-    accidentMissingState,
-    patientInfoConfirmed,
-    inHouseLabResultsPending,
-    isFollowup,
-    inHouseLabReflexTestPending,
-  ]);
 
   const handleCloseTooltip = (): void => {
     setOpenTooltip(false);
@@ -165,39 +32,13 @@ export const ReviewAndSignButton: FC<ReviewAndSignButtonProps> = ({ onSigned }) 
   };
 
   const handleSign = async (): Promise<void> => {
-    if (!apiClient || !appointment?.id) {
-      throw new Error('api client not defined or appointmentId not provided');
-    }
-
-    if (shouldRequireSupervisorApproval && requireSupervisorApproval) {
-      await updateVisitStatusToAwaitSupervisorApproval();
-    } else {
-      await signAppointment({
-        apiClient,
-        appointmentId: appointment.id,
-        encounterId: encounter.id!,
-        timezone: DateTime.now().zoneName,
-        supervisorApprovalEnabled: FEATURE_FLAGS.SUPERVISOR_APPROVAL_ENABLED,
-      });
-      await appointmentRefetch();
-    }
+    await signNote({ requireSupervisorApproval });
 
     if (onSigned) {
       onSigned();
     }
   };
 
-  const showSupervisorCheckbox = useMemo(() => {
-    if (!practitioner) return false;
-
-    const providerType = getProviderType(practitioner);
-    const isPhysician = isPhysicianProviderType(providerType);
-
-    return !isPhysician;
-  }, [practitioner]);
-
-  const shouldRequireSupervisorApproval =
-    FEATURE_FLAGS.SUPERVISOR_APPROVAL_ENABLED && showSupervisorCheckbox && !isFollowup;
   const confirmationDescription = mdmRequired
     ? 'Are you sure you have reviewed the patient chart, performed the examination, defined the diagnoses, made a medical decision and chosen an E&M code and are ready to sign this patient?'
     : 'Are you sure you have reviewed the patient chart, performed the examination, defined the diagnoses and chosen an E&M code and are ready to sign this patient?';
@@ -206,10 +47,10 @@ export const ReviewAndSignButton: FC<ReviewAndSignButtonProps> = ({ onSigned }) 
     <Box sx={{ display: 'flex', justifyContent: 'end' }}>
       <Tooltip
         placement="top"
-        open={openTooltip && errorMessage.length > 0}
+        open={openTooltip && errorMessages.length > 0}
         onClose={handleCloseTooltip}
         onOpen={handleOpenTooltip}
-        title={errorMessage.map((message) => (
+        title={errorMessages.map((message) => (
           <Typography key={message}>{message}</Typography>
         ))}
       >
@@ -220,7 +61,7 @@ export const ReviewAndSignButton: FC<ReviewAndSignButtonProps> = ({ onSigned }) 
               <Stack spacing={2}>
                 <DialogContentText>{confirmationDescription}</DialogContentText>
 
-                {shouldRequireSupervisorApproval && (
+                {supervisorApprovalApplies && (
                   <FormControlLabel
                     control={
                       <Checkbox
@@ -246,14 +87,14 @@ export const ReviewAndSignButton: FC<ReviewAndSignButtonProps> = ({ onSigned }) 
             }
             response={handleSign}
             actionButtons={{
-              proceed: { text: 'Sign', loading: isLoading },
+              proceed: { text: 'Sign', loading: isSigning },
               back: { text: 'Cancel' },
               reverse: true,
             }}
           >
             {(showDialog) => (
               <RoundedButton
-                disabled={errorMessage.length > 0 || isLoading || completed || inPersonStatus === 'provider'}
+                disabled={errorMessages.length > 0 || isSigning || completed || inPersonStatus === 'provider'}
                 variant="contained"
                 onClick={showDialog}
                 startIcon={completed ? <CheckIcon color="inherit" /> : undefined}

@@ -1,12 +1,9 @@
 import { QuestionnaireItem, QuestionnaireResponseItem } from 'fhir/r4b';
-import {
-  buildEnableWhenContext,
-  evalEnableWhen,
-  IN_PERSON_INTAKE_PAPERWORK_QUESTIONNAIRE,
-  IntakeQuestionnaireItem,
-  mapQuestionnaireAndValueSetsToItemsList,
-  VIRTUAL_INTAKE_PAPERWORK_QUESTIONNAIRE,
-} from 'utils';
+import { IN_PERSON_INTAKE_PAPERWORK_QUESTIONNAIRE } from '../../ottehr-config/intake-paperwork';
+import { VIRTUAL_INTAKE_PAPERWORK_QUESTIONNAIRE } from '../../ottehr-config/intake-paperwork-virtual';
+import { IntakeQuestionnaireItem } from '../../types/data/paperwork/paperwork.types';
+import { mapQuestionnaireAndValueSetsToItemsList } from './paperwork';
+import { buildEnableWhenContext, evalEnableWhen } from './validation';
 
 export class QuestionnaireHelper {
   private static inPersonQuestionnaireItems: IntakeQuestionnaireItem[] = [];
@@ -180,14 +177,6 @@ export class QuestionnaireHelper {
   }
 
   /**
-   * Checks if the patient condition page exists in the virtual questionnaire.
-   * This page may be hidden via hiddenFormSections config.
-   */
-  static hasVirtualPatientConditionPage(): boolean {
-    return QuestionnaireHelper.virtualQuestionnaireHasItem('patient-condition-page');
-  }
-
-  /**
    * Checks if an item with the given linkId is marked as required in the virtual questionnaire.
    *
    * @param linkId - The linkId of the item to check
@@ -205,7 +194,7 @@ export class QuestionnaireHelper {
    * Checks if a page has any required fields in the virtual questionnaire.
    * Returns true if at least one field in the page is required.
    *
-   * @param pageLinkId - The linkId of the page to check (e.g., 'photo-id-page')
+   * @param pageLinkId - The linkId of the page to check (e.g., 'payment-option-page')
    * @returns true if the page has at least one required field, false otherwise
    */
   static virtualPageHasRequiredFields(pageLinkId: string): boolean {
@@ -226,7 +215,7 @@ export class QuestionnaireHelper {
    * Checks if a page has any required fields in the in-person questionnaire.
    * Returns true if at least one field in the page is required.
    *
-   * @param pageLinkId - The linkId of the page to check (e.g., 'photo-id-page')
+   * @param pageLinkId - The linkId of the page to check (e.g., 'payment-option-page')
    * @returns true if the page has at least one required field, false otherwise
    */
   static inPersonPageHasRequiredFields(pageLinkId: string): boolean {

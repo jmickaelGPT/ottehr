@@ -7,8 +7,11 @@ import {
   EXPORT_INVOICES_ZAMBDA_KEY,
   ExportInvoicesCsvKickOffResponse,
   ExportInvoicesCsvStatusResponse,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../shared';
+} from 'utils/lib/types/api/invoicing.types';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { createClinicalOystehrClient } from '../../shared/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
 import { createPresignedUrl } from '../../shared/z3Utils';
 import { validateRequestParameters } from './validateRequestParameters';
 
@@ -20,7 +23,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   const { secrets } = validatedParams;
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   // Mode 1: Check status of an existing export task
   if ('taskId' in validatedParams && validatedParams.taskId) {
@@ -59,6 +62,19 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
     filterInputs.push({
       type: { coding: [{ system: EXPORT_INVOICES_CSV_TASK_SYSTEM, code: 'hide-zero-balance' }] },
       valueBoolean: validatedParams.hideZeroBalance,
+    });
+  }
+  if ('source' in validatedParams && validatedParams.source) {
+    filterInputs.push({
+      type: {
+        coding: [
+          {
+            system: EXPORT_INVOICES_CSV_TASK_SYSTEM,
+            code: 'filter-source',
+          },
+        ],
+      },
+      valueString: validatedParams.source,
     });
   }
 

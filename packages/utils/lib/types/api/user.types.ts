@@ -1,6 +1,6 @@
 import { User as OystehrUser } from '@oystehr/sdk';
 import { Coding, Practitioner } from 'fhir/r4b';
-import { PARTICIPATION_CODE_SYSTEM } from '../../fhir';
+import { PARTICIPATION_CODE_SYSTEM } from '../../fhir/constants';
 
 export type User = OystehrUser & {
   profileResource?: Practitioner;
@@ -13,21 +13,70 @@ export type User = OystehrUser & {
   birthDate?: string;
 };
 
+/**
+ * Whether an Oystehr user's profile points at a Practitioner.
+ *
+ * Self-registered users land on a Patient profile instead, which is what "needs review" means in the
+ * employee list: they hold no role and have no clinician record yet. `update-user` creates the
+ * Practitioner and repoints the profile the first time such a user is saved.
+ */
+export const hasPractitionerProfile = (profile: string | undefined): boolean =>
+  profile?.startsWith('Practitioner/') ?? false;
+
+/**
+ * Whether a role name is one of the roles an employee can hold.
+ *
+ * A project carries roles that aren't employee roles at all — a self-registered user holds
+ * `Patient` — and those must not be echoed back when saving an employee record, both because
+ * `update-user` rejects them and because converting such a user to staff is precisely the point at
+ * which the old role should fall away.
+ *
+ * Checks the whole {@link RoleType} enum rather than `AVAILABLE_EMPLOYEE_ROLES`, which additionally
+ * keeps `Inactive` — a real role, just not one assigned from the checkbox list. Deactivation state
+ * is the activation zambda's business, so the form passes it through untouched rather than silently
+ * reactivating someone as a side effect of an unrelated edit.
+ */
+export const isRoleType = (roleName: string): roleName is RoleType =>
+  (Object.values(RoleType) as string[]).includes(roleName);
+
 export enum RoleType {
   Administrator = 'Administrator',
-  AssistantAdmin = 'AssistantAdmin',
-  Billing = 'Billing',
-  CallCentre = 'CallCentre',
+  BillingAdmin = 'BillingAdmin',
+  // Clinical staff without an NPI (e.g. nurses, medical assistants). Provider-level EHR access
+  // except NPI-gated actions (sign notes, e-prescribe, external labs & imaging, claims, in-house meds).
+  Clinician = 'Clinician',
   CustomerSupport = 'Customer Support',
-  FrontDesk = 'Front Desk',
   Inactive = 'Inactive',
   Manager = 'Manager',
-  // Medical Assistant
-  NewUser = 'NewUser',
   Provider = 'Provider',
-  RegionalTelemedLead = 'RegionalTelemedLead',
   Staff = 'Staff',
 }
+
+/** Roles allowed to print a patient's clinical documents from the EHR. */
+export const CHART_DOCUMENT_ROLES: RoleType[] = [
+  RoleType.Administrator,
+  RoleType.Manager,
+  RoleType.Provider,
+  RoleType.Clinician,
+  RoleType.Staff,
+];
+
+/**
+ * Roles allowed into the administration area.
+ *
+ * Shared so the navigation and the endpoints behind it cannot disagree: a page the UI offers but the
+ * server refuses is indistinguishable from a broken feature, and the reverse is a gap.
+ */
+export const ADMIN_TIER_ROLES: RoleType[] = [RoleType.Administrator, RoleType.Manager, RoleType.CustomerSupport];
+
+export const ALL_EHR_STAFF_ROLES: RoleType[] = [
+  RoleType.Administrator,
+  RoleType.Manager,
+  RoleType.CustomerSupport,
+  RoleType.Staff,
+  RoleType.Provider,
+  RoleType.Clinician,
+];
 
 export interface AccessPolicy {
   rule: {
@@ -61,6 +110,11 @@ export const AVAILABLE_EMPLOYEE_ROLES: {
     hint: `Adjust operating hours or schedule overrides; adjust pre-booked visits per hour`,
   },
   {
+    value: RoleType.BillingAdmin,
+    label: 'Billing Admin',
+    hint: `Administrator access in the Billing App. No access to the EHR.`,
+  },
+  {
     value: RoleType.Staff,
     label: 'Staff',
     hint: `No settings changes; essentially read-only`,
@@ -69,6 +123,11 @@ export const AVAILABLE_EMPLOYEE_ROLES: {
     value: RoleType.Provider,
     label: 'Provider',
     hint: `A clinician, such as a doctor, a PA or an NP`,
+  },
+  {
+    value: RoleType.Clinician,
+    label: 'Clinician',
+    hint: `Clinical staff without an NPI, such as a nurse or medical assistant. Provider access except NPI-gated actions.`,
   },
   {
     value: RoleType.CustomerSupport,

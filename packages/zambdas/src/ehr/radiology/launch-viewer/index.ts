@@ -1,14 +1,12 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { ServiceRequest } from 'fhir/r4b';
-import {
-  ACCESSION_NUMBER_CODE_SYSTEM,
-  ADVAPACS_VIEWER_LAUNCH_URL,
-  getSecret,
-  RadiologyLaunchViewerZambdaOutput,
-  Secrets,
-  SecretsKeys,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../shared';
+import { ACCESSION_NUMBER_CODE_SYSTEM, ADVAPACS_VIEWER_LAUNCH_URL } from 'utils/lib/fhir/radiology';
+import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { RadiologyLaunchViewerZambdaOutput } from 'utils/lib/types/api/radiology';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { validateInput, validateSecrets } from './validation';
 
 // Types
@@ -26,7 +24,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (unsafeInput: ZambdaInput): 
   const secrets = validateSecrets(unsafeInput.secrets);
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   const validatedInput = await validateInput(unsafeInput, oystehr);
 

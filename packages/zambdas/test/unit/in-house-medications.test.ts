@@ -1,21 +1,22 @@
 import Oystehr from '@oystehr/sdk';
 import { Medication } from 'fhir/r4b';
+import { CODE_SYSTEM_CPT, CODE_SYSTEM_HL7_HCPCS, CODE_SYSTEM_NDC } from 'utils/lib/helpers/rcm/constants';
 import {
-  CODE_SYSTEM_CPT,
-  CODE_SYSTEM_HCPCS,
-  CODE_SYSTEM_NDC,
   INVENTORY_MEDICATION_TYPE_CODE,
   MEDICATION_DISPENSABLE_DRUG_ID,
   MEDICATION_DISPENSABLE_DRUG_ID_FOR_INTERACTIONS,
   MEDICATION_IDENTIFIER_NAME_SYSTEM,
   MEDICATION_TYPE_SYSTEM,
-} from 'utils';
+} from 'utils/lib/types/api/medication-administration.constants';
 import { describe, expect, it, vi } from 'vitest';
 import { performEffect as createPerformEffect } from '../../src/ehr/configuration/in-house-medications/create-in-house-medication/index';
 import { validateRequestParameters as createValidate } from '../../src/ehr/configuration/in-house-medications/create-in-house-medication/validateRequestParameters';
 import { performEffect as updatePerformEffect } from '../../src/ehr/configuration/in-house-medications/update-in-house-medication/index';
 import { validateRequestParameters } from '../../src/ehr/configuration/in-house-medications/update-in-house-medication/validateRequestParameters';
-import { ZambdaInput } from '../../src/shared';
+import { ZambdaInput } from '../../src/shared/types/common';
+
+// Local const so that DEPRECATED system doesn't get imported from utils
+const CODE_SYSTEM_HCPCS = 'http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets'; // formerly used by Ottehr clinical in-house meds
 
 const createInput = (body: Record<string, unknown>): ZambdaInput => ({
   body: JSON.stringify(body),
@@ -128,6 +129,7 @@ describe('create-in-house-medication - performEffect', () => {
     // CPT/HCPCS are no longer managed by the admin medication catalog
     expect(codings.some((c) => c.system === CODE_SYSTEM_CPT)).toBe(false);
     expect(codings.some((c) => c.system === CODE_SYSTEM_HCPCS)).toBe(false);
+    expect(codings.some((c) => c.system === CODE_SYSTEM_HL7_HCPCS)).toBe(false);
     expect(result.id).toBe('new-med-id');
   });
 
@@ -159,6 +161,7 @@ const existingMedication: Medication = {
       // Legacy CPT/HCPCS codings left over from the previous admin flow — must be preserved by updates.
       { system: CODE_SYSTEM_CPT, code: '99213', display: 'Office visit' },
       { system: CODE_SYSTEM_HCPCS, code: 'J0696', display: 'Ceftriaxone injection' },
+      { system: CODE_SYSTEM_HL7_HCPCS, code: 'J0696', display: 'Ceftriaxone injection' },
     ],
   },
 };
@@ -227,6 +230,7 @@ describe('update-in-house-medication - performEffect', () => {
     // Legacy CPT/HCPCS codings on the existing medication are preserved as-is.
     expect(codings).toContainEqual({ system: CODE_SYSTEM_CPT, code: '99213', display: 'Office visit' });
     expect(codings).toContainEqual({ system: CODE_SYSTEM_HCPCS, code: 'J0696', display: 'Ceftriaxone injection' });
+    expect(codings).toContainEqual({ system: CODE_SYSTEM_HL7_HCPCS, code: 'J0696', display: 'Ceftriaxone injection' });
   });
 
   it('throws when medication is not found', async () => {

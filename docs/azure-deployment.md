@@ -1,30 +1,20 @@
 # Azure Deployment Setup (EHR, Billing, Intake)
 
- 
-## Environment Files Added
+## Prerequisites
 
-- apps/ehr/env/.env.azure-dev
-- apps/ehr/env/.env.azure-beta
-- apps/ehr/env/.env.azure-production
-- apps/intake/env/.env.azure-dev
-- apps/intake/env/.env.azure-beta
-- apps/intake/env/.env.azure-production
-- apps/billing/env/.env.azure-dev
-- apps/billing/env/.env.azure-beta
-- apps/billing/env/.env.azure-production
+1. Fill every `__PLACEHOLDER__` in the selected environment files before building:
+   - `apps/ehr/env/.env.azure-<environment>`
+   - `apps/intake/env/.env.azure-<environment>`
+   - `apps/billing/env/.env.azure-<environment>`
+2. Authenticate and select the Innovare Health Azure subscription:
 
-Fill all placeholder values before deploy:
-- __PROJECT_ID__
-- __EHR_CLIENT_ID__
-- __EHR_APPLICATION_ID__
-- __INTAKE_CLIENT_ID__
-- __BILLING_CLIENT_ID__
-- __BILLING_APPLICATION_ID__
+```powershell
+az login
+az account set --subscription "58708d34-f80d-4f94-b0a2-0eb93fc308bb"
+az account show --query "{name:name, subscriptionId:id}" --output table
+```
 
-## Required Azure CLI Login
-
-Authenticate before deployment:
-- az login
+Azure builds fail before compilation when their environment file is missing or contains unresolved placeholders.
 
 ## Required Azure Web App Variables
 
@@ -66,16 +56,43 @@ Run app with Azure mode env values:
 ## Build Commands
 
 Build all apps for one Azure mode:
-- npm run build:azure:all -- azure-dev
-- npm run build:azure:all -- azure-beta
-- npm run build:azure:all -- azure-production
+
+```powershell
+npm run build:azure:dev
+npm run build:azure:beta
+npm run build:azure:production
+```
+
+Build billing only for one Azure mode:
+
+```powershell
+npm run billing:build:azure:dev
+npm run billing:build:azure:beta
+npm run billing:build:azure:production
+```
 
 ## Deploy Commands
 
 Build + zip + upload all three apps:
-- npm run deploy:azure:dev
-- npm run deploy:azure:beta
-- npm run deploy:azure:production
+
+```powershell
+npm run deploy:azure:dev
+npm run deploy:azure:beta
+npm run deploy:azure:production
+```
+
+Build + zip + upload billing only:
+
+```powershell
+npm run deploy:azure:billing:dev
+npm run deploy:azure:billing:beta
+npm run deploy:azure:billing:production
+```
+
+Billing-only deployments target:
+- Dev: `InnovareHealthOttEHRBillingDev`
+- Beta: `InnovareHealthOttEHRBillingBeta`
+- Production: `InnovareHealthOttEHRBilling`
 
 ## Canonical App URLs
 
@@ -85,61 +102,6 @@ Use these as the public-facing app URLs in dev:
 - Billing: https://billing.ottehrdev.innovarehealth.net
 
 Note: this deploy flow targets Azure App Service (Web Apps). Ensure your canonical DNS hostnames are mapped to the corresponding web apps.
-
-## Local Shell Examples
-
-PowerShell (current session):
-```powershell
-# Dev
-$env:AZURE_WEBAPP_EHR_DEV="InnovareHealthOttEHRDev"
-$env:AZURE_WEBAPP_INTAKE_DEV="InnovareHealthOttEHRIntakeDev"
-$env:AZURE_WEBAPP_BILLING_DEV="InnovareHealthOttEHRBillingDev"
-$env:AZURE_WEBAPP_RESOURCE_GROUP_DEV="IHA-Web-RG"
-
-# Beta
-$env:AZURE_WEBAPP_EHR_BETA="InnovareHealthOttEHRBeta"
-$env:AZURE_WEBAPP_INTAKE_BETA="InnovareHealthOttEHRIntakeBeta"
-$env:AZURE_WEBAPP_BILLING_BETA="InnovareHealthOttEHRBillingBeta"
-$env:AZURE_WEBAPP_RESOURCE_GROUP_BETA="IHA-Web-RG"
-
-# Production
-$env:AZURE_WEBAPP_EHR_PRODUCTION="InnovareHealthOttEHR"
-$env:AZURE_WEBAPP_INTAKE_PRODUCTION="InnovareHealthOttEHRIntake"
-$env:AZURE_WEBAPP_BILLING_PRODUCTION="InnovareHealthOttEHRBilling"
-$env:AZURE_WEBAPP_RESOURCE_GROUP_PRODUCTION="IHA-Web-RG"
-
-az login
-npm run deploy:azure:dev
-```
-
-Bash (current session):
-```bash
-# Dev
-export AZURE_WEBAPP_EHR_DEV="InnovareHealthOttEHRDev"
-export AZURE_WEBAPP_INTAKE_DEV="InnovareHealthOttEHRIntakeDev"
-export AZURE_WEBAPP_BILLING_DEV="InnovareHealthOttEHRBillingDev"
-export AZURE_WEBAPP_RESOURCE_GROUP_DEV="IHA-Web-RG"
-
-# Beta
-export AZURE_WEBAPP_EHR_BETA="InnovareHealthOttEHRBeta"
-export AZURE_WEBAPP_INTAKE_BETA="InnovareHealthOttEHRIntakeBeta"
-export AZURE_WEBAPP_BILLING_BETA="InnovareHealthOttEHRBillingBeta"
-export AZURE_WEBAPP_RESOURCE_GROUP_BETA="IHA-Web-RG"
-
-# Production
-export AZURE_WEBAPP_EHR_PRODUCTION="InnovareHealthOttEHR"
-export AZURE_WEBAPP_INTAKE_PRODUCTION="InnovareHealthOttEHRIntake"
-export AZURE_WEBAPP_BILLING_PRODUCTION="InnovareHealthOttEHRBilling"
-export AZURE_WEBAPP_RESOURCE_GROUP_PRODUCTION="IHA-Web-RG"
-
-az login
-RE_WEBAPP_EHR_DEV="InnovareHealthOttEHRDev"
-$env:AZURE_WEBAPP_INTAKE_DEV="InnovareHealthOttEHRIntakeDev"
-$env:AZURE_WEBAPP_BILLING_DEV="InnovareHealthOttEHRBillingDev"
-$env:AZURE_WEBAPP_RESOURCE_GROUP_DEV="IHA-Web-RG"
-
-npm run deploy:azure:dev
-```
 
 ## GitHub Actions Example
 
@@ -168,7 +130,7 @@ jobs:
 
 			- uses: actions/setup-node@v4
 				with:
-					node-version: 20
+					node-version: 22
 
 			- name: Install dependencies
 				run: npm ci

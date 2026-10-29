@@ -2,29 +2,24 @@ import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { randomUUID } from 'crypto';
 import { DateTime } from 'luxon';
+import { BUCKET_NAMES } from 'utils/lib/fhir/constants';
+import { createFilesDocumentReferences } from 'utils/lib/fhir/helpers';
+import { OTTEHR_MODULE } from 'utils/lib/fhir/moduleIdentification';
+import { getPaperworkResources, PAPERWORK_PDF_ATTACHMENT_TITLE } from 'utils/lib/helpers/paperwork/paperwork';
+import { uploadObjectToZ3 } from 'utils/lib/helpers/presigned-file-url/helpers';
+import { Secrets } from 'utils/lib/secrets';
+import { PaperworkToPDFInputValidated } from 'utils/lib/types/data/paperwork.types';
 import {
-  BUCKET_NAMES,
-  createFilesDocumentReferences,
   EXPORTED_QUESTIONNAIRE_CODE,
-  getPaperworkResources,
-  OTTEHR_MODULE,
-  PAPERWORK_PDF_ATTACHMENT_TITLE,
   PAPERWORK_PDF_BASE_NAME,
-  PaperworkToPDFInputValidated,
-  Secrets,
-} from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  createPresignedUrl,
-  getAuth0Token,
-  uploadObjectToZ3,
-  validateJsonBody,
-  validateString,
-  wrapHandler,
-  ZambdaInput,
-} from '../../shared';
-import { makeZ3Url } from '../../shared/presigned-file-urls';
+} from 'utils/lib/types/data/paperwork/paperwork.constants';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { getAuth0Token } from '../../shared/getAuth0Token';
+import { createClinicalOystehrClient, validateJsonBody, validateString } from '../../shared/helpers';
+import { makeZ3Url } from '../../shared/presigned-file-urls/helpers';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { createPresignedUrl } from '../../shared/z3Utils';
 import { createDocument } from './document';
 import { generatePdf } from './draw';
 
@@ -133,5 +128,5 @@ async function createOystehr(secrets: Secrets | null): Promise<Oystehr> {
   if (oystehrToken == null) {
     oystehrToken = await getAuth0Token(secrets);
   }
-  return createOystehrClient(oystehrToken, secrets);
+  return createClinicalOystehrClient(oystehrToken, secrets);
 }

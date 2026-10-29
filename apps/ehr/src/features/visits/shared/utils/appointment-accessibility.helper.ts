@@ -1,14 +1,10 @@
 import { Appointment, Encounter, Location } from 'fhir/r4b';
 import { EvolveUser } from 'src/hooks/useEvolveUser';
-import {
-  allLicensesForPractitioner,
-  checkEncounterHasPractitioner,
-  EncounterVisitType,
-  getEncounterVisitType,
-  isAppointmentLocked,
-  PractitionerLicense,
-  StateType,
-} from 'utils';
+import { EncounterVisitType, getEncounterVisitType } from 'utils/lib/fhir/encounter';
+import { allLicensesForPractitioner, isAppointmentLocked, isEncounterLocked } from 'utils/lib/fhir/helpers';
+import { checkEncounterHasPractitioner } from 'utils/lib/fhir/patient';
+import { PractitionerLicense } from 'utils/lib/types/api/practitioner.types';
+import { StateType } from 'utils/lib/types/common';
 
 export type GetAppointmentAccessibilityDataProps = {
   locationVirtual?: Location;
@@ -24,7 +20,6 @@ export type GetAppointmentAccessibilityDataResult = {
   isPractitionerLicensedInState: boolean;
   isEncounterAssignedToCurrentPractitioner: boolean;
   isAppointmentReadOnly: boolean;
-  isAppointmentLocked: boolean;
   visitType: EncounterVisitType;
 };
 
@@ -44,14 +39,14 @@ export const getAppointmentAccessibilityData = ({
   const isEncounterAssignedToCurrentPractitioner =
     !!user?.profileResource && !!encounter && checkEncounterHasPractitioner(encounter, user.profileResource);
 
-  // Check if appointment is locked via meta tag
-  const isAppointmentLockedByMetaTag = appointment ? isAppointmentLocked(appointment) : false;
+  // Check if the chart is locked via meta tag. Annotation follow-ups have no own Appointment, so their
+  // lock lives on the Encounter; everything else uses the Appointment lock.
   const visitType = getEncounterVisitType(encounter);
   const isFollowup = visitType === 'follow-up';
+  const isAppointmentLockedByMetaTag = appointment ? isAppointmentLocked(appointment) : false;
+  const isEncounterLockedByMetaTag = encounter ? isEncounterLocked(encounter) : false;
 
-  const isAppointmentReadOnly = (() => {
-    return isAppointmentLockedByMetaTag && !isFollowup;
-  })();
+  const isLocked = isFollowup ? isEncounterLockedByMetaTag : isAppointmentLockedByMetaTag;
 
   return {
     allLicenses,
@@ -59,8 +54,7 @@ export const getAppointmentAccessibilityData = ({
     state,
     isPractitionerLicensedInState,
     isEncounterAssignedToCurrentPractitioner,
-    isAppointmentReadOnly,
-    isAppointmentLocked: isAppointmentLockedByMetaTag,
+    isAppointmentReadOnly: isLocked,
     visitType,
   };
 };

@@ -1,5 +1,7 @@
 import { DiagnosticReport, Encounter, Location, Patient, Practitioner, ServiceRequest, Task } from 'fhir/r4b';
-import { CODE_SYSTEM_CPT, getFullestAvailableName, RADIOLOGY_TASK } from 'utils';
+import { getFullestAvailableName } from 'utils/lib/fhir/patient';
+import { CODE_SYSTEM_CPT } from 'utils/lib/helpers/rcm/constants';
+import { RADIOLOGY_TASK } from 'utils/lib/types/data/tasks/types';
 import { createTask } from '../../../shared/tasks';
 
 export interface ResourcesForTask {
@@ -10,8 +12,7 @@ export interface ResourcesForTask {
   requestingProvider: Practitioner;
   location: Location | undefined;
 }
-
-interface AllResources {
+export interface AllRadTaskResources {
   diagnosticReports: DiagnosticReport[];
   serviceRequests: ServiceRequest[];
   patients: Patient[];
@@ -22,9 +23,9 @@ interface AllResources {
 
 export const parseRadiologyResourcesForTask = (
   resources: (DiagnosticReport | ServiceRequest | Patient | Encounter | Practitioner | Location)[]
-): AllResources => {
+): AllRadTaskResources => {
   return resources.reduce(
-    (acc: AllResources, resource) => {
+    (acc: AllRadTaskResources, resource) => {
       if (resource.resourceType === 'DiagnosticReport') acc.diagnosticReports.push(resource);
       if (resource.resourceType === 'ServiceRequest') acc.serviceRequests.push(resource);
       if (resource.resourceType === 'Patient') acc.patients.push(resource);
@@ -38,7 +39,7 @@ export const parseRadiologyResourcesForTask = (
 };
 
 export const validateResourcesAgainstDR = (
-  input: Omit<AllResources, 'diagnosticReports'> & {
+  input: Omit<AllRadTaskResources, 'diagnosticReports'> & {
     diagnosticReport: DiagnosticReport;
   }
 ): ResourcesForTask => {
@@ -142,17 +143,6 @@ export const configReviewResultTask = (resources: ResourcesForTask): Task => {
         valueString: studyTypeDisplay,
       },
     ],
-  });
-};
-
-export const getMostRecentReport = (reports: DiagnosticReport[]): DiagnosticReport | undefined => {
-  if (!reports.length) return undefined;
-
-  return reports.reduce((mostRecent, current) => {
-    if (!current.issued) return mostRecent;
-    if (!mostRecent.issued) return current;
-
-    return new Date(current.issued) > new Date(mostRecent.issued) ? current : mostRecent;
   });
 };
 

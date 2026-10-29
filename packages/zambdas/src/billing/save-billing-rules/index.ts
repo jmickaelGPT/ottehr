@@ -1,0 +1,241 @@
+import Oystehr from '@oystehr/sdk';
+import { APIGatewayProxyResult } from 'aws-lambda';
+import { randomUUID } from 'crypto';
+import { List, Organization, Resource } from 'fhir/r4b';
+import { getResourcesFromBatchInlineRequests } from 'utils/lib/fhir/helpers';
+import { getSecret, SecretsKeys } from 'utils/lib/secrets';
+import {
+  collectApplyTagNames,
+  collectSetNioIds,
+  collectSetPayerIds,
+  collectSetResourceRefs,
+  getRuleFieldDef,
+  NON_INSURANCE_PAYER_FIELD_ID,
+} from 'utils/lib/types/data/billing/rules-engine.field-catalog';
+import { BillingRule, BillingRulesResponse } from 'utils/lib/types/data/billing/rules-engine.schemas';
+import { isSystemManagedTagName } from 'utils/lib/types/data/billing/system-tags';
+import { INVALID_INPUT_ERROR } from 'utils/lib/types/errors';
+import { isValidUUID } from 'utils/lib/validation/helper';
+import { checkOrCreateM2MClientToken } from '../../shared/auth';
+import { mapWithConcurrency } from '../../shared/concurrency';
+import { wrapHandler } from '../../shared/sentry';
+import { ZambdaInput } from '../../shared/types/common';
+import { isCustomInsuranceOrganization } from '../custom-insurance-org.helpers';
+import { isNonInsuranceOrganization } from '../non-insurance-org.helpers';
+import { rulesToList } from '../rules-engine/serialization';
+import {
+  BILLING_WORKING_COPY_TAG,
+  createBillingClient,
+  fetchDefinedTagNames,
+  findRulesEngineList,
+  hasTag,
+  listToRulesReportingMalformed,
+  PROVIDER_ROLE_TAG,
+} from '../shared';
+import { SaveBillingRulesParams, validateRequestParameters } from './validateRequestParameters';
+
+let m2mToken: string;
+const ZAMBDA_NAME = 'save-billing-rules';
+// RCM has no bulk lookup by id, so payer ids are checked one request at a time; the save schema
+// doesn't cap the rule set, so the lookups are pooled to avoid an outbound burst that RCM throttles.
+const RCM_PAYER_LOOKUP_CONCURRENCY = 5;
+
+// Saves the full ordered rule set as the engine's singleton rules List (create/edit/reorder/delete
+// all in one atomic write). Echoes back the saved rules + new versionId.
+export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
+  const params = validateRequestParameters(input);
+
+  m2mToken = await checkOrCreateM2MClientToken(m2mToken, params.secrets);
+  const oystehr = createBillingClient(m2mToken, params.secrets);
+
+  const existing = await complexValidation(oystehr, params);
+  const response = await performEffect(oystehr, params, existing, getSecret(SecretsKeys.ENVIRONMENT, params.secrets));
+  return { statusCode: 200, body: JSON.stringify(response) };
+});
+
+export async function complexValidation(oystehr: Oystehr, params: SaveBillingRulesParams): Promise<List | undefined> {
+  const [existing] = await Promise.all([
+    findRulesEngineList(oystehr, params.engine),
+    validateAppliedTagsExist(oystehr, params.rules),
+    validateReferencedResourcesExist(oystehr, params.rules),
+    validateNioReferencesExist(oystehr, params.rules),
+    validatePayerReferencesExist(oystehr, params.rules),
+  ]);
+  return existing;
+}
+
+// Every tag a rule applies must exist in the tags feature, so the rule builder's tag dropdown and
+// API-created rules obey the same contract. System-managed tags (Hold, Auto Accident, …) are
+// exempt: they are defined in code and never stored as tag definitions. Runs at most one Basic
+// search, and none when no rule applies a non-system tag.
+async function validateAppliedTagsExist(oystehr: Oystehr, rules: SaveBillingRulesParams['rules']): Promise<void> {
+  const perRule = rules
+    .map((rule) => ({
+      name: rule.name,
+      tags: collectApplyTagNames(rule).filter((tag) => !isSystemManagedTagName(tag)),
+    }))
+    .filter((entry) => entry.tags.length > 0);
+  if (perRule.length === 0) return;
+
+  const defined = await fetchDefinedTagNames(oystehr);
+  const problems = perRule.flatMap((entry) =>
+    entry.tags
+      .filter((tag) => !defined.has(tag))
+      .map((tag) => `rule "${entry.name}" applies unknown tag "${tag}" — create it on the Tags page first`)
+  );
+  if (problems.length > 0) throw INVALID_INPUT_ERROR(problems.join('; '));
+}
+
+// Every provider/facility reference a rule assigns must point at an existing reference resource —
+// the shared kind managed on the provider/facility pages, never a per-claim working copy — and a
+// provider must carry the role the field targets. One batched fetch covers all distinct refs, and
+// none runs when no rule sets a provider/facility. The engine re-checks at apply time (a resource
+// deleted after save fails the rule and holds the claim).
+async function validateReferencedResourcesExist(
+  oystehr: Oystehr,
+  rules: SaveBillingRulesParams['rules']
+): Promise<void> {
+  const perRule = rules
+    .map((rule) => ({ name: rule.name, refs: collectSetResourceRefs(rule) }))
+    .filter((entry) => entry.refs.length > 0);
+  if (perRule.length === 0) return;
+
+  const distinct = [...new Set(perRule.flatMap((entry) => entry.refs.map((r) => r.ref)))];
+  const queries = distinct.map((ref) => {
+    const [type, id] = ref.split('/');
+    return `/${type}?_id=${id}`;
+  });
+  const resources = await getResourcesFromBatchInlineRequests(oystehr, queries);
+  const byRef = new Map(resources.filter((r) => r.id).map((r) => [`${r.resourceType}/${r.id}`, r]));
+
+  const problems = perRule.flatMap((entry) =>
+    entry.refs
+      .map(({ field, ref }) => ({ ref, field, problem: referencedResourceProblem(byRef.get(ref), field) }))
+      .filter((item) => item.problem)
+      .map((item) => `rule "${entry.name}" sets "${item.field}" to ${item.ref} — ${item.problem}`)
+  );
+  if (problems.length > 0) throw INVALID_INPUT_ERROR(problems.join('; '));
+}
+
+// Every non-insurance organization a rule assigns must exist and be a non-insurance organization
+// (the kind managed on the Non-Insurance Organizations page). One batched fetch covers all distinct
+// ids, and none runs when no rule sets one. The engine re-checks at apply time (an organization
+// deleted after save fails the rule and holds the claim).
+async function validateNioReferencesExist(oystehr: Oystehr, rules: SaveBillingRulesParams['rules']): Promise<void> {
+  const perRule = rules
+    .map((rule) => ({ name: rule.name, ids: collectSetNioIds(rule) }))
+    .filter((entry) => entry.ids.length > 0);
+  if (perRule.length === 0) return;
+
+  const distinct = [...new Set(perRule.flatMap((entry) => entry.ids))];
+  const resources = await getResourcesFromBatchInlineRequests(
+    oystehr,
+    distinct.map((id) => `/Organization?_id=${id}`)
+  );
+  const byId = new Map(
+    resources.filter((r): r is Organization => r.resourceType === 'Organization' && !!r.id).map((r) => [r.id, r])
+  );
+
+  const problems = perRule.flatMap((entry) =>
+    entry.ids
+      .map((id) => ({ id, problem: nioReferenceProblem(byId.get(id)) }))
+      .filter((item) => item.problem)
+      .map((item) => `rule "${entry.name}" sets "${NON_INSURANCE_PAYER_FIELD_ID}" to ${item.id} — ${item.problem}`)
+  );
+  if (problems.length > 0) throw INVALID_INPUT_ERROR(problems.join('; '));
+}
+
+// Every payer id a rule assigns to a payer field must name an active custom insurance organization
+// or an RCM payer. The engine can't tell the two apart without a lookup — an id that isn't a
+// prefetched custom insurance organization is written as an RCM payer URL — so a typo or a deleted
+// organization would otherwise silently stamp a bogus payer. One batched FHIR fetch covers the
+// custom-organization candidates; only ids it doesn't resolve are looked up in RCM.
+async function validatePayerReferencesExist(oystehr: Oystehr, rules: SaveBillingRulesParams['rules']): Promise<void> {
+  const perRule = rules
+    .map((rule) => ({ name: rule.name, ids: collectSetPayerIds(rule) }))
+    .filter((entry) => entry.ids.length > 0);
+  if (perRule.length === 0) return;
+
+  const distinct = [...new Set(perRule.flatMap((entry) => entry.ids))];
+  const uuids = distinct.filter((id) => isValidUUID(id));
+  const resources = uuids.length
+    ? await getResourcesFromBatchInlineRequests(
+        oystehr,
+        uuids.map((id) => `/Organization?_id=${id}`)
+      )
+    : [];
+  const customById = new Map(
+    resources
+      .filter((r): r is Organization => r.resourceType === 'Organization' && !!r.id)
+      .filter((org) => isCustomInsuranceOrganization(org))
+      .map((org) => [org.id, org])
+  );
+
+  const problemById = new Map<string, string | undefined>();
+  const rcmCandidates: string[] = [];
+  for (const id of distinct) {
+    const customOrg = customById.get(id);
+    if (customOrg) {
+      problemById.set(id, customOrg.active === false ? 'the custom insurance organization was deleted' : undefined);
+    } else {
+      rcmCandidates.push(id);
+    }
+  }
+  await mapWithConcurrency(rcmCandidates, RCM_PAYER_LOOKUP_CONCURRENCY, async (id) => {
+    try {
+      const payer = await oystehr.rcm.getPayer({ id });
+      problemById.set(id, payer ? undefined : 'no such payer or custom insurance organization exists');
+    } catch (error: unknown) {
+      const { statusCode, status } = error as { statusCode?: number; status?: number };
+      if ((statusCode ?? status) !== 404) throw error;
+      problemById.set(id, 'no such payer or custom insurance organization exists');
+    }
+  });
+
+  const problems = perRule.flatMap((entry) =>
+    entry.ids
+      .filter((id) => problemById.get(id))
+      .map((id) => `rule "${entry.name}" sets a payer to ${id} — ${problemById.get(id)}`)
+  );
+  if (problems.length > 0) throw INVALID_INPUT_ERROR(problems.join('; '));
+}
+
+function nioReferenceProblem(org: Organization | undefined): string | undefined {
+  if (!org) return 'no such organization exists';
+  if (!isNonInsuranceOrganization(org)) return 'it is not a non-insurance organization';
+  return undefined;
+}
+
+function referencedResourceProblem(resource: Resource | undefined, field: string): string | undefined {
+  if (!resource) return 'no such resource exists';
+  if (hasTag(resource, BILLING_WORKING_COPY_TAG.system, BILLING_WORKING_COPY_TAG.code)) {
+    return 'it is a per-claim working copy — pick a resource from the reference lists';
+  }
+  const role = getRuleFieldDef(field)?.providerRole;
+  if (role && !hasTag(resource, PROVIDER_ROLE_TAG, role)) return `it is not tagged as a ${role} provider`;
+  return undefined;
+}
+
+export async function performEffect(
+  oystehr: Oystehr,
+  params: SaveBillingRulesParams,
+  existing: List | undefined,
+  env: string
+): Promise<BillingRulesResponse> {
+  // The backend owns rule identifiers: rules arriving without an id (newly created) get one here.
+  const rules: BillingRule[] = params.rules.map((rule) => ({ ...rule, id: rule.id ?? randomUUID() }));
+  const newList = rulesToList(params.engine, rules);
+
+  let saved: List;
+  if (existing?.id) {
+    newList.id = existing.id;
+    saved = await oystehr.fhir.update<List>(
+      newList,
+      params.expectedVersionId ? { optimisticLockingVersionId: params.expectedVersionId } : undefined
+    );
+  } else {
+    saved = await oystehr.fhir.create<List>(newList);
+  }
+
+  return { rules: await listToRulesReportingMalformed(saved, env), versionId: saved.meta?.versionId };
+}

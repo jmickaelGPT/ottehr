@@ -1,8 +1,12 @@
 import Oystehr, { SearchParam } from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { List } from 'fhir/r4b';
-import { AdminGetLabSetDetailOutput, AdminGetLabSetListOutput, LAB_LIST_CODING_SYSTEM } from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../../shared';
+import { LAB_LIST_CODING_SYSTEM } from 'utils/lib/types/data/labs/labs.constants';
+import { AdminGetLabSetDetailOutput, AdminGetLabSetListOutput } from 'utils/lib/types/data/labs/labs.types';
+import { checkOrCreateM2MClientToken } from '../../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../../shared/helpers';
+import { wrapHandler } from '../../../../shared/sentry';
+import { ZambdaInput } from '../../../../shared/types/common';
 import { formatLabListDTOs } from '../../shared/helpers';
 import { validateRequestParameters } from './validateRequestParameters';
 
@@ -10,7 +14,6 @@ let m2mToken: string;
 const ZAMBDA_NAME = 'admin-get-lab-sets';
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`${ZAMBDA_NAME} started, input: ${JSON.stringify(input)}`);
   const validatedParameters = validateRequestParameters(input);
 
   const { type, secrets } = validatedParameters;
@@ -18,7 +21,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   console.log('validateRequestParameters success');
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   if (type === 'detail') {
     const labSetId = validatedParameters.labSetId;

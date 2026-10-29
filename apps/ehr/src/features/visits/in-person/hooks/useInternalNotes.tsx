@@ -2,7 +2,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import VisibilityOffIcon from '@mui/icons-material/VisibilityOff';
 import { Box, Dialog, DialogContent, DialogTitle, IconButton, Typography } from '@mui/material';
 import React from 'react';
-import { IN_PERSON_NOTE_ID, NOTE_TYPE, PRIVATE_EXTENSION_BASE_URL } from 'utils';
+import { NOTE_TYPE } from 'utils/lib/types/api/chart-data/chart-data.types';
 import { GenericNoteList } from '../../shared/components/generic-notes-list/GenericNoteList';
 import { GenericNotesConfig } from '../../shared/components/generic-notes-list/types';
 
@@ -59,14 +59,7 @@ const InternalNotesModal: React.FC<InternalNotesModalProps> = ({ open, onClose }
 
 const internalNotesConfig: GenericNotesConfig = {
   apiConfig: {
-    fieldName: 'notes',
     type: NOTE_TYPE.INTERNAL,
-    searchParams: {
-      _search_by: 'encounter',
-      _sort: '-_lastUpdated',
-      _count: 1000,
-      _tag: `${PRIVATE_EXTENSION_BASE_URL}/${NOTE_TYPE.INTERNAL}|${IN_PERSON_NOTE_ID}`,
-    },
   },
   locales: {
     entityLabel: 'internal note',

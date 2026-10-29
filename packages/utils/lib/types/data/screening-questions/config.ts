@@ -1,12 +1,16 @@
+import { ScreeningQuestionsConfig } from 'config-types/config/screening-questions';
 import {
   HISTORY_OBTAINED_FROM_FIELD,
   HistorySourceKeys,
+  PATIENT_BREASTFEEDING_STATUS,
+  PATIENT_PREGNANCY_STATUS,
   PATIENT_VACCINATION_STATUS,
+  PatientBreastfeedingKeys,
+  PatientPregnancyKeys,
   PatientVaccinationKeys,
   RecentVisitKeys,
   SEEN_IN_LAST_THREE_YEARS_FIELD,
 } from './constants';
-import { ScreeningQuestionsConfig } from './types';
 
 export const baseScreeningQuestionsConfig: ScreeningQuestionsConfig = {
   title: 'ASK THE PATIENT',
@@ -45,6 +49,18 @@ export const baseScreeningQuestionsConfig: ScreeningQuestionsConfig = {
       ],
     },
     {
+      id: 'seen_in_last_3_years',
+      type: 'radio',
+      question: 'Have you been seen by us in the last 3 years?',
+      fhirField: 'seen-in-last-3-years',
+      existsInQuestionnaire: true,
+      hideInVirtualPaperwork: true,
+      options: [
+        { value: 'yes', label: 'Yes', fhirValue: 'Yes' },
+        { value: 'no', label: 'No', fhirValue: 'No' },
+      ],
+    },
+    {
       id: 'office_visit',
       type: 'radio',
       question: 'Has the patient been seen in one of our offices / telemed in last 3 years?',
@@ -73,6 +89,29 @@ export const baseScreeningQuestionsConfig: ScreeningQuestionsConfig = {
         type: 'textarea',
         fhirField: PATIENT_VACCINATION_STATUS,
       },
+    },
+    {
+      id: 'pregnancy_status',
+      type: 'radio',
+      question: 'Is there any chance you could be pregnant?',
+      fhirField: PATIENT_PREGNANCY_STATUS,
+      options: [
+        { value: 'yes', label: 'Yes', fhirValue: PatientPregnancyKeys.Yes },
+        { value: 'no', label: 'No', fhirValue: PatientPregnancyKeys.No },
+        { value: 'not_sure', label: 'Not sure', fhirValue: PatientPregnancyKeys.NotSure },
+        { value: 'not_applicable', label: 'Not applicable', fhirValue: PatientPregnancyKeys.NotApplicable },
+      ],
+    },
+    {
+      id: 'breastfeeding_status',
+      type: 'radio',
+      question: 'Are you currently breastfeeding?',
+      fhirField: PATIENT_BREASTFEEDING_STATUS,
+      options: [
+        { value: 'yes', label: 'Yes', fhirValue: PatientBreastfeedingKeys.Yes },
+        { value: 'no', label: 'No', fhirValue: PatientBreastfeedingKeys.No },
+        { value: 'not_applicable', label: 'Not applicable', fhirValue: PatientBreastfeedingKeys.NotApplicable },
+      ],
     },
     {
       id: 'history_source',

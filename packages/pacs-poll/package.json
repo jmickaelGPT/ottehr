@@ -1,11 +1,11 @@
 {
   "name": "pacs-poll",
-  "version": "1.36.35",
+  "version": "1.45.20",
   "private": true,
   "scripts": {
-    "start": "tsx src/index.ts",
+    "start": "NODE_OPTIONS='--preserve-symlinks' tsx src/index.ts",
     "build": "tsc",
-    "bundle": "tsx bundle.ts",
+    "bundle": "NODE_OPTIONS='--preserve-symlinks' tsx bundle.ts",
     "lint": "cross-env NODE_OPTIONS=--max-old-space-size=8192 eslint --ext .ts,.js --report-unused-disable-directives --max-warnings 0 .",
     "lint:fix": "eslint --ext .ts,.js --report-unused-disable-directives --max-warnings 0 --fix ."
   },
@@ -14,11 +14,11 @@
     "npm": ">=10.0.0"
   },
   "devDependencies": {
-    "@hookform/devtools": "^4.2.0",
-    "@sentry/esbuild-plugin": "^5.4.0",
-    "aws-cdk-lib": "2.263.0",
+    "@sentry/esbuild-plugin": "^3.5.0",
     "esbuild": "^0.25.1",
-    "esbuild-plugin-copy": "^2.1.1"
+    "esbuild-plugin-copy": "^2.1.1",
+    "@hookform/devtools": "^4.2.0",
+    "aws-cdk-lib": "2.263.0"
   },
   "dependencies": {
     "@langchain/core": "1.2.4",

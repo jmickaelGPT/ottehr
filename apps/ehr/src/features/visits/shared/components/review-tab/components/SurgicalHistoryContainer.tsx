@@ -1,34 +1,28 @@
 import { Box, Typography, useTheme } from '@mui/material';
 import { FC } from 'react';
 import { dataTestIds } from 'src/constants/data-test-ids';
-import { NoteDTO } from 'utils';
+import {
+  SectionHeading,
+  useNoteSectionTitleInCardHeader,
+} from 'src/features/visits/shared/components/NoteSectionHeading';
+import { NoteDTO } from 'utils/lib/types/api/chart-data/chart-data.types';
 import { AssessmentTitle } from '../../../../../../components/AssessmentTitle';
-import { useChartFields } from '../../../hooks/useChartFields';
-import { useChartData } from '../../../stores/appointment/appointment.store';
+import { useVisitNote } from '../../../hooks/useVisitNote';
 
 export const SurgicalHistoryContainer: FC<{ notes?: NoteDTO[] }> = ({ notes }) => {
-  const { data: chartFields } = useChartFields({
-    requestedFields: {
-      surgicalHistoryNote: {
-        _tag: 'surgical-history-note',
-      },
-    },
-  });
-
-  const { chartData } = useChartData();
+  const titleInCardHeader = useNoteSectionTitleInCardHeader();
+  const { data: note } = useVisitNote();
 
   const theme = useTheme();
-  const procedures = chartData?.surgicalHistory;
-  const surgicalHistoryNote = chartFields?.surgicalHistoryNote?.text;
+  const procedures = note?.history.surgicalHistory;
+  const surgicalHistoryNote = note?.encounterNotes.surgicalHistoryNote?.text;
 
   return (
     <Box
       sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, width: '100%' }}
       data-testid={dataTestIds.progressNotePage.surgicalHistoryContainer}
     >
-      <Typography variant="h5" color="primary.dark">
-        Surgical history
-      </Typography>
+      {!titleInCardHeader && <SectionHeading>Surgical history</SectionHeading>}
       {procedures?.length ? (
         procedures.map((procedure) => (
           <Typography key={procedure.resourceId}>

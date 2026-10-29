@@ -34,7 +34,10 @@ import {
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { enqueueSnackbar } from 'notistack';
 import { FC, useCallback, useEffect, useMemo, useState } from 'react';
-import { BOOKING_CONFIG, getDefaultCadenceMinutes } from 'utils';
+import { BooleanStateChip } from 'src/components/BooleanStateChip';
+import { AdminHeaderActionSlot } from 'src/features/admin/AdminPageHeader';
+import { BOOKING_CONFIG } from 'utils/lib/ottehr-config/booking';
+import { getDefaultCadenceMinutes } from 'utils/lib/utils/dateUtils';
 import {
   createServiceCategory,
   deleteServiceCategory,
@@ -56,6 +59,7 @@ const COMPILED_SERVICE_CODES: ReadonlySet<string> = new Set(
 const DEFAULT_NEW_SERVICE_CATEGORY: ServiceCategory = {
   name: '',
   code: '',
+  abbreviation: '',
   active: true,
   config: {
     durationMinutes: 15,
@@ -91,6 +95,7 @@ const ServiceCategoryDialog: FC<{
   const handleSave = useCallback(async () => {
     const missing: string[] = [];
     if (!value.name.trim()) missing.push('name');
+    if (!value.abbreviation?.trim()) missing.push('abbreviation');
     if (!value.code.trim()) missing.push('code');
     if (value.config.durationMinutes < 1) missing.push('duration');
     if (missing.length > 0) {
@@ -122,7 +127,7 @@ const ServiceCategoryDialog: FC<{
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle>
-        <Typography variant="h4" color="primary.dark">
+        <Typography variant="h4" component="span" color="primary.dark">
           {initial?.id ? 'Edit Service' : 'New Service'}
         </Typography>
       </DialogTitle>
@@ -136,6 +141,16 @@ const ServiceCategoryDialog: FC<{
             size="small"
             fullWidth
             helperText="Shown to patients — e.g., 'Urgent Care', 'Workers Comp'"
+          />
+          <TextField
+            label="Abbreviation/Short Name (2-3 symbols)"
+            value={value.abbreviation ?? ''}
+            onChange={(e) => setValue((v) => ({ ...v, abbreviation: e.target.value }))}
+            required
+            size="small"
+            fullWidth
+            error={!value.abbreviation?.trim()}
+            helperText="Shown on the Tracking Board and patients' visits list - e.g., 'UC', 'WC'"
           />
           <TextField
             label="Code"
@@ -388,11 +403,8 @@ export const ServiceCategoriesAdminPage: FC = () => {
   }, [data?.serviceCategories]);
 
   return (
-    <Paper sx={{ padding: 2, marginTop: 2 }}>
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: '8px' }}>
-        <Typography variant="h4" color="primary.dark">
-          Services
-        </Typography>
+    <Box>
+      <AdminHeaderActionSlot>
         <Button
           variant="contained"
           startIcon={<AddIcon />}
@@ -403,7 +415,7 @@ export const ServiceCategoriesAdminPage: FC = () => {
         >
           New Service
         </Button>
-      </Box>
+      </AdminHeaderActionSlot>
 
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
         Services are the appointment types patients can book. Add a service here, then attach it to a provider's
@@ -427,6 +439,7 @@ export const ServiceCategoriesAdminPage: FC = () => {
             <TableHead>
               <TableRow>
                 <TableCell sx={{ fontWeight: 600 }}>Name</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Abbreviation</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Code</TableCell>
                 <TableCell sx={{ fontWeight: 600 }} align="center">
                   Duration
@@ -457,6 +470,7 @@ export const ServiceCategoriesAdminPage: FC = () => {
                   }}
                 >
                   <TableCell>{sc.name}</TableCell>
+                  <TableCell>{sc.abbreviation?.trim() || ''}</TableCell>
                   <TableCell sx={{ fontFamily: 'monospace' }}>{sc.code}</TableCell>
                   <TableCell align="center">{sc.systemManaged ? '—' : `${sc.config.durationMinutes} min`}</TableCell>
                   <TableCell align="center">
@@ -482,11 +496,7 @@ export const ServiceCategoriesAdminPage: FC = () => {
                         <Chip label="System" size="small" />
                       </Tooltip>
                     ) : (
-                      <Chip
-                        label={sc.active ? 'Active' : 'Inactive'}
-                        size="small"
-                        color={sc.active ? 'success' : 'error'}
-                      />
+                      <BooleanStateChip state={sc.active} label={sc.active ? 'Active' : 'Inactive'} />
                     )}
                   </TableCell>
                   <TableCell align="right" onClick={(e) => e.stopPropagation()}>
@@ -529,7 +539,7 @@ export const ServiceCategoriesAdminPage: FC = () => {
         }}
         onSubmit={handleSubmit}
       />
-    </Paper>
+    </Box>
   );
 };
 

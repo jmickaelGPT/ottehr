@@ -1,12 +1,15 @@
 import { APIGatewayProxyResult } from 'aws-lambda';
 import { Device, Location } from 'fhir/r4b';
 import {
-  getTerminalLocationIdFromDevice,
-  isLocationVirtual,
   STRIPE_TERMINAL_LOCATION_DEVICE_TYPE_CODE,
   STRIPE_TERMINAL_LOCATION_DEVICE_TYPE_SYSTEM,
-} from 'utils';
-import { checkOrCreateM2MClientToken, createOystehrClient, wrapHandler, ZambdaInput } from '../../../shared';
+} from 'utils/lib/fhir/constants';
+import { isLocationVirtual } from 'utils/lib/fhir/location';
+import { getTerminalLocationIdFromDevice } from 'utils/lib/fhir/payments';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
+import { wrapHandler } from '../../../shared/sentry';
+import { ZambdaInput } from '../../../shared/types/common';
 import { validateRequestParameters } from './validateRequestParameters';
 
 let m2mToken: string;
@@ -27,7 +30,7 @@ export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promis
   const { secrets } = validateRequestParameters(input);
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
 
   const resources = await oystehr.fhir.search<Location>({
     resourceType: 'Location',

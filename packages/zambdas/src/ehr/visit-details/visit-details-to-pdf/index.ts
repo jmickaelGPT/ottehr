@@ -1,26 +1,25 @@
 import Oystehr from '@oystehr/sdk';
 import { APIGatewayProxyResult } from 'aws-lambda';
-import { Organization, Practitioner } from 'fhir/r4b';
+import { Account, Encounter, Organization, Practitioner } from 'fhir/r4b';
+import { getConsentAndRelatedDocRefsForAppointment } from 'utils/lib/fhir/appointments';
+import { SERVICE_CATEGORY_SYSTEM } from 'utils/lib/fhir/constants';
+import { getCoding } from 'utils/lib/fhir/helpers';
+import { Secrets } from 'utils/lib/secrets';
+import { PatientPaymentDTO } from 'utils/lib/types/api/patient-payment-types';
+import { VisitDetailsResponse } from 'utils/lib/types/api/visit-details/visit-details.types';
+import { checkForStripeCustomerDeletedError } from 'utils/lib/types/errors';
+import { checkOrCreateM2MClientToken } from '../../../shared/auth';
+import { createClinicalOystehrClient } from '../../../shared/helpers';
 import {
-  checkForStripeCustomerDeletedError,
-  getCoding,
-  getConsentAndRelatedDocRefsForAppointment,
-  getVisitOccupationalMedicineEmployerFromEncounter,
-  PatientPaymentDTO,
-  Secrets,
-  SERVICE_CATEGORY_SYSTEM,
-  VisitDetailsResponse,
-} from 'utils';
-import {
-  checkOrCreateM2MClientToken,
-  createOystehrClient,
-  getStripeClient,
-  wrapHandler,
-  ZambdaInput,
-} from '../../../shared';
+  getOccupationalMedicineEmployerName,
+  getVisitEmployerOrganizationId,
+} from '../../../shared/occupational-medicine-employer';
 import { makeVisitDetailsPdfDocumentReference } from '../../../shared/pdf/make-visit-details-document-reference';
 import { createVisitDetailsPdf } from '../../../shared/pdf/visit-details-pdf';
 import { getAppointmentAndRelatedResources } from '../../../shared/pdf/visit-details-pdf/get-video-resources';
+import { wrapHandler } from '../../../shared/sentry';
+import { getStripeClient } from '../../../shared/stripeIntegration';
+import { ZambdaInput } from '../../../shared/types/common';
 import { getPaymentsForEncounter } from '../../patient-payments/helpers';
 import { getAccountAndCoverageResourcesForPatient, PATIENT_CONTAINED_PHARMACY_ID } from '../../shared/harvest';
 import { searchDocumentReferencesForVisit } from '../get-visit-files';
@@ -31,16 +30,14 @@ const ZAMBDA_NAME = 'visit-details-to-pdf';
 let m2mToken: string;
 
 export const index = wrapHandler(ZAMBDA_NAME, async (input: ZambdaInput): Promise<APIGatewayProxyResult> => {
-  console.log(`${ZAMBDA_NAME} started, input: ${JSON.stringify(input)}`);
-
   const validatedParameters = validateRequestParameters(input);
   const { appointmentId, timezone, secrets } = validatedParameters;
 
   m2mToken = await checkOrCreateM2MClientToken(m2mToken, secrets);
-  const oystehr = createOystehrClient(m2mToken, secrets);
+  const oystehr = createClinicalOystehrClient(m2mToken, secrets);
   console.log('Created Oystehr client');
 
-  const response = await performEffect(oystehr, appointmentId, secrets, timezone);
+  const response = await performEffect(oystehr, appointmentId, secrets, m2mToken, timezone);
   return {
     statusCode: 200,
     body: JSON.stringify(response),
@@ -51,6 +48,7 @@ export const performEffect = async (
   oystehr: Oystehr,
   appointmentId: string,
   secrets: Secrets | null,
+  token: string,
   timezone?: string
 ): Promise<VisitDetailsResponse> => {
   const visitResources = await getAppointmentAndRelatedResources(oystehr, appointmentId, true);
@@ -125,24 +123,13 @@ export const performEffect = async (
 
   const appointmentServiceCategory = getCoding(appointment?.serviceCategory, SERVICE_CATEGORY_SYSTEM)?.code;
 
-  let occupationalMedicineEmployerForPdf = occupationalMedicineEmployerOrganization;
-
-  if (appointmentServiceCategory === 'pre-op') {
-    const visitEmployerRef = getVisitOccupationalMedicineEmployerFromEncounter(encounter);
-
-    if (visitEmployerRef?.reference) {
-      const organizationId = visitEmployerRef.reference.split('/')[1];
-
-      if (organizationId) {
-        occupationalMedicineEmployerForPdf = await oystehr.fhir.get<Organization>({
-          resourceType: 'Organization',
-          id: organizationId,
-        });
-      }
-    } else {
-      occupationalMedicineEmployerForPdf = undefined;
-    }
-  }
+  const occupationalMedicineEmployerName = await resolveOccupationalMedicineEmployerName({
+    oystehr,
+    encounter,
+    appointmentServiceCategory,
+    occupationalMedicineEmployerOrganization,
+    occupationalMedicineAccount: accountResources.occupationalMedicineAccount,
+  });
 
   const { pdfInfo, attached } = await createVisitDetailsPdf(
     {
@@ -150,7 +137,7 @@ export const performEffect = async (
       emergencyContactResource,
       attorneyRelatedPerson,
       employerOrganization,
-      occupationalMedicineEmployerOrganization: occupationalMedicineEmployerForPdf,
+      occupationalMedicineEmployerName,
       appointment,
       encounter,
       location,
@@ -166,7 +153,7 @@ export const performEffect = async (
       payments,
     },
     secrets,
-    m2mToken
+    token
   );
 
   console.log(`Creating Visit details PDF Document Reference`);
@@ -185,3 +172,36 @@ export const performEffect = async (
     documentReference: `DocumentReference/${visitDetailsDocumentId}`,
   };
 };
+
+// The employer line on the visit PDF, as a name only — NIO employers are billing-app resources the
+// clinical side never reads as FHIR, so their names come from the stored Reference display.
+export async function resolveOccupationalMedicineEmployerName(params: {
+  oystehr: Oystehr;
+  encounter: Encounter;
+  appointmentServiceCategory?: string;
+  occupationalMedicineEmployerOrganization?: Organization;
+  occupationalMedicineAccount?: Account;
+}): Promise<string | undefined> {
+  const {
+    oystehr,
+    encounter,
+    appointmentServiceCategory,
+    occupationalMedicineEmployerOrganization,
+    occupationalMedicineAccount,
+  } = params;
+
+  const visitEmployerOrganizationId =
+    appointmentServiceCategory === 'pre-op' ? getVisitEmployerOrganizationId(encounter) : undefined;
+
+  const visitEmployerOrganization = visitEmployerOrganizationId
+    ? await oystehr.fhir.get<Organization>({ resourceType: 'Organization', id: visitEmployerOrganizationId })
+    : undefined;
+
+  return getOccupationalMedicineEmployerName({
+    encounter,
+    appointmentServiceCategory,
+    occupationalMedicineEmployerOrganization,
+    occupationalMedicineAccount,
+    visitEmployerOrganization,
+  });
+}

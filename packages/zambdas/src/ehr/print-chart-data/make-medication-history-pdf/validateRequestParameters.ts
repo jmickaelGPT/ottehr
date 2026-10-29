@@ -1,12 +1,14 @@
-import { MakeMedicationHistoryPdfZambdaInput, MISSING_REQUEST_BODY, MISSING_REQUIRED_PARAMETERS } from 'utils';
-import { ZambdaInput } from '../../../shared';
+import { MakeMedicationHistoryPdfZambdaInput } from 'utils/lib/types/api/print-chart-data/print-chart-data.types';
+import { MISSING_REQUEST_BODY, MISSING_REQUIRED_PARAMETERS } from 'utils/lib/types/errors';
+import { ZambdaInput } from '../../../shared/types/common';
+import { safeJsonParse } from '../../../shared/validation';
 
 export function validateRequestParameters(input: ZambdaInput): MakeMedicationHistoryPdfZambdaInput & { secrets: any } {
   if (!input.body) {
     throw MISSING_REQUEST_BODY;
   }
 
-  const { patient, appointment, medicationHistory, encounter, location, timezone } = JSON.parse(input.body);
+  const { patient, appointment, medicationHistory, encounter, location, timezone } = safeJsonParse(input.body);
 
   const missingResources = [];
   if (!patient) missingResources.push('patient');

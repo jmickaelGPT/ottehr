@@ -2,17 +2,17 @@ import { Box, Typography } from '@mui/material';
 import Oystehr from '@oystehr/sdk';
 import { ReactElement, useState } from 'react';
 import { submitLabOrder } from 'src/api/api';
-import { CustomDialog } from 'src/components/dialogs';
+import { CustomDialog } from 'src/components/dialogs/CustomDialog';
 import { useApiClients } from 'src/hooks/useAppClients';
+import { openPdf } from 'utils/lib/helpers/labs/helpers';
 import {
   ExternalLabsStatus,
   GetLabOrdersParameters,
   LabOrderListPageDTO,
   LabOrdersSearchBy,
   LabsTableColumn,
-  openPdf,
   ReflexLabDTO,
-} from 'utils';
+} from 'utils/lib/types/data/labs/labs.types';
 import { configBundleTableTestId } from '../../utils/test-ids';
 import { LabsTable } from './LabsTable';
 import { LabsTableBundleHeaderRow } from './LabsTableBundleHeaderRow';
@@ -38,6 +38,8 @@ type LabsTableContainerProps<SearchBy extends LabOrdersSearchBy> = {
   handleRejectedAbn?: (serviceRequestId: string) => Promise<void>;
   requisitionNumber?: string; // optional because the result table is not grouped by requisition
   orderBundleNote?: string; // right now with the way results are organized this will not be viewable once results come in. not sure if thats a problem.
+  onRowClick: (labOrderData: LabOrderListPageDTO) => void;
+  onDrDrivenRowClick: (result: ReflexLabDTO) => void;
 };
 
 export const LabsTableContainer = <SearchBy extends LabOrdersSearchBy>({
@@ -54,6 +56,8 @@ export const LabsTableContainer = <SearchBy extends LabOrdersSearchBy>({
   handleRejectedAbn,
   requisitionNumber,
   orderBundleNote,
+  onRowClick,
+  onDrDrivenRowClick,
 }: LabsTableContainerProps<SearchBy>): ReactElement => {
   const { oystehrZambda: oystehr } = useApiClients();
 
@@ -177,6 +181,8 @@ export const LabsTableContainer = <SearchBy extends LabOrdersSearchBy>({
               allowDelete={allowDelete}
               showDeleteLabOrderDialog={showDeleteLabOrderDialog}
               handleRejectedAbn={handleRejectedAbn}
+              onRowClick={onRowClick}
+              onDrDrivenRowClick={onDrDrivenRowClick}
             />
           </>
         </Box>

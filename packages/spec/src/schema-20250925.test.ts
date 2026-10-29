@@ -125,6 +125,7 @@ describe('Schema20250925 generate()', () => {
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'spec-test-'));
+    await fs.mkdir(path.join(tmpDir, 'oystehr'));
   });
 
   afterEach(async () => {
@@ -144,14 +145,14 @@ describe('Schema20250925 generate()', () => {
         },
       };
 
-      const schema = new Schema20250925([spec], {}, tmpDir, '/zambdas');
+      const schema = new Schema20250925([spec], {}, `${tmpDir}/oystehr`, '/zambdas');
       await schema.generate();
 
-      const outputsContent = await fs.readFile(path.join(tmpDir, 'outputs.tf.json'), 'utf8');
+      const outputsContent = await fs.readFile(path.join(`${tmpDir}/oystehr`, 'outputs.tf.json'), 'utf8');
       const outputs = JSON.parse(outputsContent);
 
-      expect(outputs.output.zambda_secrets_for_local_server).toBeDefined();
-      const value: string = outputs.output.zambda_secrets_for_local_server.value;
+      expect(outputs.locals.zambda_secrets_for_local_server).toBeDefined();
+      const value: string = outputs.locals.zambda_secrets_for_local_server.value;
       // Static secret references
       expect(value).toContain('"MY_API_KEY": oystehr_secret.MY_API_KEY.value');
       expect(value).toContain('"ANOTHER_SECRET": oystehr_secret.ANOTHER_SECRET.value');
@@ -187,6 +188,292 @@ describe('Schema20250925 generate()', () => {
       const outputs = JSON.parse(outputsContent);
 
       expect(outputs.output.zambda_secrets_for_local_server).toBeUndefined();
+    });
+  });
+
+  describe('outputs', () => {
+    it('outputs values are defined as locals', async () => {
+      const spec = {
+        path: 'secrets.json',
+        spec: {
+          'schema-version': '2025-09-25',
+          secrets: {
+            MY_API_KEY: { name: 'my-api-key', value: 'val1' },
+            ANOTHER_SECRET: { name: 'another-secret', value: 'val2' },
+          },
+        },
+      };
+
+      const schema = new Schema20250925([spec], {}, tmpDir, '/zambdas');
+      await schema.generate();
+
+      const outputsContent = await fs.readFile(path.join(tmpDir, 'outputs.tf.json'), 'utf8');
+      const outputs = JSON.parse(outputsContent);
+
+      expect(outputs.locals.zambda_secrets_for_local_server).toBeDefined();
+      expect(outputs.output.zambda_secrets_for_local_server).toBeDefined();
+      const value: string = outputs.output.zambda_secrets_for_local_server.value;
+      expect(value).toContain('local.zambda_secrets_for_local_server');
+    });
+  });
+
+  describe('buckets', () => {
+    const bucketSpecRetainingIn = (
+      retainInEnvironments: string[]
+    ): {
+      path: string;
+      spec: {
+        [key: string]: unknown;
+      };
+    } => ({
+      path: 'buckets.json',
+      spec: {
+        'schema-version': '2025-09-25',
+        buckets: {
+          MY_BUCKET: {
+            name: '#{var/PROJECT_ID}-my-bucket',
+            retainInEnvironments,
+          },
+        },
+      },
+    });
+
+    const readBucket = async (): Promise<{ name: string; removal_policy: string; force_destroy?: boolean }> => {
+      const content = await fs.readFile(path.join(tmpDir, 'buckets.tf.json'), 'utf8');
+      return JSON.parse(content).resource.oystehr_z3_bucket.MY_BUCKET;
+    };
+
+    it('retains the bucket when the current environment is in retainInEnvironments', async () => {
+      const schema = new Schema20250925(
+        [bucketSpecRetainingIn(['production'])],
+        {
+          ENVIRONMENT: 'production',
+        },
+        tmpDir,
+        '/zambdas'
+      );
+      await schema.generate();
+
+      const bucket = await readBucket();
+      expect(bucket.removal_policy).toBe('retain');
+      expect(bucket.force_destroy).toBeUndefined();
+    });
+
+    it('deletes the bucket when the current environment is not in retainInEnvironments', async () => {
+      const schema = new Schema20250925(
+        [bucketSpecRetainingIn(['production'])],
+        {
+          ENVIRONMENT: 'local',
+        },
+        tmpDir,
+        '/zambdas'
+      );
+      await schema.generate();
+
+      const bucket = await readBucket();
+      expect(bucket.removal_policy).toBe('delete');
+      expect(bucket.force_destroy).toBe(true);
+    });
+
+    it('deletes in every environment when retainInEnvironments is empty', async () => {
+      const schema = new Schema20250925(
+        [bucketSpecRetainingIn([])],
+        {
+          ENVIRONMENT: 'production',
+        },
+        tmpDir,
+        '/zambdas'
+      );
+      await schema.generate();
+
+      const bucket = await readBucket();
+      expect(bucket.removal_policy).toBe('delete');
+      expect(bucket.force_destroy).toBe(true);
+    });
+
+    it('resolves #{var/...} references in the bucket name', async () => {
+      const schema = new Schema20250925(
+        [bucketSpecRetainingIn(['production'])],
+        {
+          ENVIRONMENT: 'production',
+          PROJECT_ID: 'proj-123',
+        },
+        tmpDir,
+        '/zambdas'
+      );
+      await schema.generate();
+
+      expect((await readBucket()).name).toBe('proj-123-my-bucket');
+    });
+
+    it('throws when buckets are defined but ENVIRONMENT is not set', async () => {
+      const schema = new Schema20250925([bucketSpecRetainingIn(['production'])], {}, tmpDir, '/zambdas');
+
+      await expect(schema.generate()).rejects.toThrow('ENVIRONMENT must be set to resolve bucket removal policies');
+    });
+
+    it('deletes in every environment when retainInEnvironments is omitted', async () => {
+      const spec = {
+        path: 'buckets.json',
+        spec: {
+          'schema-version': '2025-09-25',
+          buckets: {
+            MY_BUCKET: {
+              name: '#{var/PROJECT_ID}-my-bucket',
+            },
+          },
+        },
+      };
+      const schema = new Schema20250925(
+        [spec],
+        {
+          ENVIRONMENT: 'production',
+        },
+        tmpDir,
+        '/zambdas'
+      );
+      await schema.generate();
+
+      const bucket = await readBucket();
+      expect(bucket.removal_policy).toBe('delete');
+      expect(bucket.force_destroy).toBe(true);
+    });
+
+    it('throws when a bucket uses the removed removalPolicy field', async () => {
+      const spec = {
+        path: 'buckets.json',
+        spec: {
+          'schema-version': '2025-09-25',
+          buckets: {
+            MY_BUCKET: {
+              name: '#{var/PROJECT_ID}-my-bucket',
+              removalPolicy: 'retain',
+            },
+          },
+        },
+      };
+      const schema = new Schema20250925(
+        [spec],
+        {
+          ENVIRONMENT: 'production',
+        },
+        tmpDir,
+        '/zambdas'
+      );
+
+      await expect(schema.generate()).rejects.toThrow(
+        'Bucket "MY_BUCKET" uses the removed "removalPolicy" field; use "retainInEnvironments" instead'
+      );
+    });
+
+    it('throws when retainInEnvironments is not an array of strings', async () => {
+      const spec = {
+        path: 'buckets.json',
+        spec: {
+          'schema-version': '2025-09-25',
+          buckets: {
+            MY_BUCKET: {
+              name: '#{var/PROJECT_ID}-my-bucket',
+              retainInEnvironments: 'production',
+            },
+          },
+        },
+      };
+      const schema = new Schema20250925(
+        [spec],
+        {
+          ENVIRONMENT: 'production',
+        },
+        tmpDir,
+        '/zambdas'
+      );
+
+      await expect(schema.generate()).rejects.toThrow(
+        'Bucket "MY_BUCKET" has an invalid "retainInEnvironments"; expected an array of environment name strings'
+      );
+    });
+  });
+
+  describe('committed config', () => {
+    const CONFIG_DIRS = ['config/oystehr', 'config/oystehr-core'];
+
+    const repoRoot = path.resolve(__dirname, '..', '..', '..');
+
+    async function readSpecFiles(dir: string): Promise<{ path: string; spec: any }[]> {
+      const absDir = path.join(repoRoot, dir);
+      const entries = await fs.readdir(absDir);
+      const specs: { path: string; spec: any }[] = [];
+      for (const entry of entries.filter((e) => e.endsWith('.json')).sort()) {
+        const abs = path.join(absDir, entry);
+        specs.push({ path: path.join(dir, entry), spec: JSON.parse(await fs.readFile(abs, 'utf-8')) });
+      }
+      return specs;
+    }
+
+    it.each(CONFIG_DIRS)('loads %s without duplicate resource keys', async (dir) => {
+      const specs = await readSpecFiles(dir);
+      expect(specs.length).toBeGreaterThan(0);
+      expect(() => new Schema20250925(specs, {}, tmpDir, '/zambdas')).not.toThrow();
+    });
+
+    it('loads all config dirs together without duplicate resource keys', async () => {
+      const specs = (await Promise.all(CONFIG_DIRS.map(readSpecFiles))).flat();
+      expect(() => new Schema20250925(specs, {}, tmpDir, '/zambdas')).not.toThrow();
+    });
+
+    it('suffixes every archived canonical resource key with a version', async () => {
+      const specs = await readSpecFiles('config/oystehr');
+      const offenders: string[] = [];
+      for (const { path: specPath, spec } of specs.filter((s) => s.path.includes('-archive.'))) {
+        for (const [key, entry] of Object.entries<any>(spec.fhirResources ?? {})) {
+          if (!entry?.resource?.version) continue;
+          if (!/-\d+_\d+_\d+$/.test(key)) {
+            offenders.push(`${specPath}: archived key "${key}" has no -<major>_<minor>_<patch> suffix`);
+          }
+        }
+      }
+      expect(offenders).toEqual([]);
+    });
+  });
+
+  describe('apps', () => {
+    it('exposes resolved app inputs as a local and keeps depends_on on the resource', async () => {
+      const spec = {
+        path: 'apps.json',
+        spec: {
+          'schema-version': '2025-09-25',
+          project: { PROJECT: { name: 'Project' } },
+          apps: {
+            APP: {
+              name: 'App',
+              loginRedirectUri: '#{var/APP_URL}',
+              allowedCallbackUrls: ['#{var/APP_URL}', 'https://extra.example.com'],
+            },
+          },
+        },
+      };
+      await new Schema20250925([spec], { APP_URL: 'https://app.example.com' }, tmpDir, '/zambdas').generate();
+
+      const apps = JSON.parse(await fs.readFile(path.join(tmpDir, 'apps.tf.json'), 'utf8'));
+      const { depends_on, ...resource } = apps.resource.oystehr_application.APP;
+      expect(depends_on).toEqual(['oystehr_project_configuration.PROJECT']);
+      expect(apps.locals.oystehr_application_APP_config).toEqual(resource);
+      expect(resource).toMatchObject({
+        login_redirect_uri: 'https://app.example.com',
+        allowed_callback_urls: ['https://app.example.com', 'https://extra.example.com'],
+      });
+
+      const project = JSON.parse(await fs.readFile(path.join(tmpDir, 'project.tf.json'), 'utf8'));
+      expect(project).not.toHaveProperty('locals');
+    });
+
+    it('removes apps.tf.json and its locals when the apps are removed', async () => {
+      const spec = { path: 'apps.json', spec: { 'schema-version': '2025-09-25', apps: { APP: { name: 'App' } } } };
+      await new Schema20250925([spec], {}, tmpDir, '/zambdas').generate();
+      expect(await fs.readdir(tmpDir)).toContain('apps.tf.json');
+
+      await new Schema20250925([], {}, tmpDir, '/zambdas').generate();
+      expect(await fs.readdir(tmpDir)).not.toContain('apps.tf.json');
     });
   });
 });

@@ -1,4 +1,5 @@
-import type { PaperworkConfig, ResolvedConsentFormConfig } from 'config-types';
+import type { ResolvedConsentFormConfig } from 'config-types/config/consent-forms';
+import type { PaperworkConfig } from 'config-types/config/intake-paperwork';
 import { camelCase } from 'lodash-es';
 import { INTAKE_PAPERWORK_CONFIG } from '../ottehr-config/intake-paperwork';
 
@@ -18,9 +19,6 @@ export const getIntakeFormPageSubtitle = (
 ): string => {
   if (config.getIntakeFormPageSubtitle) {
     return config.getIntakeFormPageSubtitle(pageLinkId, patientName);
-  }
-  if (pageLinkId === 'photo-id-page') {
-    return `Adult Guardian for ${patientName}`;
   }
   return patientName;
 };

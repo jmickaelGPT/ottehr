@@ -2,7 +2,11 @@ import { BrowserContext, expect, Locator, Page, test } from '@playwright/test';
 import { DateTime } from 'luxon';
 import { dataTestIds } from 'src/constants/data-test-ids';
 import { HospitalizationOptions } from 'src/features/visits/in-person/components/hospitalization/hospitalizationOptions';
-import { clickAndWaitForChartDataDeletion, waitForChartDataDeletion, waitForSaveChartDataResponse } from 'test-utils';
+import {
+  clickAndWaitForChartDataDeletion,
+  waitForChartDataDeletion,
+  waitForSaveChartDataResponse,
+} from 'test-utils/lib/e2e/response-utils';
 import { HospitalizationPage } from 'tests/e2e/page/HospitalizationPage';
 import { InPersonAssessmentPage } from 'tests/e2e/page/in-person/InPersonAssessmentPage';
 import { expectExamPage } from 'tests/e2e/page/in-person/InPersonExamsPage';
@@ -20,6 +24,7 @@ import { VitalsPage } from 'tests/e2e/page/VitalsPage';
 import {
   captureAllCheckboxStates,
   ComponentTestResult,
+  normalFindingCheckboxes,
   testCheckboxComponent,
   testDropdownComponent,
   testFormComponent,
@@ -27,14 +32,11 @@ import {
   testTextComponent,
   waitForFieldSave,
 } from 'tests/e2e-utils/helpers/exam-tab.test-helpers';
-import {
-  chooseJson,
-  DEFAULT_PROGRESS_NOTE_CONFIG,
-  getFirstName,
-  getLastName,
-  ProgressNoteConfig,
-  PROVIDER_CONFIG,
-} from 'utils';
+import { getFirstName, getLastName } from 'utils/lib/fhir/patient';
+import { chooseJson } from 'utils/lib/helpers/oystehrApi';
+import { PROVIDER_CONFIG } from 'utils/lib/ottehr-config/provider';
+import { ProgressNoteConfig } from 'utils/lib/types/api/progress-note-config/progress-note-config.types';
+import { DEFAULT_PROGRESS_NOTE_CONFIG } from 'utils/lib/utils/progress-note-config';
 import { ResourceHandler } from '../../../e2e-utils/resource-handler';
 import { AllergiesPage, expectAllergiesPage } from '../../page/in-person/AllergiesPage';
 
@@ -65,6 +67,9 @@ const HEARTBEAT_BPM = '75';
 const RESPIRATION_RATE = '16';
 const BLOOD_PRESSURE_SYSTOLIC = '120';
 const BLOOD_PRESSURE_DIASTOLIC = '80';
+const BLOOD_PRESSURE_SYSTOLIC_INVALID = '110';
+const BLOOD_PRESSURE_DIASTOLIC_INVALID = '115';
+const INVALID_BLOOD_PRESSURE_MESSAGE = /Diastolic value cannot be greater than or equal to Systolic value/;
 const OXYGEN_SAT = '98';
 const WEIGHT_KG = '70';
 const HEIGHT_CM = '175';
@@ -112,7 +117,9 @@ test.describe('In-Person Visit Chart Data', async () => {
   let context: BrowserContext;
 
   test.beforeAll(async ({ browser }) => {
-    await resourceHandler.setResources();
+    // Chart data only; nothing here reads a paperwork-derived field, and submitting paperwork
+    // costs ~12s of sequential patches and polling per appointment.
+    await resourceHandler.setResources({ skipPaperwork: true });
     await resourceHandler.waitTillAppointmentPreprocessed(resourceHandler.appointment.id!);
 
     const oystehr = await ResourceHandler.getOystehr();
@@ -215,6 +222,11 @@ test.describe('In-Person Visit Chart Data', async () => {
           await vitalsPage.addRespirationRateObservation(RESPIRATION_RATE);
         });
         await test.step('VIT-1.4 Add blood pressure observation', async () => {
+          await vitalsPage.expectInvalidBloodPressureError(
+            BLOOD_PRESSURE_SYSTOLIC_INVALID,
+            BLOOD_PRESSURE_DIASTOLIC_INVALID,
+            INVALID_BLOOD_PRESSURE_MESSAGE
+          );
           await vitalsPage.addBloodPressureObservation(BLOOD_PRESSURE_SYSTOLIC, BLOOD_PRESSURE_DIASTOLIC);
         });
         await test.step('VIT-1.5 Add oxygen saturation observation', async () => {
@@ -545,11 +557,11 @@ test.describe('In-Person Visit Chart Data', async () => {
       await mdmDeleted;
 
       // MDM is stored as a ClinicalImpression and read back through an eventually-consistent FHIR
-      // search. The delete request has returned, but get-chart-data can still surface the old value
+      // search. The delete request has returned, but the chart read can still surface the old value
       // for a short window. The Review & Sign page does a single chart-fields fetch with no retry,
       // so navigating too early reads the stale MDM and the "Medical decision making" missing-field
       // link never renders. Wait until the deletion is actually reflected by reloading the
-      // assessment page until the MDM field reads back empty (i.e. get-chart-data is consistent).
+      // assessment page until the MDM field reads back empty (i.e. the chart read is consistent).
       await expect(async () => {
         await page.reload();
         const mdmTextarea = page
@@ -571,7 +583,6 @@ test.describe('In-Person Visit Chart Data', async () => {
         } else {
           await expect(page.getByTestId(dataTestIds.progressNotePage.medicalDecisionLink)).not.toBeVisible();
         }
-        await expect(page.getByTestId(dataTestIds.progressNotePage.medicalDecisionLink)).toBeVisible();
         await expect(page.getByTestId(dataTestIds.progressNotePage.primaryDiagnosisLink)).toBeVisible();
         await expect(page.getByTestId(dataTestIds.progressNotePage.hpiLink)).toBeVisible();
       });
@@ -919,7 +930,7 @@ test.describe('In-Person Visit Chart Data', async () => {
           preReloadAbnormalStates.push(await abnormalCheckboxes.nth(i).isChecked());
         }
 
-        const normalCheckboxes = normalCell.getByRole('checkbox');
+        const normalCheckboxes = normalFindingCheckboxes(normalCell);
         const normalCount = await normalCheckboxes.count();
         for (let i = 0; i < normalCount; i++) {
           preReloadNormalStates.push(await normalCheckboxes.nth(i).isChecked());
@@ -944,7 +955,7 @@ test.describe('In-Person Visit Chart Data', async () => {
         const normalCell = row.getByRole('cell').nth(1);
 
         const abnormalCheckboxes = abnormalCell.getByRole('checkbox');
-        const normalCheckboxes = normalCell.getByRole('checkbox');
+        const normalCheckboxes = normalFindingCheckboxes(normalCell);
 
         // Verify ALL abnormal checkboxes match expected states IN THE TESTED ROW
         const abnormalCount = await abnormalCheckboxes.count();

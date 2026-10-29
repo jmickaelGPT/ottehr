@@ -7,10 +7,6 @@ import {
   QuestionnaireDataTypeSchema,
 } from './questionnaire';
 
-// Re-export for convenience
-export { FormFieldTriggerSchema } from './questionnaire';
-export type { FormFieldTrigger } from './questionnaire';
-
 /**
  * DynamicPopulation - Configuration for auto-populating fields
  */
@@ -87,7 +83,7 @@ export const FormFieldsValueTypeBaseSchema = z.object({
   triggers: z.array(FormFieldTriggerSchema).optional(),
   dynamicPopulation: DynamicPopulationSchema.optional(),
   enableBehavior: z.enum(['all', 'any']).optional(),
-  disabledDisplay: z.enum(['hidden', 'disabled']).optional(),
+  disabledDisplay: z.enum(['hidden', 'disabled', 'protected']).optional(),
   initialValue: z.union([z.string(), z.boolean()]).optional(),
   inputWidth: z.enum(['s', 'm', 'l']).optional(),
   autocomplete: z.string().optional(),
@@ -99,6 +95,20 @@ export const FormFieldsValueTypeBaseSchema = z.object({
   customLinkId: z.string().optional(),
   categoryTag: z.string().optional(),
   alwaysFilter: z.boolean().optional(),
+  /**
+   * Suppresses the "control label" — the bold-color heading rendered above
+   * the field. When true, only the inline element label (e.g., the text next
+   * to a checkbox) is shown. Common for boolean checkboxes where the label
+   * doubles as the field's user-facing prose ("I agree to...", "I have X").
+   *
+   * Was previously a hardcoded linkId allow-list in
+   * `apps/intake/src/features/paperwork/useStyleItems.tsx` — this field is
+   * the extension-based replacement. The intake styler still consults the
+   * hardcoded list as a fallback for questionnaire archives generated
+   * before the extension existed; new questionnaires should set this
+   * directly on the config.
+   */
+  hideControlLabel: z.boolean().optional(),
   answerDisplayFilters: z
     .array(
       z.object({
