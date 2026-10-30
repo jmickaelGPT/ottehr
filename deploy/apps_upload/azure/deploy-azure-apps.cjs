@@ -1,5 +1,5 @@
 const { spawnSync } = require('node:child_process');
-const { existsSync, mkdirSync } = require('node:fs');
+const { copyFileSync, existsSync, mkdirSync } = require('node:fs');
 const https = require('node:https');
 const { join, resolve } = require('node:path');
 
@@ -7,11 +7,13 @@ const rootDir = resolve(__dirname, '..', '..', '..');
 
 const envArg = process.argv[2];
 if (!envArg || !['dev', 'beta', 'production'].includes(envArg)) {
-  console.error('Usage: node deploy/apps_upload/azure/deploy-azure-apps.cjs <dev|beta|production>');
+  console.error('Usage: node deploy/apps_upload/azure/deploy-azure-apps.cjs <dev|beta|production> [--no-deploy]');
   process.exit(1);
 }
 
 const billingOnly = String(process.env.BILLING_ONLY || '').toLowerCase() === 'true';
+const noDeploy = process.argv.includes('--no-deploy');
+const subscription = process.env.AZURE_SUBSCRIPTION_ID || '58708d34-f80d-4f94-b0a2-0eb93fc308bb';
 
 const modeByEnv = {
   dev: 'azure-dev',
@@ -115,9 +117,14 @@ function zipBuild(app) {
   mkdirSync(zipDir, { recursive: true });
 
   const sourceDir = join(rootDir, 'apps', app, 'build');
-  if (!existsSync(sourceDir)) {
+  if (!existsSync(join(sourceDir, 'index.html'))) {
     console.error(`Build output not found for ${app}: ${sourceDir}`);
     process.exit(1);
+  }
+
+  const webConfigPath = join(sourceDir, 'web.config');
+  if (!existsSync(webConfigPath)) {
+    copyFileSync(join(__dirname, 'web.config'), webConfigPath);
   }
 
   const zipPath = join(zipDir, `${app}-${envArg}.zip`);
@@ -147,6 +154,8 @@ function deployBuildToWebApp(app, zipPath) {
     webAppName,
     '--resource-group',
     resourceGroup,
+    '--subscription',
+    subscription,
     '--src-path',
     zipPath,
     '--type',
@@ -214,7 +223,9 @@ async function main() {
   if (billingOnly) {
     console.log('Deploying billing only.');
   }
-  await runCanonicalDomainPreflight();
+  if (!noDeploy) {
+    await runCanonicalDomainPreflight();
+  }
 
   run('npm', ['run', 'build:azure:all', '--', envMode]);
 
@@ -223,6 +234,11 @@ async function main() {
     zipped[app] = zipBuild(app);
   }
   console.log('Created zip artifacts:', zipped);
+
+  if (noDeploy) {
+    console.log('Build and packaging completed. No Azure resources were changed.');
+    return;
+  }
 
   for (const app of targetApps) {
     deployBuildToWebApp(app, zipped[app]);

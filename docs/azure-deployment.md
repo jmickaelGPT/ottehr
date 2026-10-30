@@ -16,6 +16,9 @@ az account show --query "{name:name, subscriptionId:id}" --output table
 
 Azure builds fail before compilation when their environment file is missing or contains unresolved placeholders.
 
+The nine existing targets are Windows App Service Web Apps. Deployment uses static ZIP artifacts, not Docker images.
+The production environment is named `production` in npm scripts and environment filenames.
+
 ## Required Azure Web App Variables
 
 The deploy script targets Azure Web Apps and can infer default app names. You can override names with env vars:
@@ -39,6 +42,9 @@ Production:
 - AZURE_WEBAPP_RESOURCE_GROUP_PRODUCTION (optional, defaults to IHA-Web-RG)
 
 Deploy uses `az webapp deploy --type zip` for each app.
+
+Uploads explicitly target subscription `58708d34-f80d-4f94-b0a2-0eb93fc308bb`. Set `AZURE_SUBSCRIPTION_ID` to override it.
+The script does not change application settings, DNS, authentication registrations, or local environment files.
 
 ## Startup Commands
 
@@ -73,6 +79,19 @@ npm run billing:build:azure:production
 
 ## Deploy Commands
 
+Build and validate packaging without uploading:
+
+```powershell
+npm run deploy:azure:dev -- --no-deploy
+npm run deploy:azure:beta -- --no-deploy
+npm run deploy:azure:production -- --no-deploy
+```
+
+Each ZIP must contain `index.html` and `web.config` at its root. If the app build does not provide its own
+`web.config`, packaging adds the shared IIS configuration from `deploy/apps_upload/azure/web.config`.
+This enables React deep-route navigation while keeping missing `/assets/` requests as HTTP 404 responses.
+Existing app-provided IIS configuration is retained.
+
 Build + zip + upload all three apps:
 
 ```powershell
@@ -96,12 +115,27 @@ Billing-only deployments target:
 
 ## Canonical App URLs
 
-Use these as the public-facing app URLs in dev:
-- EHR: https://ehr.ottehrdev.innovarehealth.net
-- Intake: https://intake.ottehrdev.innovarehealth.net
-- Billing: https://billing.ottehrdev.innovarehealth.net
+| Environment | EHR | Intake | Billing |
+| --- | --- | --- | --- |
+| Dev | https://ehr.ottehrdev.innovarehealth.net | https://intake.ottehrdev.innovarehealth.net | https://billing.ottehrdev.innovarehealth.net |
+| Beta | https://ehr.ottehrbeta.innovarehealth.net | https://intake.ottehrbeta.innovarehealth.net | https://billing.ottehrbeta.innovarehealth.net |
+| Production | https://ehr.ottehr.innovarehealth.net | https://intake.ottehr.innovarehealth.net | https://billing.ottehr.innovarehealth.net |
 
 Note: this deploy flow targets Azure App Service (Web Apps). Ensure your canonical DNS hostnames are mapped to the corresponding web apps.
+
+After each deployment, verify the Azure hostname and canonical hostname serve the built `index.html`, a deep route
+returns the same HTML, the main JavaScript asset returns HTTP 200 with a JavaScript content type, and a missing asset
+returns HTTP 404. Stop a rollout if these checks fail. Authenticated application workflows require separate testing.
+
+## Auth0 Connection Errors
+
+If the login callback reports `invalid_request` with `the connection is not enabled`, check
+`VITE_APP_OYSTEHR_CONNECTION_NAME` against the connections enabled for that environment's Auth0 client.
+The connection name is not necessarily the Azure Web App name or the application display name.
+
+Changing this build-time setting requires rebuilding and redeploying the affected app. Azure application settings
+alone do not replace values already compiled into a Vite frontend. Start a fresh login from the app's root URL rather
+than reusing a callback URL containing an old error and transaction state.
 
 ## GitHub Actions Example
 
